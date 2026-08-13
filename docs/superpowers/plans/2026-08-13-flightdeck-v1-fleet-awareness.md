@@ -2,29 +2,35 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn Row 1 of a Stream Deck XL into a live, ambient view of every running Claude Code agent — colour is state, label is repo and task, press focuses that session, long-press tears it down under guard.
+**Goal:** Turn Row 1 of a Stream Deck XL into a live, ambient annunciator panel for every running Claude Code agent — colour is state, label is repo and task, press focuses that session, long-press tears it down under guard.
 
-**Architecture:** Claude Code hooks write one JSON file per agent into `~/.fleet/sessions/`. A shell script (`fleet-reconcile`) turns those files into a sticky slot→agent map at `~/.fleet/slots.json`. A deliberately dumb Stream Deck plugin watches that one file, paints eight keys, and shells out to `bin/fleet-press` on input. All decision logic lives in shell scripts editable without a rebuild.
+**Architecture:** Claude Code hooks write one JSON file per agent into `~/.fleet/sessions/`. `fleet-reconcile` turns those files into a sticky slot→agent map at `~/.fleet/slots.json`. A deliberately dumb Stream Deck plugin watches that one file, paints eight keys, and shells out to `bin/fleet-press` on input. All decision logic lives in Python scripts editable without a rebuild.
 
-**Tech Stack:** bash 3.2, jq 1.7, osascript (iTerm2 AppleScript), launchd, Node 23 + TypeScript + `@elgato/streamdeck` SDK v2. Tested with bats-core 1.14, linted with shellcheck 0.11.
+**Tech Stack:** Python 3.9-compatible (stdlib only), osascript (iTerm2 AppleScript), launchd, Node 23 + TypeScript + `@elgato/streamdeck` SDK v2. Tested with bats-core 1.14; `install.sh` linted with shellcheck 0.11.
 
 **Spec:** `docs/superpowers/specs/2026-08-13-streamdeck-fleet-design.md`
 
 ## Global Constraints
 
-- **bash 3.2 only, deliberately.** macOS ships bash 3.2.57 (frozen in 2007 over GPLv3). No associative arrays (`declare -A`), no `mapfile`/`readarray`, no `${var^^}`/`${var,,}`, no `&>>`. Use `jq` for anything resembling a data structure.
-
-  **Do not "fix" this by installing a newer bash.** `launchctl getenv PATH` is unset on this machine, so a LaunchAgent runs with the bare `/usr/bin:/bin:/usr/sbin:/sbin`. If a brew bash existed, `#!/usr/bin/env bash` would resolve to 5.x in your terminal and 3.2 under launchd — the reaper would silently run a different interpreter than every test. Targeting 3.2 everywhere removes that split. Nothing in this plan needs bash 4+ anyway, because jq holds the data.
-
-- **Dev tooling (not runtime):** `shellcheck` 0.11.0 and `bats-core` 1.14.0, both installed via brew. The **runtime** stays dependency-free — `git clone && ./install.sh` must work on a machine with no brew. Tests and linting may assume brew; the shipped system may not.
-- **Hooks always `exit 0`.** No hook may ever fail, hang, or emit to stdout. A bug in this project must never break a real agent. Errors go to `~/.fleet/fleet.log` only.
-- **All writes atomic.** Write to `$file.tmp.$$` then `mv` into place. The plugin must never read a partial file.
-- **Exactly five hooks:** `SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `SessionEnd`. **Never** `PreToolUse` or `PostToolUse` — they fire per tool call and would tax every agent action.
+- **Python 3.9 syntax, standard library only.** No third-party packages, no venv, no `jq`. 3.9 is the floor because CommandLineTools ships 3.9.6 and that is what launchd resolves to. Avoid `match`, and `X | Y` in annotations. `dict1 | dict2` merging is fine (3.9+).
+- **Interpreter pinning is mandatory.** This machine has four `python3` on `PATH`: an interactive shell gets Homebrew 3.13.5, launchd gets CommandLineTools 3.9.6. Scripts keep `#!/usr/bin/env python3` in the repo so the tree stays clean, and **every automated caller is pinned to an absolute path**: hooks in `settings.json`, the launchd plist, and the plugin (which reads the path from `~/.fleet/interpreter`, written by `install.sh`).
+- **Hooks always exit 0.** No hook may fail, hang, or write to stdout. A bug here must never break a real agent. Errors go to `~/.fleet/fleet.log` only.
+- **All writes atomic.** Write to a temp file in the same directory, then `os.replace()`. The plugin must never read a partial file.
+- **Exactly five hooks:** `SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `SessionEnd`. **Never** `PreToolUse`/`PostToolUse` — they fire per tool call and would tax every agent action.
+- **`subprocess` is always called with a list, never `shell=True`.** This is what structurally eliminates the word-splitting risk in `fleet-kill`; a repo path containing a space must never become two arguments.
 - **All state under `~/.fleet/`.** Identical path on every machine.
-- **No new runtime dependencies.** `jq`, `osascript`, `git`, `node` only. No brew installs required to run or test.
 - **Node ≥ 20** for the plugin (machine has v23.11.0). **Claude Code ≥ 2.1.91** for deep links (machine has 2.1.231).
 - **Never build a `claude-cli://` link from untrusted input.** Literals in `fleet.local.json` only. A patched RCE smuggled `--settings` through the `q` parameter.
 - **`config/fleet.local.json` is gitignored** and holds only pins and the vault path.
+
+### Visual constraints (from the UX design)
+
+- **Background colour is exclusively lifecycle state.** No repo colours, no emoji, no gradients, no nested chrome, no ornamental borders.
+- **Red is exclusively observed failure.** Never for pending confirmation. The armed state is near-black with an amber warning triangle.
+- **Glyphs are SVG geometry, never `<text>`.** Helvetica lacks U+25B2/U+25B6, so text glyphs would fall back to an arbitrary font with different metrics, or fail to render.
+- **Empty is fully black with no content.** Absence should look absent.
+- **Labels shorten token-aware, never blind truncation.**
+- **No animation in v1.**
 
 ---
 
@@ -32,7 +38,7 @@
 
 Everything downstream assumes five hook names and their payload shapes. The `claude` binary is compiled and could not be inspected. **This task is a gate: do not start Task 3 until `docs/hook-contract.md` exists.**
 
-The probe must be scoped to this repo only, so it cannot disturb the agents already running on this machine.
+The probe is scoped to this repo only, so it cannot disturb the agents already running on this machine.
 
 **Files:**
 - Create: `.claude/settings.json` (project-scoped, temporary probe config)
@@ -45,11 +51,13 @@ The probe must be scoped to this repo only, so it cannot disturb the agents alre
 
 - [ ] **Step 1: Write the probe script**
 
+Shell is fine here — this is a throwaway dumper that never ships.
+
 Create `tools/probe-hook.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Dumps a hook's stdin payload for contract discovery. Never fails.
+# Dumps a hook's stdin payload for contract discovery. Never fails. Throwaway.
 set -u
 OUT="${HOME}/.fleet-probe"
 mkdir -p "$OUT" 2>/dev/null
@@ -72,7 +80,7 @@ chmod +x tools/probe-hook.sh
 
 - [ ] **Step 2: Register all five hooks, scoped to this repo only**
 
-Create `.claude/settings.json`. Because it is project-scoped it applies only to sessions started inside `~/code/flightdeck`, leaving the other running agents untouched.
+Create `.claude/settings.json`. Being project-scoped it applies only to sessions started inside `~/code/flightdeck`, leaving your other running agents untouched.
 
 ```json
 {
@@ -100,11 +108,11 @@ In a **new** terminal window:
 cd ~/code/flightdeck && claude
 ```
 
-Then, in that session, drive each transition deliberately:
-1. Session start happens on launch → expect `SessionStart`.
+Drive each transition deliberately:
+1. Launch → expect `SessionStart`.
 2. Submit any prompt, e.g. `list the files here` → expect `UserPromptSubmit`.
 3. Let it finish → expect `Stop`.
-4. Ask it to run a command needing approval, e.g. `run: rm -i /tmp/nonexistent-flightdeck-probe` → **expect `Notification` when the permission prompt appears.** This is the critical one.
+4. Ask for something needing approval, e.g. `run: rm -i /tmp/nonexistent-flightdeck-probe` → **expect `Notification` when the permission prompt appears.** This is the critical one.
 5. `/exit` → expect `SessionEnd`.
 
 - [ ] **Step 4: Record the contract**
@@ -130,23 +138,30 @@ git commit -m "docs: record verified Claude Code hook contract"
 
 ---
 
-### Task 2: Repo scaffold, test harness, and config loader
+### Task 2: Scaffold, shared library, and test harness
 
 **Files:**
 - Create: `.gitignore`, `config/fleet.json`, `config/fleet.local.example.json`
-- Create: `bin/fleet-config`
-- Create: `tests/run.sh`, `tests/config.bats`
+- Create: `bin/fleetlib.py`, `bin/fleet-config`
+- Create: `tests/run.sh`, `tests/config.bats`, `tests/labels.bats`
 
 **Interfaces:**
 - Consumes: nothing
 - Produces:
-  - `bin/fleet-config` — prints merged config JSON to stdout. Env override `FLEET_CONFIG_DIR` selects the config directory (used by tests).
-  - `tests/run.sh` — the single entry point: runs shellcheck over `bin/` then the whole bats suite. Every later task's verification step calls it.
-  - `FLEET_HOME` env var, defaulting to `$HOME/.fleet`, honoured by **every** script in `bin/`. Tests set it to bats' per-test temp dir.
+  - `bin/fleetlib.py` — the shared module every script imports. Public surface:
+    - `fleet_home() -> Path`, `sessions_dir()`, `slots_path()`, `armed_path()`, `events_path()`, `log_path()`
+    - `load_config() -> dict` (layered, `FLEET_CONFIG_DIR` honoured)
+    - `read_json(path, default=None)`, `write_json_atomic(path, obj)`, `append_jsonl(path, obj)`
+    - `log(msg)`
+    - `shorten(text, max_chars, strip_prefixes) -> str`
+    - `git(args, cwd) -> (returncode, stdout)`
+  - `bin/fleet-config` — prints merged config JSON; `--shorten TEXT [MAX]` exposes the label rule for testing and hand inspection.
+  - `tests/run.sh` — single entry point: lints `install.sh` with shellcheck, then runs the bats suite.
+  - `FLEET_HOME` env var, defaulting to `~/.fleet`, honoured by **every** script.
 
-**Test conventions used by every task from here on.** bats gives each `@test` a fresh `$BATS_TEST_TMPDIR`, so tests are isolated by construction and never need manual cleanup. `run <cmd>` captures `$status` and `$output`. A test that asserts an *ordered sequence* (slot stickiness, arm-then-confirm) keeps the whole sequence inside one `@test`, because state must not leak between tests.
+**Test conventions used by every task from here on.** bats gives each `@test` a fresh `$BATS_TEST_TMPDIR`, so tests are isolated by construction. `run <cmd>` captures `$status` and `$output`. A test asserting an *ordered sequence* (slot stickiness, arm-then-confirm) keeps the whole sequence inside one `@test`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `tests/config.bats`:
 
@@ -159,14 +174,14 @@ setup() {
   export FLEET_CONFIG_DIR="$BATS_TEST_TMPDIR/config"
   mkdir -p "$FLEET_CONFIG_DIR"
   cat >"$FLEET_CONFIG_DIR/fleet.json" <<'EOF'
-{"slots":{"count":8},"timings":{"armMs":3000},"states":{"idle":{"color":"#4A4A4A"}}}
+{"slots":{"count":8},"timings":{"armMs":3000},"states":{"idle":{"color":"#25282D"}}}
 EOF
 }
 
 @test "base config is returned when no local file exists" {
   run "$BIN/fleet-config"
   [ "$status" -eq 0 ]
-  [ "$(echo "$output" | jq -r '.slots.count')" = "8" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys;print(json.load(sys.stdin)["slots"]["count"])')" = "8" ]
 }
 
 @test "local config deep-merges without clobbering siblings" {
@@ -175,52 +190,105 @@ EOF
 EOF
   run "$BIN/fleet-config"
   [ "$status" -eq 0 ]
-  [ "$(echo "$output" | jq -r '.timings.armMs')"     = "5000" ]
-  [ "$(echo "$output" | jq -r '.pins["7"].app')"     = "ChatGPT" ]
-  [ "$(echo "$output" | jq -r '.slots.count')"       = "8" ]
-  [ "$(echo "$output" | jq -r '.states.idle.color')" = "#4A4A4A" ]
+  py() { echo "$output" | python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
+  [ "$(py 'd["timings"]["armMs"]')"      = "5000" ]
+  [ "$(py 'd["pins"]["7"]["app"]')"      = "ChatGPT" ]
+  [ "$(py 'd["slots"]["count"]')"        = "8" ]
+  [ "$(py 'd["states"]["idle"]["color"]')" = "#25282D" ]
 }
 
 @test "malformed local config falls back to base instead of emitting garbage" {
   printf '{ this is not json' >"$FLEET_CONFIG_DIR/fleet.local.json"
   run "$BIN/fleet-config"
   [ "$status" -eq 0 ]
-  [ "$(echo "$output" | jq -r '.slots.count')" = "8" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys;print(json.load(sys.stdin)["slots"]["count"])')" = "8" ]
 }
 
 @test "missing base config emits valid empty JSON rather than nothing" {
   rm -f "$FLEET_CONFIG_DIR/fleet.json"
   run "$BIN/fleet-config"
   [ "$status" -eq 0 ]
-  [ "$(echo "$output" | jq -r 'type')" = "object" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys;print(type(json.load(sys.stdin)).__name__)')" = "dict" ]
+}
+```
+
+Create `tests/labels.bats`. These assert the exact worked examples in the spec:
+
+```bash
+#!/usr/bin/env bats
+
+setup() {
+  ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  BIN="$ROOT/bin"
+  export FLEET_CONFIG_DIR="$ROOT/config"
+}
+
+short() { "$BIN/fleet-config" --shorten "$1" "${2:-11}"; }
+
+@test "an already-short label is unchanged" {
+  [ "$(short flightdeck)" = "flightdeck" ]
+}
+
+@test "a single long token is truncated" {
+  [ "$(short averyverylongsingletoken)" = "averyverylo" ]
+}
+
+@test "keeps first and last token, trimming the longer one" {
+  [ "$(short break-state-exit-handling)" = "break-handl" ]
+}
+
+@test "protects the last token when the first already fits" {
+  [ "$(short agent-hook-notification)" = "agent-notif" ]
+}
+
+@test "strips known branch prefixes before shortening" {
+  [ "$(short feat/stream-deck-renderer)" = "strea-rende" ]
+}
+
+@test "splits on underscores and slashes as well as hyphens" {
+  [ "$(short my_module/deep_nested_thing)" = "my-thing" ]
+}
+
+@test "empty input yields empty output" {
+  [ -z "$(short '')" ]
+}
+
+@test "output never exceeds the maximum" {
+  result="$(short some-extremely-long-branch-name-here 11)"
+  [ "${#result}" -le 11 ]
 }
 ```
 
 - [ ] **Step 2: Write the test entry point**
 
-Create `tests/run.sh`. Linting runs *first* — a shellcheck failure should stop the suite before test output buries it.
+Create `tests/run.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Single entry point: lint every script, then run the bats suite.
+# Single entry point: lint shell bootstrap, compile-check Python, run bats.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 rc=0
 
-printf '== shellcheck ==\n'
-# Build the file list from what actually exists, so this works from the very
-# first task (when bin/ holds one script) through to the last.
+printf '== shellcheck (bootstrap shell only) ==\n'
 targets=""
-for f in "$ROOT"/bin/* "$ROOT"/install.sh "$ROOT"/tools/*.sh; do
+for f in "$ROOT"/install.sh "$ROOT"/tools/*.sh; do
   [ -f "$f" ] && targets="$targets $f"
 done
-
 if [ -z "$targets" ]; then
   printf 'nothing to lint yet\n'
-# -s bash pins the dialect; every script must be valid bash 3.2.
+# shellcheck disable=SC2086  # $targets is intentionally a word list of paths
 elif shellcheck -s bash -S warning $targets; then
   printf 'clean\n'
 else
+  rc=1
+fi
+
+printf '\n== python syntax ==\n'
+if python3 -m compileall -q "$ROOT/bin" >/dev/null 2>&1; then
+  printf 'clean\n'
+else
+  python3 -m compileall -q "$ROOT/bin"
   rc=1
 fi
 
@@ -234,41 +302,224 @@ exit "$rc"
 chmod +x tests/run.sh
 ```
 
-`$targets` is intentionally unquoted — it is a word list, and shellcheck's SC2086 warning is expected here. Add `# shellcheck disable=SC2086` above that line with a comment explaining why, per the suppression rule below.
+`compileall` is a cheap syntax gate that catches typos before bats runs a script and reports a confusing runtime failure. It is not a linter — correctness lives in the tests.
 
-The glob is built from what exists rather than a fixed list, so scripts added in later tasks are linted automatically and no plan step can forget one.
-
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `./tests/run.sh`
-Expected: FAIL — bats reports all four `config.bats` tests failing because `bin/fleet-config` does not exist.
+Expected: FAIL — all 12 tests fail because `bin/fleet-config` does not exist.
 
-- [ ] **Step 4: Write `bin/fleet-config`**
+- [ ] **Step 4: Write `bin/fleetlib.py`**
 
-```bash
-#!/usr/bin/env bash
-# Prints merged configuration JSON. Base <- local. Malformed local is ignored.
-set -u
-DIR="${FLEET_CONFIG_DIR:-$(cd "$(dirname "$0")/../config" && pwd)}"
-BASE="$DIR/fleet.json"
-LOCAL="$DIR/fleet.local.json"
+```python
+"""Shared helpers for flightdeck. Standard library only, Python 3.9 compatible."""
 
-[ -f "$BASE" ] || { printf '{}\n'; exit 0; }
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
 
-if [ -f "$LOCAL" ] && jq -e . "$LOCAL" >/dev/null 2>&1; then
-  jq -s '.[0] * .[1]' "$BASE" "$LOCAL"
-else
-  cat "$BASE"
-fi
+# --- paths -----------------------------------------------------------------
+
+def fleet_home():
+    return Path(os.environ.get("FLEET_HOME") or (Path.home() / ".fleet"))
+
+def sessions_dir():
+    return fleet_home() / "sessions"
+
+def slots_path():
+    return fleet_home() / "slots.json"
+
+def armed_path():
+    return fleet_home() / "armed.json"
+
+def events_path():
+    return fleet_home() / "events.jsonl"
+
+def log_path():
+    return fleet_home() / "fleet.log"
+
+def repo_root():
+    return Path(__file__).resolve().parent.parent
+
+def config_dir():
+    env = os.environ.get("FLEET_CONFIG_DIR")
+    return Path(env) if env else repo_root() / "config"
+
+# --- logging ---------------------------------------------------------------
+
+def log(message):
+    """Best-effort logging. Never raises — callers may be inside a hook."""
+    try:
+        fleet_home().mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(log_path(), "a", encoding="utf-8") as handle:
+            handle.write("{} {}\n".format(stamp, message))
+    except Exception:
+        pass
+
+# --- json io ---------------------------------------------------------------
+
+def read_json(path, default=None):
+    """Returns default on any failure, including a partially written file."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return default
+
+def write_json_atomic(path, obj):
+    """Writes via a temp file in the same directory, then os.replace()."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, separators=(",", ":"))
+        os.replace(tmp, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
+def append_jsonl(path, obj):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+# --- config ----------------------------------------------------------------
+
+def deep_merge(base, over):
+    out = dict(base)
+    for key, value in over.items():
+        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+def load_config():
+    base = read_json(config_dir() / "fleet.json", {}) or {}
+    local = read_json(config_dir() / "fleet.local.json", {}) or {}
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(local, dict):
+        local = {}
+    return deep_merge(base, local)
+
+# --- labels ----------------------------------------------------------------
+
+DEFAULT_PREFIXES = ("feat/", "fix/", "chore/", "feature/")
+
+def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
+    """Token-aware shortening.
+
+    Blind truncation destroys the distinguishing part of a name:
+    break-state-exit-handling and break-state-entry-handling both truncate
+    to 'break-state'. So keep the first and last tokens and trim whichever
+    is currently longer, tie-breaking toward trimming the first -- the last
+    token is usually what distinguishes sibling branches.
+    """
+    text = (text or "").strip()
+    for prefix in strip_prefixes or ():
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+
+    tokens = [t for t in re.split(r"[-_/]+", text) if t]
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return tokens[0][:max_chars]
+
+    joined = "-".join(tokens)
+    if len(joined) <= max_chars:
+        return joined
+
+    first, last = tokens[0], tokens[-1]
+    while len(first) + len(last) + 1 > max_chars:
+        if len(first) >= len(last):
+            if len(first) <= 1:
+                break
+            first = first[:-1]
+        else:
+            if len(last) <= 1:
+                break
+            last = last[:-1]
+    return (first + "-" + last)[:max_chars]
+
+# --- process ---------------------------------------------------------------
+
+def git(args, cwd):
+    """Runs git with an argument LIST -- never a shell string.
+
+    This is what makes a repo path containing a space safe.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd)] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8", "replace").strip()
+    except Exception:
+        return 1, ""
+
+def add_bin_to_path():
+    """Lets sibling scripts `import fleetlib` regardless of cwd."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+```
+
+- [ ] **Step 5: Write `bin/fleet-config`**
+
+```python
+#!/usr/bin/env python3
+"""Prints merged configuration, or exercises the label rule.
+
+  fleet-config                      -> merged config JSON
+  fleet-config --shorten TEXT [MAX] -> the deck label for TEXT
+"""
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[1] == "--shorten":
+        text = argv[2] if len(argv) > 2 else ""
+        max_chars = int(argv[3]) if len(argv) > 3 else 11
+        cfg = fleetlib.load_config()
+        prefixes = cfg.get("labels", {}).get("stripPrefixes", fleetlib.DEFAULT_PREFIXES)
+        print(fleetlib.shorten(text, max_chars, prefixes))
+        return 0
+
+    print(json.dumps(fleetlib.load_config(), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
 ```
 
 ```bash
 chmod +x bin/fleet-config
 ```
 
-- [ ] **Step 5: Write the real config files**
+- [ ] **Step 6: Write the config files**
 
-Create `config/fleet.json`:
+Create `config/fleet.json`. Colours and glyph names come from the UX design; `glyphColor` and `textColor` exist because white text on `#F5A623` amber has poor contrast.
 
 ```json
 {
@@ -276,13 +527,13 @@ Create `config/fleet.json`:
   "timings": { "armMs": 3000, "longPressMs": 800, "reaperSeconds": 15 },
   "labels": { "maxChars": 11, "stripPrefixes": ["feat/", "fix/", "chore/", "feature/"] },
   "states": {
-    "blocked": { "color": "#F5A623", "glyph": "▲" },
-    "working": { "color": "#1F4FD8", "glyph": "●" },
-    "done":    { "color": "#2E9E4F", "glyph": "✓" },
-    "idle":    { "color": "#3A3A3A", "glyph": "·" },
-    "failed":  { "color": "#C62828", "glyph": "✕" },
-    "empty":   { "color": "#101010", "glyph": "" },
-    "armed":   { "color": "#C62828", "glyph": "⚠" }
+    "blocked": { "color": "#F5A623", "glyph": "blocked", "glyphColor": "#1A1200", "textColor": "#1A1200" },
+    "working": { "color": "#1256A3", "glyph": "working", "glyphColor": "#FFFFFFCC", "textColor": "#FFFFFF" },
+    "done":    { "color": "#238636", "glyph": "done",    "glyphColor": "#FFFFFFEE", "textColor": "#FFFFFF" },
+    "idle":    { "color": "#25282D", "glyph": "idle",    "glyphColor": "#FFFFFF55", "textColor": "#FFFFFF99" },
+    "failed":  { "color": "#B42318", "glyph": "failed",  "glyphColor": "#FFFFFFEE", "textColor": "#FFFFFF" },
+    "empty":   { "color": "#000000", "glyph": "none",    "glyphColor": "#000000",   "textColor": "#000000" },
+    "armed":   { "color": "#0A0A0A", "glyph": "armed",   "glyphColor": "#F5A623",   "textColor": "#F5A623" }
   }
 }
 ```
@@ -304,21 +555,20 @@ Create `.gitignore`:
 config/fleet.local.json
 plugin/node_modules/
 plugin/*.sdPlugin/bin/
+bin/__pycache__/
 .DS_Store
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck `clean`, then `4 tests, 0 failures`.
+Expected: shellcheck `nothing to lint yet`, python `clean`, then `12 tests, 0 failures`.
 
-If shellcheck flags anything in `fleet-config`, fix it rather than suppressing it. The only legitimate suppressions in this project are `SC1091` (sourcing a file shellcheck cannot follow), and each must carry a comment saying why.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add .gitignore config bin/fleet-config tests
-git commit -m "feat: repo scaffold, bats+shellcheck test entry point, layered config loader"
+git add .gitignore config bin tests
+git commit -m "feat: scaffold, shared library, token-aware label shortening"
 ```
 
 ---
@@ -330,18 +580,18 @@ git commit -m "feat: repo scaffold, bats+shellcheck test entry point, layered co
 - Create: `tests/emit.bats`
 
 **Interfaces:**
-- Consumes: `docs/hook-contract.md` (field names), `FLEET_HOME`
+- Consumes: `docs/hook-contract.md` (field names), `fleetlib`
 - Produces:
-  - `bin/fleet-emit <EventName>` — reads hook JSON on stdin, writes `$FLEET_HOME/sessions/<session_id>.json`, appends to `$FLEET_HOME/events.jsonl`. Always exits 0.
-  - **Session file schema**, relied on by Tasks 4, 6, 7:
+  - `bin/fleet-emit <EventName>` — reads hook JSON on stdin, writes `$FLEET_HOME/sessions/<session_id>.json`, appends to `events.jsonl`. **Always exits 0.**
+  - **Session file schema**, relied on by Tasks 4, 5, 8, 9:
     ```json
     { "session_id": "...", "state": "working", "repo": "flightdeck",
       "branch": "main", "title": "", "cwd": "/abs/path", "host": "iterm2",
       "iterm_session": "UUID", "pid": 1234, "ts": 1755100000 }
     ```
-  - Env override `FLEET_SKIP_RECONCILE=1` suppresses the reconcile call (tests use it).
+  - Env `FLEET_SKIP_RECONCILE=1` suppresses the reconcile call (tests use it).
 
-> **Adjust the stdin field paths below to match `docs/hook-contract.md` from Task 1.** The plan assumes `.session_id` and `.cwd`; if the contract shows different names, change the two `jq -r` extractions and nothing else.
+> **Adjust the payload field names below to match `docs/hook-contract.md` from Task 1.** The plan assumes `session_id` and `cwd`; if the contract differs, change the two `payload.get(...)` lines and nothing else.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -360,27 +610,13 @@ setup() {
 }
 
 emit() { printf '%s' "${2:-$PAYLOAD}" | "$BIN/fleet-emit" "$1"; }
-state() { jq -r .state "$FLEET_HOME/sessions/S1.json"; }
+field() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" \
+            "$FLEET_HOME/sessions/S1.json" "$1"; }
 
-@test "SessionStart maps to idle" {
-  emit SessionStart
-  [ "$(state)" = "idle" ]
-}
-
-@test "UserPromptSubmit maps to working" {
-  emit UserPromptSubmit
-  [ "$(state)" = "working" ]
-}
-
-@test "Notification maps to blocked" {
-  emit Notification
-  [ "$(state)" = "blocked" ]
-}
-
-@test "Stop maps to done" {
-  emit Stop
-  [ "$(state)" = "done" ]
-}
+@test "SessionStart maps to idle" { emit SessionStart; [ "$(field state)" = "idle" ]; }
+@test "UserPromptSubmit maps to working" { emit UserPromptSubmit; [ "$(field state)" = "working" ]; }
+@test "Notification maps to blocked" { emit Notification; [ "$(field state)" = "blocked" ]; }
+@test "Stop maps to done" { emit Stop; [ "$(field state)" = "done" ]; }
 
 @test "SessionEnd removes the session file" {
   emit SessionStart
@@ -390,23 +626,27 @@ state() { jq -r .state "$FLEET_HOME/sessions/S1.json"; }
 }
 
 @test "every event appends one line to the journal spine, removals included" {
-  emit SessionStart
-  emit UserPromptSubmit
-  emit Stop
-  emit SessionEnd
+  emit SessionStart; emit UserPromptSubmit; emit Stop; emit SessionEnd
   [ "$(wc -l <"$FLEET_HOME/events.jsonl" | tr -d ' ')" = "4" ]
-  [ "$(tail -1 "$FLEET_HOME/events.jsonl" | jq -r .event)" = "SessionEnd" ]
+  [ "$(tail -1 "$FLEET_HOME/events.jsonl" | python3 -c 'import json,sys;print(json.load(sys.stdin)["event"])')" = "SessionEnd" ]
 }
 
 @test "iTerm session uuid is captured with its w/t/p prefix stripped" {
   ITERM_SESSION_ID="w1t2p0:ABC-123" emit SessionStart
-  [ "$(jq -r .iterm_session "$FLEET_HOME/sessions/S1.json")" = "ABC-123" ]
-  [ "$(jq -r .host "$FLEET_HOME/sessions/S1.json")" = "iterm2" ]
+  [ "$(field iterm_session)" = "ABC-123" ]
+  [ "$(field host)" = "iterm2" ]
 }
 
 @test "host is unknown when not running under iTerm" {
   ITERM_SESSION_ID="" emit SessionStart
-  [ "$(jq -r .host "$FLEET_HOME/sessions/S1.json")" = "unknown" ]
+  [ "$(field host)" = "unknown" ]
+}
+
+@test "repo and branch are derived from the session cwd" {
+  R="$BATS_TEST_TMPDIR/somerepo"
+  mkdir -p "$R" && git init -q "$R" && git -C "$R" checkout -q -b my-branch 2>/dev/null || true
+  emit SessionStart "{\"session_id\":\"S1\",\"cwd\":\"$R\"}"
+  [ "$(field repo)" = "somerepo" ]
 }
 
 @test "garbage stdin exits 0 and creates no session file" {
@@ -425,6 +665,12 @@ state() { jq -r .state "$FLEET_HOME/sessions/S1.json"; }
   run env FLEET_HOME=/nonexistent/unwritable bash -c "printf '{}' | '$BIN/fleet-emit' Stop"
   [ "$status" -eq 0 ]
 }
+
+@test "a missing session id exits 0 without writing" {
+  run bash -c "printf '{\"cwd\":\"/tmp\"}' | env CLAUDE_CODE_SESSION_ID= '$BIN/fleet-emit' Stop"
+  [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$FLEET_HOME/sessions")" ]
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -434,106 +680,137 @@ Expected: FAIL — `bin/fleet-emit` does not exist.
 
 - [ ] **Step 3: Write `bin/fleet-emit`**
 
-```bash
-#!/usr/bin/env bash
-# Claude Code hook entrypoint. Records agent state. MUST ALWAYS EXIT 0.
-set -u
+```python
+#!/usr/bin/env python3
+"""Claude Code hook entrypoint. Records agent state.
 
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-SESSIONS="$FLEET_HOME/sessions"
-LOG="$FLEET_HOME/fleet.log"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+MUST ALWAYS EXIT 0. A bug in this file must never break a real agent.
+"""
 
-mkdir -p "$SESSIONS" 2>/dev/null
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG" 2>/dev/null; }
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-# Everything of consequence happens inside main(); the trailing `exit 0` is absolute.
-main() {
-  EVENT="${1:-}"
-  case "$EVENT" in
-    SessionStart)     STATE="idle" ;;
-    UserPromptSubmit) STATE="working" ;;
-    Notification)     STATE="blocked" ;;
-    Stop)             STATE="done" ;;
-    SessionEnd)       STATE="__end__" ;;
-    *) log "emit: ignoring unknown event '$EVENT'"; return 0 ;;
-  esac
-
-  PAYLOAD="$(cat)"
-  printf '%s' "$PAYLOAD" | jq -e . >/dev/null 2>&1 || {
-    log "emit: unparseable payload for $EVENT"; return 0
-  }
-
-  SID="$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty')"
-  [ -n "$SID" ] || SID="${CLAUDE_CODE_SESSION_ID:-}"
-  [ -n "$SID" ] || { log "emit: no session id for $EVENT"; return 0; }
-
-  CWD="$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty')"
-  [ -n "$CWD" ] || CWD="$PWD"
-
-  # iTerm exports w<win>t<tab>p<pane>:<uuid>; only the uuid is addressable.
-  ITERM_UUID="${ITERM_SESSION_ID:-}"
-  ITERM_UUID="${ITERM_UUID#*:}"
-  if [ -n "$ITERM_UUID" ]; then HOST="iterm2"; else HOST="unknown"; fi
-
-  REPO=""; BRANCH=""
-  if TOP="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)"; then
-    REPO="$(basename "$TOP")"
-    BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  fi
-
-  TS="$(date +%s)"
-
-  # Append to the journal spine before any early return, so removals are recorded too.
-  jq -nc --arg e "$EVENT" --arg s "$SID" --arg r "$REPO" --arg b "$BRANCH" \
-         --arg c "$CWD" --argjson t "$TS" \
-    '{event:$e, session_id:$s, repo:$r, branch:$b, cwd:$c, ts:$t}' \
-    >>"$FLEET_HOME/events.jsonl" 2>/dev/null
-
-  if [ "$STATE" = "__end__" ]; then
-    rm -f "$SESSIONS/$SID.json" 2>/dev/null
-  else
-    PID="$(find_agent_pid)"
-    TMP="$SESSIONS/.$SID.json.tmp.$$"
-    jq -nc --arg id "$SID" --arg st "$STATE" --arg r "$REPO" --arg b "$BRANCH" \
-           --arg c "$CWD" --arg h "$HOST" --arg iu "$ITERM_UUID" \
-           --argjson p "${PID:-0}" --argjson t "$TS" \
-      '{session_id:$id, state:$st, repo:$r, branch:$b, title:"",
-        cwd:$c, host:$h, iterm_session:$iu, pid:$p, ts:$t}' \
-      >"$TMP" 2>/dev/null && mv -f "$TMP" "$SESSIONS/$SID.json" 2>/dev/null
-  fi
-
-  [ "${FLEET_SKIP_RECONCILE:-0}" = "1" ] || "$HERE/fleet-reconcile" >/dev/null 2>&1
-  return 0
+EVENT_STATES = {
+    "SessionStart": "idle",
+    "UserPromptSubmit": "working",
+    "Notification": "blocked",
+    "Stop": "done",
+    "SessionEnd": "__end__",
 }
 
-# Walk up the process tree to find the agent process this hook was spawned from.
-find_agent_pid() {
-  p="$PPID"; i=0
-  while [ -n "$p" ] && [ "$p" != "1" ] && [ "$i" -lt 6 ]; do
-    c="$(ps -o comm= -p "$p" 2>/dev/null | sed 's|.*/||')"
-    case "$c" in claude|node) printf '%s' "$p"; return 0 ;; esac
-    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
-    i=$((i + 1))
-  done
-  printf '0'
-}
 
-main "$@" 2>>"$LOG"
-exit 0
+def find_agent_pid():
+    """Walk up the process tree to the agent this hook was spawned from."""
+    pid = os.getppid()
+    for _ in range(6):
+        if pid <= 1:
+            break
+        try:
+            proc = subprocess.run(
+                ["ps", "-o", "comm=", "-o", "ppid=", "-p", str(pid)],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            parts = proc.stdout.decode("utf-8", "replace").split()
+            if not parts:
+                break
+            comm, parent = parts[0].rsplit("/", 1)[-1], parts[-1]
+            if comm in ("claude", "node"):
+                return pid
+            pid = int(parent)
+        except Exception:
+            break
+    return 0
+
+
+def run(event):
+    state = EVENT_STATES.get(event)
+    if state is None:
+        fleetlib.log("emit: ignoring unknown event {!r}".format(event))
+        return
+
+    try:
+        payload = json.loads(sys.stdin.read())
+        if not isinstance(payload, dict):
+            raise ValueError("payload is not an object")
+    except Exception:
+        fleetlib.log("emit: unparseable payload for {}".format(event))
+        return
+
+    session_id = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not session_id:
+        fleetlib.log("emit: no session id for {}".format(event))
+        return
+
+    cwd = payload.get("cwd") or os.getcwd()
+
+    # iTerm exports w<win>t<tab>p<pane>:<uuid>; only the uuid is addressable.
+    iterm = os.environ.get("ITERM_SESSION_ID", "")
+    iterm_uuid = iterm.split(":", 1)[1] if ":" in iterm else ""
+    host = "iterm2" if iterm_uuid else "unknown"
+
+    repo = branch = ""
+    code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
+    if code == 0 and top:
+        repo = Path(top).name
+        _, branch = fleetlib.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+
+    now = int(time.time())
+
+    # Journal spine first, so removals are recorded too.
+    try:
+        fleetlib.append_jsonl(fleetlib.events_path(), {
+            "event": event, "session_id": session_id, "repo": repo,
+            "branch": branch, "cwd": cwd, "ts": now,
+        })
+    except Exception as err:
+        fleetlib.log("emit: could not append event: {}".format(err))
+
+    target = fleetlib.sessions_dir() / "{}.json".format(session_id)
+    if state == "__end__":
+        try:
+            target.unlink()
+        except Exception:
+            pass
+    else:
+        fleetlib.write_json_atomic(target, {
+            "session_id": session_id, "state": state, "repo": repo,
+            "branch": branch, "title": "", "cwd": cwd, "host": host,
+            "iterm_session": iterm_uuid, "pid": find_agent_pid(), "ts": now,
+        })
+
+    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+        try:
+            subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fleet-reconcile")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        run(sys.argv[1] if len(sys.argv) > 1 else "")
+    except Exception as err:            # noqa: BLE001 -- the exit-0 guarantee
+        fleetlib.log("emit: unhandled {!r}".format(err))
+    sys.exit(0)
 ```
 
 ```bash
 chmod +x bin/fleet-emit
 ```
 
+The bare `except Exception` at the bottom is deliberate and is the exit-0 guarantee made structural: no failure path in this file can propagate into the agent.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck clean, `15 tests, 0 failures` (4 config + 11 emit).
-
-The last emit test is the important one: an unwritable `FLEET_HOME` must still exit 0. That is the exit-0 guarantee, asserted rather than assumed.
+Expected: `25 tests, 0 failures` (12 + 13 emit).
 
 - [ ] **Step 5: Commit**
 
@@ -546,24 +823,24 @@ git commit -m "feat: fleet-emit hook entrypoint with atomic writes and exit-0 gu
 
 ### Task 4: `fleet-reconcile` — sticky slot assignment
 
-The heart of the system. Slot stickiness is what makes the row usable without looking, so it gets the most thorough test.
+The heart of the system, and the file the design promises you can edit freely. Keep it obvious.
 
 **Files:**
 - Create: `bin/fleet-reconcile`
 - Create: `tests/reconcile.bats`
 
 **Interfaces:**
-- Consumes: session files from Task 3; `bin/fleet-config`
+- Consumes: session files (Task 3), `fleetlib`
 - Produces:
-  - `bin/fleet-reconcile` — reads `$FLEET_HOME/sessions/*.json`, writes `$FLEET_HOME/slots.json` atomically.
-  - **`slots.json` schema**, consumed by Tasks 6 and 10:
+  - `bin/fleet-reconcile` — reads `sessions/*.json`, writes `slots.json` atomically.
+  - **`slots.json` schema**, consumed by Tasks 7, 10 and 11:
     ```json
     { "ts": 1755100000, "overflow": 0,
       "slots": [ { "index": 0, "state": "working", "label_top": "flightdeck",
                    "label_bottom": "main", "session_id": "S1", "host": "iterm2",
                    "iterm_session": "UUID", "cwd": "/abs/path", "app": "" } ] }
     ```
-    Empty slots have `state: "empty"`, empty strings elsewhere, `index` always present. The array always has exactly `slots.count` entries, ordered by index.
+    Empty slots use `state: "empty"` with empty strings elsewhere. The array always has exactly `slots.count` entries, ordered by index.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -583,12 +860,20 @@ setup() {
 
 # id state repo branch [title]
 mksession() {
-  jq -nc --arg id "$1" --arg st "$2" --arg r "$3" --arg b "$4" --arg t "${5:-}" \
-    '{session_id:$id, state:$st, repo:$r, branch:$b, title:$t,
-      cwd:"/tmp", host:"iterm2", iterm_session:("U-"+$id), pid:1, ts:1}' \
-    >"$FLEET_HOME/sessions/$1.json"
+  python3 - "$FLEET_HOME/sessions/$1.json" "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
+import json,sys
+p,sid,st,repo,br,title = sys.argv[1:7]
+json.dump({"session_id":sid,"state":st,"repo":repo,"branch":br,"title":title,
+           "cwd":"/tmp","host":"iterm2","iterm_session":"U-"+sid,"pid":1,"ts":1},
+          open(p,"w"))
+PY
 }
-sf() { jq -r --argjson i "$1" '.slots[] | select(.index==$i) | .'"$2" "$FLEET_HOME/slots.json"; }
+
+sf() {
+  python3 -c "import json,sys;d=json.load(open('$FLEET_HOME/slots.json'));\
+print([s for s in d['slots'] if s['index']==$1][0]['$2'])"
+}
+top() { python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));print(d['$1'])"; }
 
 @test "sessions claim the lowest free slot and the file always has 8 entries" {
   mksession A working flightdeck main
@@ -597,7 +882,7 @@ sf() { jq -r --argjson i "$1" '.slots[] | select(.index==$i) | .'"$2" "$FLEET_HO
   [ "$status" -eq 0 ]
   [ "$(sf 0 session_id)" = "A" ]
   [ "$(sf 1 session_id)" = "B" ]
-  [ "$(jq '.slots | length' "$FLEET_HOME/slots.json")" = "8" ]
+  [ "$(python3 -c "import json;print(len(json.load(open('$FLEET_HOME/slots.json'))['slots']))")" = "8" ]
   [ "$(sf 7 state)" = "empty" ]
 }
 
@@ -606,31 +891,22 @@ sf() { jq -r --argjson i "$1" '.slots[] | select(.index==$i) | .'"$2" "$FLEET_HO
   mksession B blocked sisko feat/login
   "$BIN/fleet-reconcile"
 
-  # A dies. B must not move.
   rm -f "$FLEET_HOME/sessions/A.json"
   "$BIN/fleet-reconcile"
   [ "$(sf 0 state)" = "empty" ]
   [ "$(sf 1 session_id)" = "B" ]
 
-  # A new session takes the freed slot, and B still has not moved.
   mksession C idle homeassistant main
   "$BIN/fleet-reconcile"
   [ "$(sf 0 session_id)" = "C" ]
   [ "$(sf 1 session_id)" = "B" ]
 }
 
-@test "labels put repo on top and strip known branch prefixes" {
+@test "labels put repo on top and shorten the branch" {
   mksession B blocked sisko feat/login
   "$BIN/fleet-reconcile"
   [ "$(sf 0 label_top)" = "sisko" ]
   [ "$(sf 0 label_bottom)" = "login" ]
-}
-
-@test "labels are truncated to maxChars" {
-  mksession D working averyverylongreponame some/very-long-branch-name
-  "$BIN/fleet-reconcile"
-  [ "$(jq -r '.slots[0].label_top    | length <= 11' "$FLEET_HOME/slots.json")" = "true" ]
-  [ "$(jq -r '.slots[0].label_bottom | length <= 11' "$FLEET_HOME/slots.json")" = "true" ]
 }
 
 @test "task title beats branch for the bottom label" {
@@ -639,11 +915,20 @@ sf() { jq -r --argjson i "$1" '.slots[] | select(.index==$i) | .'"$2" "$FLEET_HO
   [ "$(sf 0 label_bottom)" = "break-state" ]
 }
 
+@test "labels never exceed maxChars" {
+  mksession D working averyverylongreponame some/very-long-branch-name
+  "$BIN/fleet-reconcile"
+  t="$(sf 0 label_top)"; b="$(sf 0 label_bottom)"
+  [ "${#t}" -le 11 ]
+  [ "${#b}" -le 11 ]
+}
+
 @test "OVERFLOW: only 8 are slotted and the remainder is counted, not shuffled in" {
   i=1; while [ $i -le 9 ]; do mksession "S$i" working "repo$i" main; i=$((i+1)); done
   "$BIN/fleet-reconcile"
-  [ "$(jq '[.slots[] | select(.state!="empty")] | length' "$FLEET_HOME/slots.json")" = "8" ]
-  [ "$(jq -r .overflow "$FLEET_HOME/slots.json")" = "1" ]
+  [ "$(python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));\
+print(len([s for s in d['slots'] if s['state']!='empty']))")" = "8" ]
+  [ "$(top overflow)" = "1" ]
 }
 
 @test "a pinned slot is never auto-assigned and reduces capacity" {
@@ -655,7 +940,7 @@ EOF
   [ "$(sf 7 host)"  = "pinned-app" ]
   [ "$(sf 7 app)"   = "ChatGPT" ]
   [ "$(sf 7 state)" = "idle" ]
-  [ "$(jq -r .overflow "$FLEET_HOME/slots.json")" = "1" ]
+  [ "$(top overflow)" = "1" ]
 }
 
 @test "a corrupt session file is skipped rather than failing the whole reconcile" {
@@ -669,12 +954,10 @@ EOF
 @test "no sessions at all still produces a valid 8-slot file" {
   run "$BIN/fleet-reconcile"
   [ "$status" -eq 0 ]
-  [ "$(jq '.slots | length' "$FLEET_HOME/slots.json")" = "8" ]
-  [ "$(jq -r .overflow "$FLEET_HOME/slots.json")" = "0" ]
+  [ "$(top overflow)" = "0" ]
+  [ "$(sf 3 state)" = "empty" ]
 }
 ```
-
-Truncation is asserted through `jq`, not shell string length — the character count in the emitted JSON is what the key actually renders.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -683,111 +966,144 @@ Expected: FAIL — `bin/fleet-reconcile` does not exist.
 
 - [ ] **Step 3: Write `bin/fleet-reconcile`**
 
-All list manipulation is done in jq, because bash 3.2 has no associative arrays.
+```python
+#!/usr/bin/env python3
+"""Turns session files into a sticky slot map at $FLEET_HOME/slots.json.
 
-```bash
-#!/usr/bin/env bash
-# Turns session files into a sticky slot map. Writes $FLEET_HOME/slots.json atomically.
-set -u
+Stickiness is the point: a session claims the lowest free slot on first
+sight and holds it until it dies. When it dies the slot goes empty and
+NOTHING ELSE MOVES. Keys that shift under your thumb destroy the whole
+value of the row.
+"""
 
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-SESSIONS="$FLEET_HOME/sessions"
-SLOTS="$FLEET_HOME/slots.json"
-LOG="$FLEET_HOME/fleet.log"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+import sys
+import time
+from pathlib import Path
 
-mkdir -p "$SESSIONS" 2>/dev/null
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-CFG="$("$HERE/fleet-config" 2>/dev/null)"
-[ -n "$CFG" ] || CFG='{}'
 
-# Gather valid session files; silently skip unparseable ones.
-LIVE="$(
-  for f in "$SESSIONS"/*.json; do
-    [ -e "$f" ] || continue
-    jq -c . "$f" 2>/dev/null || printf ''
-  done | jq -sc 'map(select(type=="object" and .session_id != null)) | sort_by(.ts, .session_id)'
-)"
-[ -n "$LIVE" ] || LIVE='[]'
+def load_live_sessions():
+    """Every parseable session file, oldest first for stable assignment."""
+    sessions = []
+    directory = fleetlib.sessions_dir()
+    if not directory.is_dir():
+        return sessions
+    for path in sorted(directory.glob("*.json")):
+        data = fleetlib.read_json(path)
+        if isinstance(data, dict) and data.get("session_id"):
+            sessions.append(data)
+    sessions.sort(key=lambda s: (s.get("ts", 0), s.get("session_id", "")))
+    return sessions
 
-PREV='{}'
-if [ -f "$SLOTS" ]; then
-  PREV="$(jq -c '[.slots[] | select(.session_id != "" and .session_id != null)
-                 | {key: (.index|tostring), value: .session_id}] | from_entries' \
-          "$SLOTS" 2>/dev/null)" || PREV='{}'
-fi
-[ -n "$PREV" ] || PREV='{}'
 
-TMP="$FLEET_HOME/.slots.json.tmp.$$"
+def previous_assignment():
+    """slot index (as int) -> session_id, from the last written slots.json."""
+    previous = fleetlib.read_json(fleetlib.slots_path(), {}) or {}
+    result = {}
+    for slot in previous.get("slots", []):
+        if slot.get("session_id"):
+            result[slot["index"]] = slot["session_id"]
+    return result
 
-jq -n \
-  --argjson live "$LIVE" \
-  --argjson prev "$PREV" \
-  --argjson cfg  "$CFG" \
-  --argjson ts   "$(date +%s)" '
 
-  ($cfg.slots.count // 8)          as $count
-| ($cfg.pins // {})                as $pins
-| ($cfg.labels.maxChars // 11)     as $max
-| ($cfg.labels.stripPrefixes // []) as $strip
+def empty_slot(index):
+    return {"index": index, "state": "empty", "label_top": "", "label_bottom": "",
+            "session_id": "", "host": "", "iterm_session": "", "cwd": "", "app": ""}
 
-# Shorten a label: drop known prefixes, then truncate.
-| def shorten($s):
-    ($strip | reduce .[] as $p ($s; if startswith($p) then .[($p|length):] else . end))
-    | if length > $max then .[0:$max] else . end;
 
-| ($live | map(.session_id))                                as $liveids
-| ($live | map({key: .session_id, value: .}) | from_entries) as $byid
+def pinned_slot(index, pin):
+    return {"index": index, "state": "idle",
+            "label_top": pin.get("label_top", ""),
+            "label_bottom": pin.get("label_bottom", ""),
+            "session_id": "", "host": pin.get("host", "pinned-app"),
+            "iterm_session": "", "cwd": "", "app": pin.get("app", "")}
 
-# Pass 1: each index is a pin, a retained session, or free.
-| [ range(0; $count) as $i
-  | if ($pins[$i|tostring]) then {index:$i, kind:"pin", pin:$pins[$i|tostring]}
-    elif (($prev[$i|tostring]) as $s | $s != null and ($liveids | index($s)) != null)
-      then {index:$i, kind:"session", session_id:$prev[$i|tostring]}
-    else {index:$i, kind:"free"} end ] as $base
 
-# Pass 2: fill free slots with sessions not already retained, lowest index first.
-| ($liveids - ($base | map(select(.kind=="session") | .session_id))) as $pending
-| (reduce $base[] as $e ({out:[], pend:$pending};
-     if $e.kind == "free" and (.pend | length) > 0
-     then .out += [{index:$e.index, kind:"session", session_id:.pend[0]}] | .pend = .pend[1:]
-     else .out += [$e] end)) as $filled
+def session_slot(index, session, max_chars, prefixes):
+    title = (session.get("title") or "").strip()
+    bottom = title if title else (session.get("branch") or "")
+    return {"index": index,
+            "state": session.get("state", "idle"),
+            "label_top": fleetlib.shorten(session.get("repo", ""), max_chars, prefixes),
+            "label_bottom": fleetlib.shorten(bottom, max_chars, prefixes),
+            "session_id": session["session_id"],
+            "host": session.get("host", "unknown"),
+            "iterm_session": session.get("iterm_session", ""),
+            "cwd": session.get("cwd", ""),
+            "app": ""}
 
-# Pass 3: hydrate into the render schema.
-| { ts: $ts,
-    overflow: ($filled.pend | length),
-    slots: [ $filled.out[]
-      | if .kind == "pin" then
-          { index, state:"idle", label_top:(.pin.label_top // ""),
-            label_bottom:(.pin.label_bottom // ""), session_id:"",
-            host:(.pin.host // "pinned-app"), iterm_session:"", cwd:"",
-            app:(.pin.app // "") }
-        elif .kind == "session" then
-          ($byid[.session_id]) as $s
-          | { index, state:($s.state // "idle"),
-              label_top: shorten($s.repo // ""),
-              label_bottom: shorten( if ($s.title // "") != "" then $s.title else ($s.branch // "") end ),
-              session_id: $s.session_id,
-              host: ($s.host // "unknown"), iterm_session: ($s.iterm_session // ""),
-              cwd: ($s.cwd // ""), app: "" }
-        else
-          { index, state:"empty", label_top:"", label_bottom:"", session_id:"",
-            host:"", iterm_session:"", cwd:"", app:"" }
-        end ] }
-' >"$TMP" 2>>"$LOG" && mv -f "$TMP" "$SLOTS" 2>/dev/null
 
-rm -f "$TMP" 2>/dev/null
-exit 0
+def main():
+    config = fleetlib.load_config()
+    count = config.get("slots", {}).get("count", 8)
+    pins = config.get("pins", {}) or {}
+    labels = config.get("labels", {})
+    max_chars = labels.get("maxChars", 11)
+    prefixes = labels.get("stripPrefixes", fleetlib.DEFAULT_PREFIXES)
+
+    live = load_live_sessions()
+    by_id = {s["session_id"]: s for s in live}
+    previous = previous_assignment()
+
+    # Pass 1: every index is a pin, a retained session, or free.
+    held = {}
+    free = []
+    for index in range(count):
+        pin = pins.get(str(index))
+        if pin:
+            continue
+        keeper = previous.get(index)
+        if keeper and keeper in by_id:
+            held[index] = keeper
+        else:
+            free.append(index)
+
+    # Pass 2: sessions with no slot fill the free indices, lowest first.
+    assigned = set(held.values())
+    pending = [s["session_id"] for s in live if s["session_id"] not in assigned]
+    for index in free:
+        if not pending:
+            break
+        held[index] = pending.pop(0)
+
+    # Pass 3: render.
+    slots = []
+    for index in range(count):
+        pin = pins.get(str(index))
+        if pin:
+            slots.append(pinned_slot(index, pin))
+        elif index in held:
+            slots.append(session_slot(index, by_id[held[index]], max_chars, prefixes))
+        else:
+            slots.append(empty_slot(index))
+
+    fleetlib.write_json_atomic(fleetlib.slots_path(), {
+        "ts": int(time.time()), "overflow": len(pending), "slots": slots,
+    })
+    if pending:
+        fleetlib.log("reconcile: {} session(s) unslotted (overflow)".format(len(pending)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("reconcile: unhandled {!r}".format(err))
+    sys.exit(0)
 ```
 
 ```bash
 chmod +x bin/fleet-reconcile
 ```
 
+Compare this to the bash version it replaces: three passes of ordinary Python you can edit six months from now, rather than a `jq` reduce over a pending queue.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck clean, `24 tests, 0 failures`. The `STICKINESS` test is the one to watch — it is the behaviour the whole row depends on.
+Expected: `34 tests, 0 failures`. Watch `STICKINESS` — it is the behaviour the whole row depends on.
 
 - [ ] **Step 5: Commit**
 
@@ -803,13 +1119,12 @@ git commit -m "feat: sticky slot assignment with pins, overflow, and label short
 A crashed agent never runs `SessionEnd`, so its file lingers and its slot never frees.
 
 **Files:**
-- Create: `bin/fleet-reap`
-- Create: `tests/reap.bats`
+- Create: `bin/fleet-reap`, `tests/reap.bats`
 - Create: `launchd/com.louisalexander.flightdeck.reaper.plist`
 
 **Interfaces:**
-- Consumes: session files from Task 3
-- Produces: `bin/fleet-reap` — removes session files whose `pid` is dead, then calls `fleet-reconcile`. Exits 0 always. Env `FLEET_SKIP_RECONCILE=1` honoured.
+- Consumes: session files (Task 3)
+- Produces: `bin/fleet-reap` — removes session files whose `pid` is dead, then runs `fleet-reconcile`. Always exits 0. Honours `FLEET_SKIP_RECONCILE`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -827,43 +1142,36 @@ setup() {
 }
 
 mk() {
-  jq -nc --arg id "$1" --argjson p "$2" \
-    '{session_id:$id, state:"working", repo:"r", branch:"b", title:"",
-      cwd:"/tmp", host:"iterm2", iterm_session:"U", pid:$p, ts:1}' \
-    >"$FLEET_HOME/sessions/$1.json"
+  python3 - "$FLEET_HOME/sessions/$1.json" "$1" "$2" <<'PY'
+import json,sys
+p,sid,pid = sys.argv[1:4]
+try: pid = int(pid)
+except ValueError: pass
+json.dump({"session_id":sid,"state":"working","repo":"r","branch":"b","title":"",
+           "cwd":"/tmp","host":"iterm2","iterm_session":"U","pid":pid,"ts":1},
+          open(p,"w"))
+PY
 }
 
 @test "a session whose process is alive is kept" {
-  mk ALIVE "$$"
-  "$BIN/fleet-reap"
-  [ -f "$FLEET_HOME/sessions/ALIVE.json" ]
+  mk ALIVE "$$"; "$BIN/fleet-reap"; [ -f "$FLEET_HOME/sessions/ALIVE.json" ]
 }
 
 @test "a session whose process is gone is reaped" {
-  mk DEAD 999999
-  "$BIN/fleet-reap"
-  [ ! -f "$FLEET_HOME/sessions/DEAD.json" ]
+  mk DEAD 999999; "$BIN/fleet-reap"; [ ! -f "$FLEET_HOME/sessions/DEAD.json" ]
 }
 
 @test "an unknown pid is never guessed at — the session is kept" {
-  mk NOPID 0
-  "$BIN/fleet-reap"
-  [ -f "$FLEET_HOME/sessions/NOPID.json" ]
+  mk NOPID 0; "$BIN/fleet-reap"; [ -f "$FLEET_HOME/sessions/NOPID.json" ]
 }
 
 @test "a non-numeric pid is treated as unknown, not as dead" {
-  jq -nc '{session_id:"WEIRD", state:"working", repo:"r", branch:"b", title:"",
-           cwd:"/tmp", host:"iterm2", iterm_session:"U", pid:"not-a-number", ts:1}' \
-    >"$FLEET_HOME/sessions/WEIRD.json"
-  "$BIN/fleet-reap"
-  [ -f "$FLEET_HOME/sessions/WEIRD.json" ]
+  mk WEIRD "not-a-number"; "$BIN/fleet-reap"; [ -f "$FLEET_HOME/sessions/WEIRD.json" ]
 }
 
 @test "reaping an empty directory is safe and idempotent" {
-  run "$BIN/fleet-reap"
-  [ "$status" -eq 0 ]
-  run "$BIN/fleet-reap"
-  [ "$status" -eq 0 ]
+  run "$BIN/fleet-reap"; [ "$status" -eq 0 ]
+  run "$BIN/fleet-reap"; [ "$status" -eq 0 ]
 }
 ```
 
@@ -874,32 +1182,69 @@ Expected: FAIL — `bin/fleet-reap` does not exist.
 
 - [ ] **Step 3: Write `bin/fleet-reap`**
 
-```bash
-#!/usr/bin/env bash
-# Removes session files whose agent process is gone. Conservative: pid 0 is never reaped.
-set -u
+```python
+#!/usr/bin/env python3
+"""Removes session files whose agent process is gone.
 
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-SESSIONS="$FLEET_HOME/sessions"
-LOG="$FLEET_HOME/fleet.log"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+Conservative by design: pid 0 or a non-numeric pid means 'unknown', and
+unknown is never reaped. A stale key is a small annoyance; a key that
+vanishes while its agent is alive is a correctness failure.
+"""
 
-[ -d "$SESSIONS" ] || exit 0
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-for f in "$SESSIONS"/*.json; do
-  [ -e "$f" ] || continue
-  pid="$(jq -r '.pid // 0' "$f" 2>/dev/null)"
-  case "$pid" in ''|*[!0-9]*) pid=0 ;; esac
-  [ "$pid" -eq 0 ] && continue            # unknown pid: keep, never guess
-  if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$f" 2>/dev/null
-    printf '%s reap: removed %s (pid %s gone)\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$f")" "$pid" >>"$LOG" 2>/dev/null
-  fi
-done
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-[ "${FLEET_SKIP_RECONCILE:-0}" = "1" ] || "$HERE/fleet-reconcile" >/dev/null 2>&1
-exit 0
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    except Exception:
+        return True          # never reap on an unexpected error
+
+
+def main():
+    directory = fleetlib.sessions_dir()
+    if not directory.is_dir():
+        return
+
+    for path in sorted(directory.glob("*.json")):
+        data = fleetlib.read_json(path)
+        if not isinstance(data, dict):
+            continue
+        pid = data.get("pid", 0)
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        if not alive(pid):
+            try:
+                path.unlink()
+                fleetlib.log("reap: removed {} (pid {} gone)".format(path.name, pid))
+            except Exception:
+                pass
+
+    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+        try:
+            subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fleet-reconcile")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("reap: unhandled {!r}".format(err))
+    sys.exit(0)
 ```
 
 ```bash
@@ -909,11 +1254,11 @@ chmod +x bin/fleet-reap
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck clean, `29 tests, 0 failures`.
+Expected: `39 tests, 0 failures`.
 
 - [ ] **Step 5: Write the launchd agent**
 
-Create `launchd/com.louisalexander.flightdeck.reaper.plist`. `__REPO__` is substituted by `install.sh` in Task 12.
+Create `launchd/com.louisalexander.flightdeck.reaper.plist`. `__PYTHON__`, `__REPO__` and `__HOME__` are substituted by `install.sh` — **`__PYTHON__` is why this works under launchd**, whose `PATH` would otherwise resolve a different interpreter.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -921,7 +1266,11 @@ Create `launchd/com.louisalexander.flightdeck.reaper.plist`. `__REPO__` is subst
 <plist version="1.0">
 <dict>
   <key>Label</key>            <string>com.louisalexander.flightdeck.reaper</string>
-  <key>ProgramArguments</key> <array><string>__REPO__/bin/fleet-reap</string></array>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__REPO__/bin/fleet-reap</string>
+  </array>
   <key>StartInterval</key>    <integer>15</integer>
   <key>RunAtLoad</key>        <true/>
   <key>StandardErrorPath</key><string>__HOME__/.fleet/reaper.err.log</string>
@@ -943,36 +1292,38 @@ git commit -m "feat: reap crashed sessions on a 15s launchd tick"
 The only component requiring live hardware. Isolated so it is the sole thing verified by hand.
 
 **Files:**
-- Create: `bin/fleet-focus`
-- Create: `tools/focus-smoke.sh`
+- Create: `bin/fleet-focus`, `tools/focus-smoke.sh`
 
 **Interfaces:**
 - Consumes: nothing from other tasks
-- Produces: `bin/fleet-focus <host> <target>` where `host` is `iterm2` (target = iTerm session UUID) or `pinned-app` (target = application name). Exits 0 on success, 1 if the target no longer exists.
+- Produces: `bin/fleet-focus <host> <target>` where `host` is `iterm2` (target = iTerm session UUID) or `pinned-app` (target = application name). Exit 0 on success, 1 if the target no longer exists.
 
 - [ ] **Step 1: Write `bin/fleet-focus`**
 
 Direct `session id "<uuid>"` addressing fails with error -1728, verified during design. Iterate and match.
 
-```bash
-#!/usr/bin/env bash
-# Brings a host into focus. iterm2 targets are session UUIDs; pinned-app targets are app names.
-set -u
-HOST="${1:-}"; TARGET="${2:-}"
-[ -n "$HOST" ] && [ -n "$TARGET" ] || exit 1
+```python
+#!/usr/bin/env python3
+"""Brings a host into focus.
 
-case "$HOST" in
-  pinned-app)
-    open -a "$TARGET" >/dev/null 2>&1 || exit 1
-    ;;
-  iterm2)
-    osascript <<APPLESCRIPT >/dev/null 2>&1 || exit 1
+iterm2 targets are session UUIDs; pinned-app targets are application names.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+# Top-level `session id "..."` addressing errors with -1728, so walk the tree.
+ITERM_SCRIPT = '''
 tell application "iTerm2"
   set found to false
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
-        if (id of s) is "$TARGET" then
+        if (id of s) is "{uuid}" then
           select w
           select t
           select s
@@ -984,16 +1335,41 @@ tell application "iTerm2"
   if found then activate
   if not found then error "no such session" number 1
 end tell
-APPLESCRIPT
-    ;;
-  *) exit 1 ;;
-esac
-exit 0
+'''
+
+
+def main(argv):
+    if len(argv) < 3:
+        return 1
+    host, target = argv[1], argv[2]
+
+    if host == "pinned-app":
+        proc = subprocess.run(["open", "-a", target],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return 0 if proc.returncode == 0 else 1
+
+    if host == "iterm2":
+        if not target:
+            return 1
+        proc = subprocess.run(["osascript", "-e", ITERM_SCRIPT.format(uuid=target)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            fleetlib.log("focus: iterm session {} not found".format(target))
+            return 1
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
 ```
 
 ```bash
 chmod +x bin/fleet-focus
 ```
+
+`target` is interpolated into AppleScript, so `fleet-press` must only ever pass a UUID read from `slots.json`, never user input.
 
 - [ ] **Step 2: Write the manual smoke test**
 
@@ -1003,18 +1379,18 @@ Create `tools/focus-smoke.sh`:
 #!/usr/bin/env bash
 # Manual check: focuses this very session, then reports on a bogus target.
 set -u
-HERE="$(cd "$(dirname "$0")/../bin" && pwd)"
+BIN="$(cd "$(dirname "$0")/../bin" && pwd)"
 UUID="${ITERM_SESSION_ID#*:}"
 [ -n "$UUID" ] || { echo "not running inside iTerm2"; exit 1; }
 
 echo "focusing this session ($UUID) ..."
-"$HERE/fleet-focus" iterm2 "$UUID" && echo "  ok (exit 0)" || echo "  FAILED (exit $?)"
+if "$BIN/fleet-focus" iterm2 "$UUID"; then echo "  ok"; else echo "  FAILED ($?)"; fi
 
 echo "focusing a bogus session ..."
-if "$HERE/fleet-focus" iterm2 "00000000-0000-0000-0000-000000000000"; then
-  echo "  FAILED — should have exited non-zero"
+if "$BIN/fleet-focus" iterm2 "00000000-0000-0000-0000-000000000000"; then
+  echo "  FAILED - should have exited non-zero"
 else
-  echo "  ok (exit non-zero as expected)"
+  echo "  ok (non-zero as expected)"
 fi
 ```
 
@@ -1027,11 +1403,11 @@ chmod +x tools/focus-smoke.sh
 Run: `./tools/focus-smoke.sh`
 Expected: both lines report `ok`.
 
-**If macOS shows an automation permission dialog, approve it.** If it fails silently with no dialog, open System Settings → Privacy & Security → Automation and enable Terminal/iTerm control of iTerm. This is the failure mode `fleet-doctor` exists to catch.
+**If macOS shows an automation permission dialog, approve it.** If it fails silently with no dialog, open System Settings → Privacy & Security → Automation and enable control of iTerm. This is the failure mode `fleet-doctor` exists to catch.
 
 Then verify cross-window focus: open a second iTerm window, note its UUID via
 `osascript -e 'tell application "iTerm2" to get id of current session of current tab of current window'`,
-switch back to the first window, and run `./bin/fleet-focus iterm2 <that-uuid>`. The other window must come forward.
+return to the first window, and run `./bin/fleet-focus iterm2 <that-uuid>`. The other window must come forward.
 
 - [ ] **Step 4: Commit**
 
@@ -1045,16 +1421,14 @@ git commit -m "feat: iTerm2 and pinned-app focus adapters"
 ### Task 7: `fleet-press` — dispatch and the arm/confirm machine
 
 **Files:**
-- Create: `bin/fleet-press`
-- Create: `tests/press.bats`
+- Create: `bin/fleet-press`, `tests/press.bats`
 
 **Interfaces:**
-- Consumes: `slots.json` (Task 4), `bin/fleet-focus` (Task 6), `bin/fleet-kill` (Task 8)
+- Consumes: `slots.json` (Task 4), `fleet-focus` (Task 6), `fleet-kill` (Task 8)
 - Produces:
   - `bin/fleet-press <slotIndex> <short|long>`
-  - **Arm marker** `$FLEET_HOME/armed.json`: `{"index": 3, "expires": 1755100003}`. Consumed by the plugin in Task 11 to paint `CONFIRM?`.
-  - Env `FLEET_FOCUS_CMD` / `FLEET_KILL_CMD` override the adapter paths so tests can stub them.
-  - Env `FLEET_NOW` overrides the clock in tests.
+  - **Arm marker** `$FLEET_HOME/armed.json`: `{"index": 3, "expires": 1755100003}`. Read by the plugin in Task 11 to paint the armed state.
+  - Env `FLEET_FOCUS_CMD` / `FLEET_KILL_CMD` override adapter paths so tests can stub them. `FLEET_NOW` overrides the clock.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1071,7 +1445,6 @@ setup() {
   mkdir -p "$FLEET_CONFIG_DIR"
   cp "$ROOT/config/fleet.json" "$FLEET_CONFIG_DIR/fleet.json"
 
-  # Stub adapters record their arguments instead of acting.
   printf '#!/usr/bin/env bash\nprintf "focus %%s\\n" "$*" >>"%s/calls.log"\n' \
     "$BATS_TEST_TMPDIR" >"$BATS_TEST_TMPDIR/focus-stub"
   printf '#!/usr/bin/env bash\nprintf "kill %%s\\n" "$*" >>"%s/calls.log"\n' \
@@ -1091,6 +1464,7 @@ EOF
 
 calls() { cat "$BATS_TEST_TMPDIR/calls.log" 2>/dev/null; }
 armed_exists() { [ -f "$BATS_TEST_TMPDIR/armed.json" ]; }
+armfield() { python3 -c "import json;print(json.load(open('$BATS_TEST_TMPDIR/armed.json'))['$1'])"; }
 
 @test "short press focuses the iTerm session behind that slot" {
   FLEET_NOW=1000 "$BIN/fleet-press" 0 short
@@ -1111,8 +1485,8 @@ armed_exists() { [ -f "$BATS_TEST_TMPDIR/armed.json" ]; }
   FLEET_NOW=1000 "$BIN/fleet-press" 0 long
   [ -z "$(calls)" ]
   armed_exists
-  [ "$(jq -r .index "$BATS_TEST_TMPDIR/armed.json")"   = "0" ]
-  [ "$(jq -r .expires "$BATS_TEST_TMPDIR/armed.json")" = "1003" ]
+  [ "$(armfield index)" = "0" ]
+  [ "$(armfield expires)" = "1003" ]
 }
 
 @test "a second press inside the window confirms the teardown" {
@@ -1160,8 +1534,6 @@ armed_exists() { [ -f "$BATS_TEST_TMPDIR/armed.json" ]; }
 }
 ```
 
-The final test is deliberate: the slot index arrives from a plugin and must never reach a shell in a way that could be interpreted. The numeric guard in `fleet-press` is what makes it inert.
-
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `./tests/run.sh`
@@ -1169,75 +1541,93 @@ Expected: FAIL — `bin/fleet-press` does not exist.
 
 - [ ] **Step 3: Write `bin/fleet-press`**
 
-```bash
-#!/usr/bin/env bash
-# Press dispatcher. Short press focuses; long press arms teardown; a second press confirms.
-set -u
+```python
+#!/usr/bin/env python3
+"""Press dispatcher.
 
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-SLOTS="$FLEET_HOME/slots.json"
-ARMED="$FLEET_HOME/armed.json"
-LOG="$FLEET_HOME/fleet.log"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+Short press focuses. Long press ARMS teardown -- it does not perform it.
+A second press inside the arm window confirms. Anything else disarms.
+"""
 
-FOCUS="${FLEET_FOCUS_CMD:-$HERE/fleet-focus}"
-KILL="${FLEET_KILL_CMD:-$HERE/fleet-kill}"
-NOW="${FLEET_NOW:-$(date +%s)}"
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-IDX="${1:-}"; VERB="${2:-short}"
-case "$IDX" in ''|*[!0-9]*) exit 0 ;; esac
-[ -f "$SLOTS" ] || exit 0
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-SLOT="$(jq -c --argjson i "$IDX" '.slots[]? | select(.index==$i)' "$SLOTS" 2>/dev/null)"
-[ -n "$SLOT" ] || exit 0
+HERE = Path(__file__).resolve().parent
 
-STATE="$(printf '%s' "$SLOT" | jq -r '.state')"
-HOST="$(printf '%s' "$SLOT" | jq -r '.host')"
-SID="$(printf '%s' "$SLOT" | jq -r '.session_id')"
-IUUID="$(printf '%s' "$SLOT" | jq -r '.iterm_session')"
-APP="$(printf '%s' "$SLOT" | jq -r '.app')"
 
-[ "$STATE" = "empty" ] && exit 0
+def now():
+    override = os.environ.get("FLEET_NOW")
+    return int(override) if override else int(time.time())
 
-# Is there a live arm marker, and is it for this slot?
-ARM_IDX=""; ARM_EXP=0
-if [ -f "$ARMED" ]; then
-  ARM_IDX="$(jq -r '.index // empty' "$ARMED" 2>/dev/null)"
-  ARM_EXP="$(jq -r '.expires // 0' "$ARMED" 2>/dev/null)"
-  case "$ARM_EXP" in ''|*[!0-9]*) ARM_EXP=0 ;; esac
-fi
-ARM_LIVE=0
-[ -n "$ARM_IDX" ] && [ "$NOW" -lt "$ARM_EXP" ] && ARM_LIVE=1
 
-# Any press clears the marker; whether it fires is decided below.
-rm -f "$ARMED" 2>/dev/null
+def main(argv):
+    if len(argv) < 2:
+        return 0
+    try:
+        index = int(argv[1])
+    except ValueError:
+        return 0                       # a plugin sends this; never trust it
+    verb = argv[2] if len(argv) > 2 else "short"
 
-if [ "$ARM_LIVE" = "1" ] && [ "$ARM_IDX" = "$IDX" ]; then
-  # Confirmed teardown.
-  printf '%s press: confirmed teardown of slot %s (%s)\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$IDX" "$SID" >>"$LOG" 2>/dev/null
-  "$KILL" "$SID"
-  exit 0
-fi
+    data = fleetlib.read_json(fleetlib.slots_path(), {}) or {}
+    matches = [s for s in data.get("slots", []) if s.get("index") == index]
+    if not matches:
+        return 0
+    slot = matches[0]
+    if slot.get("state") == "empty":
+        return 0
 
-if [ "$VERB" = "long" ]; then
-  # Only real agent sessions can be torn down.
-  if [ -z "$SID" ] || [ "$HOST" = "pinned-app" ]; then exit 0; fi
-  CFG="$("$HERE/fleet-config" 2>/dev/null)"; [ -n "$CFG" ] || CFG='{}'
-  ARM_MS="$(printf '%s' "$CFG" | jq -r '.timings.armMs // 3000')"
-  ARM_S=$(( ARM_MS / 1000 )); [ "$ARM_S" -gt 0 ] || ARM_S=3
-  TMP="$FLEET_HOME/.armed.json.tmp.$$"
-  jq -nc --argjson i "$IDX" --argjson e "$(( NOW + ARM_S ))" '{index:$i, expires:$e}' \
-    >"$TMP" 2>/dev/null && mv -f "$TMP" "$ARMED" 2>/dev/null
-  exit 0
-fi
+    focus_cmd = os.environ.get("FLEET_FOCUS_CMD") or str(HERE / "fleet-focus")
+    kill_cmd = os.environ.get("FLEET_KILL_CMD") or str(HERE / "fleet-kill")
 
-# Default: focus.
-case "$HOST" in
-  iterm2)     [ -n "$IUUID" ] && "$FOCUS" iterm2 "$IUUID" ;;
-  pinned-app) [ -n "$APP" ]   && "$FOCUS" pinned-app "$APP" ;;
-esac
-exit 0
+    # Read the arm marker, then clear it. Any press disarms; whether it
+    # FIRES is decided below.
+    arm = fleetlib.read_json(fleetlib.armed_path())
+    try:
+        fleetlib.armed_path().unlink()
+    except Exception:
+        pass
+
+    armed_live = (isinstance(arm, dict)
+                  and isinstance(arm.get("expires"), int)
+                  and now() < arm["expires"])
+
+    if armed_live and arm.get("index") == index:
+        fleetlib.log("press: confirmed teardown of slot {} ({})".format(
+            index, slot.get("session_id", "")))
+        subprocess.run([kill_cmd, slot.get("session_id", "")])
+        return 0
+
+    if verb == "long":
+        if not slot.get("session_id") or slot.get("host") == "pinned-app":
+            return 0                   # only real agent sessions are torn down
+        config = fleetlib.load_config()
+        arm_ms = config.get("timings", {}).get("armMs", 3000)
+        fleetlib.write_json_atomic(fleetlib.armed_path(), {
+            "index": index, "expires": now() + max(1, arm_ms // 1000),
+        })
+        return 0
+
+    host = slot.get("host")
+    if host == "iterm2" and slot.get("iterm_session"):
+        subprocess.run([focus_cmd, "iterm2", slot["iterm_session"]])
+    elif host == "pinned-app" and slot.get("app"):
+        subprocess.run([focus_cmd, "pinned-app", slot["app"]])
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("press: unhandled {!r}".format(err))
+        sys.exit(0)
 ```
 
 ```bash
@@ -1247,7 +1637,7 @@ chmod +x bin/fleet-press
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck clean, `40 tests, 0 failures`. Watch "long press ARMS and must not kill anything on the hold" — that assertion is the guard between your thumb and a destroyed worktree.
+Expected: `50 tests, 0 failures`. Watch "long press ARMS and must not kill anything on the hold" — that assertion is the guard between your thumb and a destroyed worktree.
 
 - [ ] **Step 5: Commit**
 
@@ -1260,18 +1650,17 @@ git commit -m "feat: press dispatch with arm/confirm guard on destructive teardo
 
 ### Task 8: `fleet-kill` — guarded teardown
 
-**The highest-stakes component in the project.** A bug here destroys real work rather than painting a wrong colour. Test it hardest.
+**The highest-stakes component in the project.** A bug here destroys work rather than pixels.
 
 **Files:**
-- Create: `bin/fleet-kill`
-- Create: `tests/kill.bats`
+- Create: `bin/fleet-kill`, `tests/kill.bats`
 
 **Interfaces:**
 - Consumes: session files (Task 3)
-- Produces: `bin/fleet-kill <session_id>` — kills the agent process, then removes the worktree **only if it is provably safe**. Env `FLEET_DRY_RUN=1` prints intended actions instead of performing them (tests use it).
+- Produces: `bin/fleet-kill <session_id>` — kills the agent process, then removes the worktree **only if provably safe**. `FLEET_DRY_RUN=1` prints intended actions instead of performing them.
 
 **Safety contract — a worktree is removed only if ALL hold:**
-1. It is a linked worktree, not a repository's main working tree.
+1. It is a linked worktree, not a repository's primary working tree.
 2. `git status --porcelain` is empty (no modifications, no untracked files).
 3. An upstream branch is configured **and** `git rev-list @{u}..HEAD` is empty.
 
@@ -1292,7 +1681,6 @@ setup() {
   export FLEET_SKIP_RECONCILE=1
   mkdir -p "$FLEET_HOME/sessions" "$BATS_TEST_TMPDIR/repos"
 
-  # A real origin, so upstream tracking is genuine rather than simulated.
   ORIGIN="$BATS_TEST_TMPDIR/repos/origin.git"
   MAIN="$BATS_TEST_TMPDIR/repos/main"
   git init -q --bare "$ORIGIN"
@@ -1306,7 +1694,6 @@ setup() {
   git -C "$MAIN" push -q -u origin HEAD:refs/heads/main
 }
 
-# Creates a linked worktree whose branch is pushed and tracking.
 mkwt() {
   git -C "$MAIN" worktree add -q -b "$1" "$BATS_TEST_TMPDIR/repos/$1"
   git -C "$MAIN" push -q origin "$1:refs/heads/$1"
@@ -1316,23 +1703,24 @@ mkwt() {
 }
 
 mksession() {
-  jq -nc --arg id "$1" --arg c "$2" \
-    '{session_id:$id, state:"idle", repo:"r", branch:"b", title:"",
-      cwd:$c, host:"iterm2", iterm_session:"U", pid:0, ts:1}' \
-    >"$FLEET_HOME/sessions/$1.json"
+  python3 - "$FLEET_HOME/sessions/$1.json" "$1" "$2" <<'PY'
+import json,sys
+p,sid,cwd = sys.argv[1:4]
+json.dump({"session_id":sid,"state":"idle","repo":"r","branch":"b","title":"",
+           "cwd":cwd,"host":"iterm2","iterm_session":"U","pid":0,"ts":1},
+          open(p,"w"))
+PY
 }
 
 @test "a clean, pushed, linked worktree is eligible for removal" {
-  mkwt clean
-  mksession CLEAN "$BATS_TEST_TMPDIR/repos/clean"
+  mkwt clean; mksession CLEAN "$BATS_TEST_TMPDIR/repos/clean"
   run "$BIN/fleet-kill" CLEAN
   [ "$status" -eq 0 ]
   [[ "$output" == *"WOULD REMOVE"* ]]
 }
 
 @test "REFUSES when tracked files are modified" {
-  mkwt dirty
-  echo change >>"$BATS_TEST_TMPDIR/repos/dirty/f.txt"
+  mkwt dirty; echo change >>"$BATS_TEST_TMPDIR/repos/dirty/f.txt"
   mksession DIRTY "$BATS_TEST_TMPDIR/repos/dirty"
   run "$BIN/fleet-kill" DIRTY
   [[ "$output" == *"REFUSING"* ]]
@@ -1341,8 +1729,7 @@ mksession() {
 }
 
 @test "REFUSES when an untracked file is present" {
-  mkwt untracked
-  echo new >"$BATS_TEST_TMPDIR/repos/untracked/brand-new.txt"
+  mkwt untracked; echo new >"$BATS_TEST_TMPDIR/repos/untracked/brand-new.txt"
   mksession UNTRACKED "$BATS_TEST_TMPDIR/repos/untracked"
   run "$BIN/fleet-kill" UNTRACKED
   [[ "$output" == *"REFUSING"* ]]
@@ -1389,6 +1776,15 @@ mksession() {
   [[ "$output" == *"REFUSING"* ]]
 }
 
+@test "a path containing spaces is handled as one argument" {
+  git -C "$MAIN" worktree add -q -b spaced "$BATS_TEST_TMPDIR/repos/has space here"
+  git -C "$MAIN" push -q origin "spaced:refs/heads/spaced"
+  git -C "$BATS_TEST_TMPDIR/repos/has space here" branch --set-upstream-to=origin/spaced >/dev/null 2>&1
+  mksession SPACED "$BATS_TEST_TMPDIR/repos/has space here"
+  run "$BIN/fleet-kill" SPACED
+  [[ "$output" == *"WOULD REMOVE"* ]]
+}
+
 @test "an unknown session id is harmless" {
   run "$BIN/fleet-kill" NOSUCHSESSION
   [ "$status" -eq 0 ]
@@ -1396,16 +1792,15 @@ mksession() {
 
 @test "a refusal marks the session failed rather than silently doing nothing" {
   unset FLEET_DRY_RUN
-  mkwt dirty2
-  echo change >>"$BATS_TEST_TMPDIR/repos/dirty2/f.txt"
+  mkwt dirty2; echo change >>"$BATS_TEST_TMPDIR/repos/dirty2/f.txt"
   mksession DIRTY2 "$BATS_TEST_TMPDIR/repos/dirty2"
   run "$BIN/fleet-kill" DIRTY2
-  [ "$(jq -r .state "$FLEET_HOME/sessions/DIRTY2.json")" = "failed" ]
+  [ "$(python3 -c "import json;print(json.load(open('$FLEET_HOME/sessions/DIRTY2.json'))['state'])")" = "failed" ]
   [ -d "$BATS_TEST_TMPDIR/repos/dirty2" ]
 }
 ```
 
-Every refusal test also asserts the absence of `WOULD REMOVE`. Asserting only that the refusal message appears would still pass if the script printed the warning and then removed the worktree anyway.
+Every refusal test also asserts the *absence* of `WOULD REMOVE`. Asserting only that the warning appears would still pass if the script printed it and removed the worktree anyway. The spaces test is the one that would have caught the bash word-splitting bug.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1414,90 +1809,159 @@ Expected: FAIL — `bin/fleet-kill` does not exist.
 
 - [ ] **Step 3: Write `bin/fleet-kill`**
 
-```bash
-#!/usr/bin/env bash
-# Guarded teardown. Kills the agent; removes the worktree ONLY if provably safe.
-set -u
+```python
+#!/usr/bin/env python3
+"""Guarded teardown.
 
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-SESSIONS="$FLEET_HOME/sessions"
-LOG="$FLEET_HOME/fleet.log"
-HERE="$(cd "$(dirname "$0")" && pwd)"
-DRY="${FLEET_DRY_RUN:-0}"
+Kills the agent, then removes the worktree ONLY if provably safe.
+A thumb on a Stream Deck must never be able to destroy uncommitted work.
+"""
 
-SID="${1:-}"
-[ -n "$SID" ] || exit 0
-SFILE="$SESSIONS/$SID.json"
-[ -f "$SFILE" ] || exit 0
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
 
-log() { printf '%s kill[%s]: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SID" "$*" >>"$LOG" 2>/dev/null; }
-say() { printf '%s\n' "$*"; log "$*"; }
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-CWD="$(jq -r '.cwd // empty' "$SFILE" 2>/dev/null)"
-PID="$(jq -r '.pid // 0' "$SFILE" 2>/dev/null)"
-case "$PID" in ''|*[!0-9]*) PID=0 ;; esac
+HERE = Path(__file__).resolve().parent
 
-refuse() {
-  say "REFUSING to remove worktree: $1"
-  say "  path: ${CWD:-<unknown>}"
-  if [ "$DRY" != "1" ]; then
-    TMP="$SESSIONS/.$SID.json.tmp.$$"
-    jq -c '.state="failed"' "$SFILE" >"$TMP" 2>/dev/null && mv -f "$TMP" "$SFILE" 2>/dev/null
-    [ "${FLEET_SKIP_RECONCILE:-0}" = "1" ] || "$HERE/fleet-reconcile" >/dev/null 2>&1
-  fi
-  exit 0
-}
 
-# 1. Stop the agent first, regardless of what happens to the worktree.
-if [ "$PID" -gt 0 ] && kill -0 "$PID" 2>/dev/null; then
-  if [ "$DRY" = "1" ]; then say "WOULD KILL pid $PID"; else kill "$PID" 2>/dev/null; log "killed pid $PID"; fi
-fi
+def say(message):
+    print(message)
+    fleetlib.log("kill: " + message)
 
-# 2. Decide whether the worktree may be removed.
-[ -n "$CWD" ] && [ -d "$CWD" ] || refuse "session has no usable working directory"
 
-TOP="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)" || refuse "not a git repository"
+def mark_failed(session_path, dry_run):
+    if dry_run:
+        return
+    data = fleetlib.read_json(session_path)
+    if isinstance(data, dict):
+        data["state"] = "failed"
+        try:
+            fleetlib.write_json_atomic(session_path, data)
+        except Exception:
+            pass
+    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+        try:
+            subprocess.run([sys.executable, str(HERE / "fleet-reconcile")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
-# A linked worktree has .git as a FILE; a primary working tree has it as a directory.
-[ -f "$TOP/.git" ] || refuse "this is a primary working tree, not a linked worktree"
 
-[ -z "$(git -C "$CWD" status --porcelain 2>/dev/null)" ] \
-  || refuse "uncommitted changes or untracked files present"
+def unsafe_reason(cwd):
+    """Returns a human reason the worktree must not be removed, or None."""
+    if not cwd or not Path(cwd).is_dir():
+        return "session has no usable working directory"
 
-git -C "$CWD" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 \
-  || refuse "no upstream branch configured, cannot prove work is pushed"
+    code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
+    if code != 0 or not top:
+        return "not a git repository"
 
-[ -z "$(git -C "$CWD" rev-list '@{u}..HEAD' 2>/dev/null)" ] \
-  || refuse "unpushed commits present"
+    # A linked worktree has .git as a FILE; a primary working tree has a directory.
+    if not (Path(top) / ".git").is_file():
+        return "this is a primary working tree, not a linked worktree"
 
-BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    code, status = fleetlib.git(["status", "--porcelain"], cwd)
+    if code != 0:
+        return "could not read git status"
+    if status:
+        return "uncommitted changes or untracked files present"
 
-# 3. Safe. Remove.
-if [ "$DRY" = "1" ]; then
-  say "WOULD REMOVE worktree $TOP (branch $BRANCH)"
-else
-  say "removing worktree $TOP (branch $BRANCH)"
-  git -C "$TOP" worktree remove "$TOP" 2>>"$LOG" || {
-    say "git worktree remove failed; leaving everything in place"; exit 0
-  }
-  rm -f "$SFILE" 2>/dev/null
-  [ "${FLEET_SKIP_RECONCILE:-0}" = "1" ] || "$HERE/fleet-reconcile" >/dev/null 2>&1
-fi
-exit 0
+    code, _ = fleetlib.git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
+    if code != 0:
+        return "no upstream branch configured, cannot prove work is pushed"
+
+    code, ahead = fleetlib.git(["rev-list", "@{u}..HEAD"], cwd)
+    if code != 0:
+        return "could not compare against upstream"
+    if ahead:
+        return "unpushed commits present"
+
+    return None
+
+
+def main(argv):
+    if len(argv) < 2 or not argv[1]:
+        return 0
+    session_id = argv[1]
+    session_path = fleetlib.sessions_dir() / "{}.json".format(session_id)
+    data = fleetlib.read_json(session_path)
+    if not isinstance(data, dict):
+        return 0
+
+    dry_run = os.environ.get("FLEET_DRY_RUN") == "1"
+    cwd = data.get("cwd", "")
+    pid = data.get("pid", 0)
+
+    # 1. Stop the agent regardless of what happens to the worktree.
+    if isinstance(pid, int) and pid > 0:
+        if dry_run:
+            say("WOULD KILL pid {}".format(pid))
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                fleetlib.log("kill: sent SIGTERM to pid {}".format(pid))
+            except Exception:
+                pass
+
+    # 2. Decide whether the worktree may be removed.
+    reason = unsafe_reason(cwd)
+    if reason:
+        say("REFUSING to remove worktree: {}".format(reason))
+        say("  path: {}".format(cwd or "<unknown>"))
+        mark_failed(session_path, dry_run)
+        return 0
+
+    _, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
+    _, branch = fleetlib.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+
+    # 3. Safe. Remove the worktree -- but never delete the branch: worktree
+    #    removal is reversible with `git worktree add`, branch deletion is not.
+    if dry_run:
+        say("WOULD REMOVE worktree {} (branch {})".format(top, branch))
+        return 0
+
+    say("removing worktree {} (branch {})".format(top, branch))
+    code, _ = fleetlib.git(["worktree", "remove", top], top)
+    if code != 0:
+        say("git worktree remove failed; leaving everything in place")
+        return 0
+
+    try:
+        session_path.unlink()
+    except Exception:
+        pass
+    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+        try:
+            subprocess.run([sys.executable, str(HERE / "fleet-reconcile")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("kill: unhandled {!r}".format(err))
+        sys.exit(0)
 ```
 
 ```bash
 chmod +x bin/fleet-kill
 ```
 
-Note the branch is deliberately **not** deleted. Removing the worktree is reversible via `git worktree add`; deleting the branch reference is closer to permanent, and the spec's rule is that the key makes only the safe path fast.
-
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck clean, `50 tests, 0 failures`.
+Expected: `62 tests, 0 failures`.
 
-**Do not proceed with any test in this file failing.** This is the one component whose bugs destroy work rather than pixels. If shellcheck flags an unquoted expansion here, treat it as a defect, not a style note — a repo path containing a space is exactly how a `git -C $CWD` becomes two arguments.
+**Do not proceed with any test in this file failing.** This is the one component whose bugs destroy work rather than pixels.
 
 - [ ] **Step 5: Commit**
 
@@ -1511,12 +1975,11 @@ git commit -m "feat: guarded worktree teardown that refuses to destroy unpushed 
 ### Task 9: `fleet-fail` — manual failure marking
 
 **Files:**
-- Create: `bin/fleet-fail`
-- Create: `tests/fail.bats`
+- Create: `bin/fleet-fail`, `tests/fail.bats`
 
 **Interfaces:**
 - Consumes: `slots.json` (Task 4), session files (Task 3)
-- Produces: `bin/fleet-fail <slotIndex>` sets that slot's session to `failed`; `bin/fleet-fail --clear <slotIndex>` returns it to `idle`.
+- Produces: `bin/fleet-fail <slotIndex>` sets that slot's session to `failed`; `--clear <slotIndex>` returns it to `idle`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1534,15 +1997,15 @@ setup() {
   mkdir -p "$BATS_TEST_TMPDIR/sessions" "$FLEET_CONFIG_DIR"
   cp "$ROOT/config/fleet.json" "$FLEET_CONFIG_DIR/fleet.json"
 
-  jq -nc '{session_id:"S1",state:"working",repo:"r",branch:"b",title:"",
-           cwd:"/tmp",host:"iterm2",iterm_session:"U",pid:0,ts:1}' \
-    >"$BATS_TEST_TMPDIR/sessions/S1.json"
+  python3 -c "import json;json.dump({'session_id':'S1','state':'working','repo':'r',\
+'branch':'b','title':'','cwd':'/tmp','host':'iterm2','iterm_session':'U','pid':0,'ts':1},\
+open('$BATS_TEST_TMPDIR/sessions/S1.json','w'))"
   cat >"$BATS_TEST_TMPDIR/slots.json" <<'EOF'
 {"ts":1,"overflow":0,"slots":[{"index":0,"state":"working","label_top":"r","label_bottom":"b","session_id":"S1","host":"iterm2","iterm_session":"U","cwd":"/tmp","app":""}]}
 EOF
 }
 
-state() { jq -r .state "$BATS_TEST_TMPDIR/sessions/S1.json"; }
+state() { python3 -c "import json;print(json.load(open('$BATS_TEST_TMPDIR/sessions/S1.json'))['state'])"; }
 
 @test "fleet-fail marks the slot's session failed" {
   "$BIN/fleet-fail" 0
@@ -1575,31 +2038,61 @@ Expected: FAIL — `bin/fleet-fail` does not exist.
 
 - [ ] **Step 3: Write `bin/fleet-fail`**
 
-```bash
-#!/usr/bin/env bash
-# Marks a slot's session failed (sticky red), or clears it back to idle.
-set -u
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-SESSIONS="$FLEET_HOME/sessions"
-SLOTS="$FLEET_HOME/slots.json"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+```python
+#!/usr/bin/env python3
+"""Marks a slot's session failed (sticky red), or clears it back to idle.
 
-NEW="failed"
-if [ "${1:-}" = "--clear" ]; then NEW="idle"; shift; fi
-IDX="${1:-}"
-case "$IDX" in ''|*[!0-9]*) exit 0 ;; esac
-[ -f "$SLOTS" ] || exit 0
+  fleet-fail <slot>
+  fleet-fail --clear <slot>
+"""
 
-SID="$(jq -r --argjson i "$IDX" '.slots[]? | select(.index==$i) | .session_id' "$SLOTS" 2>/dev/null)"
-[ -n "$SID" ] && [ -f "$SESSIONS/$SID.json" ] || exit 0
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-TMP="$SESSIONS/.$SID.json.tmp.$$"
-jq -c --arg s "$NEW" '.state=$s' "$SESSIONS/$SID.json" >"$TMP" 2>/dev/null \
-  && mv -f "$TMP" "$SESSIONS/$SID.json" 2>/dev/null
-rm -f "$TMP" 2>/dev/null
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-[ "${FLEET_SKIP_RECONCILE:-0}" = "1" ] || "$HERE/fleet-reconcile" >/dev/null 2>&1
-exit 0
+HERE = Path(__file__).resolve().parent
+
+
+def main(argv):
+    args = argv[1:]
+    new_state = "failed"
+    if args and args[0] == "--clear":
+        new_state = "idle"
+        args = args[1:]
+    if not args:
+        return 0
+    try:
+        index = int(args[0])
+    except ValueError:
+        return 0
+
+    data = fleetlib.read_json(fleetlib.slots_path(), {}) or {}
+    matches = [s for s in data.get("slots", []) if s.get("index") == index]
+    if not matches or not matches[0].get("session_id"):
+        return 0
+
+    path = fleetlib.sessions_dir() / "{}.json".format(matches[0]["session_id"])
+    session = fleetlib.read_json(path)
+    if not isinstance(session, dict):
+        return 0
+    session["state"] = new_state
+    fleetlib.write_json_atomic(path, session)
+
+    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+        try:
+            subprocess.run([sys.executable, str(HERE / "fleet-reconcile")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
 ```
 
 ```bash
@@ -1609,7 +2102,7 @@ chmod +x bin/fleet-fail
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `./tests/run.sh`
-Expected: shellcheck clean, `54 tests, 0 failures`.
+Expected: `66 tests, 0 failures`.
 
 - [ ] **Step 5: Commit**
 
@@ -1620,21 +2113,21 @@ git commit -m "feat: manual failure marking and clearing"
 
 ---
 
-### Task 10: Stream Deck plugin — scaffold and rendering
+### Task 10: Stream Deck plugin — scaffold and renderer
 
 **Files:**
 - Create: `plugin/package.json`, `plugin/tsconfig.json`, `plugin/rollup.config.mjs`
 - Create: `plugin/com.louisalexander.flightdeck.sdPlugin/manifest.json`
-- Create: `plugin/src/render.ts`, `plugin/src/types.ts`
+- Create: `plugin/src/types.ts`, `plugin/src/glyphs.ts`, `plugin/src/render.ts`
 - Create: `plugin/src/render.test.mjs`
 
 **Interfaces:**
 - Consumes: `slots.json` schema (Task 4), `config/fleet.json` (Task 2)
 - Produces:
-  - `Slot`, `Config` TypeScript types mirroring the schemas.
-  - `renderSvg(slot: Slot, cfg: Config, armed: boolean): string` — pure, returns SVG markup.
-  - `toDataUri(svg: string): string` — returns `data:image/svg+xml;base64,…`.
-  - Plugin action UUID `com.louisalexander.flightdeck.slot`, with per-key setting `{ slotIndex: number }`.
+  - `Slot`, `Config`, `StateStyle` types mirroring the schemas.
+  - `renderSvg(slot, cfg, armed) -> string` — pure.
+  - `toDataUri(svg) -> string`.
+  - Action UUID `com.louisalexander.flightdeck.slot`, per-key setting `{ slotIndex: number }`.
 
 - [ ] **Step 1: Scaffold the plugin package**
 
@@ -1647,7 +2140,7 @@ npm i -D typescript rollup @rollup/plugin-typescript @rollup/plugin-node-resolve
 cd ..
 ```
 
-Set `plugin/package.json` `"type"` to `"module"` and add scripts:
+Set `plugin/package.json` `"type": "module"` and add:
 
 ```json
 {
@@ -1661,7 +2154,7 @@ Set `plugin/package.json` `"type"` to `"module"` and add scripts:
 
 - [ ] **Step 2: Write the failing render test**
 
-Create `plugin/src/render.test.mjs`. It imports the compiled output, so it fails until Step 4 builds.
+Create `plugin/src/render.test.mjs`:
 
 ```javascript
 import assert from "node:assert";
@@ -1669,9 +2162,10 @@ import { renderSvg, toDataUri } from "../com.louisalexander.flightdeck.sdPlugin/
 
 const cfg = {
   states: {
-    working: { color: "#1F4FD8", glyph: "●" },
-    empty:   { color: "#101010", glyph: "" },
-    armed:   { color: "#C62828", glyph: "⚠" }
+    working: { color: "#1256A3", glyph: "working", glyphColor: "#FFFFFFCC", textColor: "#FFFFFF" },
+    blocked: { color: "#F5A623", glyph: "blocked", glyphColor: "#1A1200", textColor: "#1A1200" },
+    empty:   { color: "#000000", glyph: "none",    glyphColor: "#000000",  textColor: "#000000" },
+    armed:   { color: "#0A0A0A", glyph: "armed",   glyphColor: "#F5A623",  textColor: "#F5A623" }
   }
 };
 const slot = {
@@ -1680,19 +2174,29 @@ const slot = {
 };
 
 let svg = renderSvg(slot, cfg, false);
-assert.ok(svg.includes("#1F4FD8"), "uses the state colour");
-assert.ok(svg.includes("flightdeck"), "renders the top label");
-assert.ok(svg.includes("main"), "renders the bottom label");
-assert.ok(svg.includes("●"), "renders the glyph");
+assert.ok(svg.includes("#1256A3"), "uses the state colour");
+assert.ok(svg.includes("FLIGHTDECK"), "repo line is uppercased");
+assert.ok(svg.includes("main"), "renders the task line");
 
-// Armed overrides colour and copy, regardless of underlying state.
+// Glyphs must be geometry, never text: Helvetica lacks U+25B2/U+25B6.
+assert.ok(!svg.includes("▶") && !svg.includes("▲"),
+  "no literal arrow characters anywhere in the output");
+assert.ok(/<(polygon|path|circle|line)\b/.test(svg), "glyph is drawn as geometry");
+
+// Empty must be genuinely blank: black, no glyph, no text.
+const emptySvg = renderSvg({ ...slot, state: "empty", label_top: "", label_bottom: "" }, cfg, false);
+assert.ok(emptySvg.includes("#000000"), "empty is pure black");
+assert.ok(!/<(polygon|path|circle|line)\b/.test(emptySvg), "empty draws no glyph");
+
+// Armed must NOT be red -- red is reserved for observed failure.
 svg = renderSvg(slot, cfg, true);
-assert.ok(svg.includes("#C62828"), "armed uses the armed colour");
+assert.ok(svg.includes("#0A0A0A"), "armed uses the near-black background");
+assert.ok(svg.includes("#F5A623"), "armed uses amber, not red");
+assert.ok(!/#B42318/i.test(svg), "armed never uses the failure red");
 assert.ok(svg.includes("CONFIRM"), "armed shows CONFIRM");
 
 // XML injection through a branch name must not break the document.
-const nasty = { ...slot, label_bottom: 'a<b>&"c' };
-svg = renderSvg(nasty, cfg, false);
+svg = renderSvg({ ...slot, label_bottom: 'a<b>&"c' }, cfg, false);
 assert.ok(!svg.includes("<b>"), "escapes angle brackets in labels");
 assert.ok(svg.includes("&amp;"), "escapes ampersands in labels");
 
@@ -1710,7 +2214,7 @@ console.log("render tests passed");
 Run: `cd plugin && npm test`
 Expected: FAIL — module not found, nothing is built yet.
 
-- [ ] **Step 4: Write the types and renderer**
+- [ ] **Step 4: Write the types and glyph geometry**
 
 Create `plugin/src/types.ts`:
 
@@ -1729,16 +2233,70 @@ export type Slot = {
 
 export type SlotsFile = { ts: number; overflow: number; slots: Slot[] };
 
-export type StateStyle = { color: string; glyph: string };
+export type StateStyle = {
+  color: string;
+  glyph: string;
+  glyphColor: string;
+  textColor: string;
+};
+
 export type Config = { states: Record<string, StateStyle> };
 ```
+
+Create `plugin/src/glyphs.ts`. Every glyph is geometry, positioned in a 48×48 box the renderer places at the top-left:
+
+```typescript
+/**
+ * Lifecycle glyphs as SVG geometry rather than text.
+ *
+ * Helvetica has no U+25B2 or U+25B6, so a <text> glyph would fall back to
+ * an arbitrary font with different metrics -- inconsistent positioning at
+ * best, a blank key at worst. Geometry is exact and cannot fail to render.
+ *
+ * Each function draws inside a 48x48 box at the origin.
+ */
+export const GLYPHS: Record<string, (fill: string) => string> = {
+  // ▲ blocked
+  blocked: (f) => `<polygon points="24,8 42,38 6,38" fill="${f}"/>`,
+
+  // ▶ working
+  working: (f) => `<polygon points="12,8 40,24 12,40" fill="${f}"/>`,
+
+  // ✓ done
+  done: (f) =>
+    `<path d="M9 25 l9 10 l21 -24" fill="none" stroke="${f}" stroke-width="7" ` +
+    `stroke-linecap="round" stroke-linejoin="round"/>`,
+
+  // · idle
+  idle: (f) => `<circle cx="24" cy="24" r="6" fill="${f}"/>`,
+
+  // × failed
+  failed: (f) =>
+    `<path d="M10 10 L38 38 M38 10 L10 38" stroke="${f}" stroke-width="7" ` +
+    `stroke-linecap="round"/>`,
+
+  // ⚠ armed — deliberately NOT red; red means observed failure
+  armed: (f) =>
+    `<polygon points="24,5 45,41 3,41" fill="none" stroke="${f}" stroke-width="5" ` +
+    `stroke-linejoin="round"/>` +
+    `<path d="M24 17 v11" stroke="${f}" stroke-width="5" stroke-linecap="round"/>` +
+    `<circle cx="24" cy="35" r="2.6" fill="${f}"/>`,
+
+  none: () => ""
+};
+```
+
+- [ ] **Step 5: Write the renderer**
 
 Create `plugin/src/render.ts`:
 
 ```typescript
 import type { Slot, Config, StateStyle } from "./types.js";
+import { GLYPHS } from "./glyphs.js";
 
-const FALLBACK: StateStyle = { color: "#101010", glyph: "" };
+const FALLBACK: StateStyle = {
+  color: "#000000", glyph: "none", glyphColor: "#000000", textColor: "#000000"
+};
 
 function esc(text: string): string {
   return text
@@ -1748,21 +2306,32 @@ function esc(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** Renders one key at @2x (144px) for a 96px Stream Deck XL key. Pure. */
+/**
+ * One key at @2x (144px) for a 96px Stream Deck XL key. Pure.
+ *
+ * Three layers only: state background, one lifecycle glyph, two identity
+ * lines anchored near the bottom. No chrome.
+ */
 export function renderSvg(slot: Slot, cfg: Config, armed: boolean): string {
   const style: StateStyle = armed
-    ? cfg.states["armed"] ?? { color: "#C62828", glyph: "⚠" }
+    ? cfg.states["armed"] ?? FALLBACK
     : cfg.states[slot.state] ?? FALLBACK;
 
-  const top = armed ? "" : esc(slot.label_top);
-  const bottom = armed ? "CONFIRM?" : esc(slot.label_bottom);
+  const drawGlyph = GLYPHS[style.glyph] ?? GLYPHS["none"];
+  const glyph = `<g transform="translate(8,8)">${drawGlyph(style.glyphColor)}</g>`;
+
+  const top = armed ? "" : esc((slot.label_top ?? "").toUpperCase());
+  const bottom = armed ? "CONFIRM?" : esc(slot.label_bottom ?? "");
 
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">',
     `<rect width="144" height="144" fill="${style.color}"/>`,
-    `<text x="10" y="30" font-family="Helvetica,Arial" font-size="22" fill="#ffffffcc">${esc(style.glyph)}</text>`,
-    `<text x="72" y="74" text-anchor="middle" font-family="Helvetica,Arial" font-size="19" fill="#ffffffaa">${top}</text>`,
-    `<text x="72" y="104" text-anchor="middle" font-family="Helvetica,Arial" font-size="22" font-weight="bold" fill="#ffffff">${bottom}</text>`,
+    glyph,
+    `<text x="72" y="103" text-anchor="middle" font-family="Helvetica,Arial" `,
+    `font-size="17" font-weight="600" letter-spacing="0.6" `,
+    `fill="${style.textColor}" fill-opacity="0.72">${top}</text>`,
+    `<text x="72" y="128" text-anchor="middle" font-family="Helvetica,Arial" `,
+    `font-size="23" font-weight="700" fill="${style.textColor}">${bottom}</text>`,
     "</svg>"
   ].join("");
 }
@@ -1813,7 +2382,7 @@ export default [
 ];
 ```
 
-- [ ] **Step 5: Write the manifest**
+- [ ] **Step 6: Write the manifest and icons**
 
 Create `plugin/com.louisalexander.flightdeck.sdPlugin/manifest.json`:
 
@@ -1822,7 +2391,7 @@ Create `plugin/com.louisalexander.flightdeck.sdPlugin/manifest.json`:
   "Name": "Flightdeck",
   "Version": "1.0.0.0",
   "Author": "louisalexander",
-  "Description": "Live view of every running Claude Code agent.",
+  "Description": "Live annunciator row for running Claude Code agents.",
   "Category": "Flightdeck",
   "Icon": "imgs/plugin",
   "URL": "https://github.com/louisalexander/flightdeck",
@@ -1845,24 +2414,25 @@ Create `plugin/com.louisalexander.flightdeck.sdPlugin/manifest.json`:
 }
 ```
 
-Create the three required PNGs (Stream Deck refuses to load a plugin with missing icons):
+Stream Deck refuses to load a plugin with missing icons, so create three PNGs:
 
 ```bash
 cd plugin/com.louisalexander.flightdeck.sdPlugin/imgs
 for n in plugin action key; do
-  printf '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144"><rect width="144" height="144" fill="#1F4FD8"/><text x="72" y="92" text-anchor="middle" font-family="Helvetica" font-size="64" fill="#fff">F</text></svg>' > "$n.svg"
+  printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144"><rect width="144" height="144" fill="#0A0A0A"/><polygon points="40,44 40,100 92,72" fill="#F5A623"/></svg>' > "$n.svg"
   sips -s format png "$n.svg" --out "$n.png" >/dev/null 2>&1 || \
     qlmanage -t -s 144 -o . "$n.svg" >/dev/null 2>&1
   rm -f "$n.svg"
 done
+ls -la
 cd -
 ```
 
-If neither converter produces a PNG, create solid 144×144 placeholders any way available; the images only need to exist and be valid PNGs.
+If neither converter produces a PNG, create solid 144×144 placeholders any way available; they only need to exist and be valid.
 
-- [ ] **Step 6: Build and run the tests**
+- [ ] **Step 7: Build and run the tests**
 
-Because `src/plugin.ts` does not exist yet, temporarily build only the renderer:
+`src/plugin.ts` does not exist yet, so build only the renderer:
 
 ```bash
 cd plugin && npx tsc && npm test
@@ -1870,11 +2440,11 @@ cd plugin && npx tsc && npm test
 
 Expected: PASS — `render tests passed`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add plugin
-git commit -m "feat: Stream Deck plugin scaffold with pure SVG key renderer"
+git commit -m "feat: plugin scaffold with geometry glyphs and non-red armed state"
 ```
 
 ---
@@ -1884,13 +2454,15 @@ git commit -m "feat: Stream Deck plugin scaffold with pure SVG key renderer"
 **Files:**
 - Create: `plugin/src/plugin.ts`
 - Create: `plugin/com.louisalexander.flightdeck.sdPlugin/ui/slot.html`
-- Modify: `plugin/package.json` (build script)
 
 **Interfaces:**
-- Consumes: `renderSvg`/`toDataUri` (Task 10), `slots.json` and `armed.json` (Tasks 4 and 7), `bin/fleet-press` (Task 7)
-- Produces: a running plugin. Repo root is resolved from the `FLIGHTDECK_REPO` environment variable, falling back to `~/code/flightdeck`.
+- Consumes: `renderSvg`/`toDataUri` (Task 10), `slots.json`/`armed.json` (Tasks 4, 7), `bin/fleet-press` (Task 7)
+- Produces: a running plugin. Repo root from `FLIGHTDECK_REPO`, else `~/code/flightdeck`. **Python interpreter read from `~/.fleet/interpreter`**, written by `install.sh`, falling back to `python3`.
 
-**Critical implementation detail:** `fleet-reconcile` replaces `slots.json` via `mv`. `fs.watch` on a *file* stops firing once the inode is swapped. **Watch the directory `~/.fleet` and filter events by filename.**
+**Two critical implementation details:**
+
+1. `fleet-reconcile` replaces `slots.json` via `os.replace()`. `fs.watch` bound to a *file* stops firing once the inode is swapped. **Watch the directory and filter by filename.**
+2. The plugin is launched by the Stream Deck app, which does not inherit your shell `PATH`. `python3` may not resolve. Use the absolute interpreter path.
 
 - [ ] **Step 1: Write the property inspector**
 
@@ -1916,7 +2488,7 @@ Create `plugin/com.louisalexander.flightdeck.sdPlugin/ui/slot.html`:
 </html>
 ```
 
-The `sdpi-components` script is fetched by the Stream Deck app's own webview, which has network access. If the property inspector renders blank, replace the select with a plain `<input type="number">` wired via the standard `sendToPlugin` handshake.
+The `sdpi-components` script is fetched by the Stream Deck app's own webview, which has network access. If the inspector renders blank, replace the select with a plain `<input type="number">` wired via the standard `sendToPlugin` handshake.
 
 - [ ] **Step 2: Write the plugin**
 
@@ -1947,15 +2519,26 @@ function readJson<T>(path: string): T | null {
     if (!existsSync(path)) return null;
     return JSON.parse(readFileSync(path, "utf8")) as T;
   } catch {
-    return null;               // mid-write or corrupt: skip this tick
+    return null;                     // mid-write or corrupt: skip this tick
   }
+}
+
+/**
+ * The Stream Deck app does not inherit a shell PATH, and this machine has
+ * four python3 installs. install.sh records the chosen absolute path.
+ */
+function interpreter(): string {
+  try {
+    const pinned = readFileSync(join(FLEET_HOME, "interpreter"), "utf8").trim();
+    if (pinned) return pinned;
+  } catch { /* fall through */ }
+  return "python3";
 }
 
 function loadConfig(): Config {
   const base = readJson<Config>(join(REPO, "config", "fleet.json"));
   const local = readJson<Partial<Config>>(join(REPO, "config", "fleet.local.json"));
-  const states = { ...(base?.states ?? {}), ...(local?.states ?? {}) };
-  return { states };
+  return { states: { ...(base?.states ?? {}), ...(local?.states ?? {}) } };
 }
 
 const EMPTY = (index: number): Slot => ({
@@ -1965,11 +2548,10 @@ const EMPTY = (index: number): Slot => ({
 
 @action({ UUID: "com.louisalexander.flightdeck.slot" })
 export class FleetSlot extends SingletonAction<Settings> {
-  /** Every visible key, so a file change can repaint all of them. */
   private visible = new Map<string, { ev: WillAppearEvent<Settings>; index: number }>();
   private downAt = new Map<string, number>();
   private config: Config = loadConfig();
-  private armTimer: NodeJS.Timeout | null = null;
+  private longPressMs = 800;
 
   constructor() {
     super();
@@ -1982,7 +2564,7 @@ export class FleetSlot extends SingletonAction<Settings> {
     } catch (err) {
       streamDeck.logger.error(`cannot watch ${FLEET_HOME}: ${String(err)}`);
     }
-    // Safety net for missed events and for arm expiry.
+    // Safety net for missed events, and it expires the armed state on time.
     setInterval(() => this.repaintAll(), 1000);
   }
 
@@ -2012,10 +2594,10 @@ export class FleetSlot extends SingletonAction<Settings> {
   override onKeyUp(ev: KeyUpEvent<Settings>): void {
     const down = this.downAt.get(ev.action.id) ?? Date.now();
     this.downAt.delete(ev.action.id);
-    const verb = Date.now() - down >= 800 ? "long" : "short";
+    const verb = Date.now() - down >= this.longPressMs ? "long" : "short";
     const index = this.visible.get(ev.action.id)?.index ?? 0;
 
-    execFile(join(REPO, "bin", "fleet-press"), [String(index), verb], (err) => {
+    execFile(interpreter(), [join(REPO, "bin", "fleet-press"), String(index), verb], (err) => {
       if (err) streamDeck.logger.error(`fleet-press failed: ${err.message}`);
       this.repaintAll();
     });
@@ -2033,7 +2615,7 @@ export class FleetSlot extends SingletonAction<Settings> {
     const arm = readJson<{ index: number; expires: number }>(ARMED_PATH);
     const armed = !!arm && arm.index === index && Date.now() / 1000 < arm.expires;
 
-    ev.action.setTitle("");                                  // the SVG carries all text
+    ev.action.setTitle("");            // the SVG carries all text
     ev.action.setImage(toDataUri(renderSvg(slot, this.config, armed)));
   }
 }
@@ -2044,13 +2626,11 @@ streamDeck.connect();
 
 - [ ] **Step 3: Build**
 
-Restore the full build now that `src/plugin.ts` exists:
-
 ```bash
 cd plugin && npm run build && ls -la com.louisalexander.flightdeck.sdPlugin/bin/
 ```
 
-Expected: both `plugin.js` and `render.js` present.
+Expected: `plugin.js` and `render.js` present.
 
 - [ ] **Step 4: Verify the renderer tests still pass**
 
@@ -2061,26 +2641,31 @@ Expected: PASS.
 
 ```bash
 DEST=~/Library/Application\ Support/com.elgato.StreamDeck/Plugins
-ln -sfn "$PWD/plugin/com.louisalexander.flightdeck.sdPlugin" "$DEST/com.louisalexander.flightdeck.sdPlugin"
+ln -sfn "$PWD/plugin/com.louisalexander.flightdeck.sdPlugin" \
+        "$DEST/com.louisalexander.flightdeck.sdPlugin"
+command -v python3 > ~/.fleet/interpreter          # install.sh does this properly later
 osascript -e 'quit app "Elgato Stream Deck"' 2>/dev/null
 sleep 2 && open -a "Elgato Stream Deck"
 ```
 
-Then, by hand:
-1. Drag **Fleet Slot** onto key 1 of Row 1; set Slot to `0`. Repeat for keys 2–8 with slots 1–7.
-2. Seed fake state and confirm the keys paint:
+Then by hand:
+1. Drag **Fleet Slot** onto key 1 of Row 1, set Slot `0`. Repeat for keys 2–8 with slots 1–7.
+2. Seed fake state:
    ```bash
    FLEET_SKIP_RECONCILE=1 printf '{"session_id":"DEMO","cwd":"'"$PWD"'"}' | ./bin/fleet-emit UserPromptSubmit
-   ./bin/fleet-reconcile && jq . ~/.fleet/slots.json
+   ./bin/fleet-reconcile && cat ~/.fleet/slots.json
    ```
-   Key 1 must turn blue and read `flightdeck` over the branch name.
-3. `printf '{"session_id":"DEMO","cwd":"'"$PWD"'"}' | ./bin/fleet-emit Notification` → key 1 turns amber.
+   Key 1 must turn dark blue with a ▶ triangle, `FLIGHTDECK` above the branch name.
+3. `printf '{"session_id":"DEMO","cwd":"'"$PWD"'"}' | ./bin/fleet-emit Notification` → key 1 turns amber with ▲ and **dark** text.
 4. Press key 1 → the iTerm session focuses.
-5. Hold key 1 for a second → it turns red and reads `CONFIRM?`; wait four seconds → it reverts without killing anything.
-6. Clean up: `printf '{"session_id":"DEMO","cwd":"'"$PWD"'"}' | ./bin/fleet-emit SessionEnd && ./bin/fleet-reconcile`
+5. Hold key 1 for a second → near-black with an amber warning triangle and `CONFIRM?`. **It must not be red.** Wait four seconds → it returns to its previous lifecycle colour without killing anything.
+6. Clean up:
+   ```bash
+   printf '{"session_id":"DEMO","cwd":"'"$PWD"'"}' | ./bin/fleet-emit SessionEnd && ./bin/fleet-reconcile
+   ```
+   Key 1 goes fully black with no glyph and no text.
 
-If keys stay blank, check `streamDeck.logger` output under
-`~/Library/Logs/ElgatoStreamDeck/` for the plugin's messages.
+If keys stay blank, check `~/Library/Logs/ElgatoStreamDeck/` for the plugin's log output.
 
 - [ ] **Step 6: Commit**
 
@@ -2094,83 +2679,150 @@ git commit -m "feat: plugin watches slot state, paints keys, and dispatches pres
 ### Task 12: `install.sh`, `fleet-doctor`, and README
 
 **Files:**
-- Create: `bin/fleet-doctor`, `install.sh`, `README.md`
-- Create: `hooks/settings.snippet.json`
+- Create: `bin/fleet-doctor`, `install.sh`, `README.md`, `hooks/settings.snippet.json`
 
 **Interfaces:**
 - Consumes: everything above
-- Produces: `./install.sh` performs a full machine setup; `bin/fleet-doctor` exits 0 if every check passes, 1 otherwise.
+- Produces: `./install.sh` performs full machine setup and **pins the Python interpreter**; `bin/fleet-doctor` exits 0 if every check passes, 1 otherwise.
 
 - [ ] **Step 1: Write the hooks snippet**
 
-Create `hooks/settings.snippet.json`. `__REPO__` is substituted by `install.sh`.
+Create `hooks/settings.snippet.json`. `__PYTHON__` and `__REPO__` are substituted by `install.sh`; pinning the interpreter here is what keeps hooks working regardless of the caller's `PATH`.
 
 ```json
 {
   "hooks": {
-    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "__REPO__/bin/fleet-emit SessionStart" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "__REPO__/bin/fleet-emit UserPromptSubmit" }] }],
-    "Notification":     [{ "hooks": [{ "type": "command", "command": "__REPO__/bin/fleet-emit Notification" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "__REPO__/bin/fleet-emit Stop" }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "__REPO__/bin/fleet-emit SessionEnd" }] }]
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionStart" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit UserPromptSubmit" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Notification" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Stop" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionEnd" }] }]
   }
 }
 ```
 
 - [ ] **Step 2: Write `bin/fleet-doctor`**
 
-```bash
-#!/usr/bin/env bash
-# Verifies every moving part. Exits 0 only if all checks pass.
-set -u
-FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
-FAILED=0
+```python
+#!/usr/bin/env python3
+"""Verifies every moving part. Exits 0 only if all checks pass."""
 
-ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
-bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; FAILED=1; }
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-printf 'flightdeck doctor\n\n'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
 
-for t in jq git osascript node; do
-  command -v "$t" >/dev/null 2>&1 && ok "$t present" || bad "$t missing"
-done
+GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
+failed = False
 
-mkdir -p "$FLEET_HOME/sessions" 2>/dev/null
-if touch "$FLEET_HOME/.probe" 2>/dev/null; then rm -f "$FLEET_HOME/.probe"; ok "$FLEET_HOME writable"
-else bad "$FLEET_HOME not writable"; fi
 
-S="$HOME/.claude/settings.json"
-if [ -f "$S" ]; then
-  n="$(jq '[.hooks // {} | to_entries[] | select(.value | tostring | contains("fleet-emit"))] | length' "$S" 2>/dev/null)"
-  [ "${n:-0}" -eq 5 ] && ok "all 5 hooks registered" \
-    || bad "expected 5 fleet-emit hooks, found ${n:-0}" "re-run ./install.sh"
-else
-  bad "$S not found" "run claude once, then ./install.sh"
-fi
+def ok(message):
+    print("  {}ok{}    {}".format(GREEN, RESET, message))
 
-launchctl list 2>/dev/null | grep -q flightdeck.reaper \
-  && ok "launchd reaper loaded" \
-  || bad "launchd reaper not loaded" "launchctl load ~/Library/LaunchAgents/com.louisalexander.flightdeck.reaper.plist"
 
-P="$HOME/Library/Application Support/com.elgato.StreamDeck/Plugins/com.louisalexander.flightdeck.sdPlugin"
-[ -e "$P" ] && ok "plugin installed" || bad "plugin not installed" "re-run ./install.sh"
-[ -f "$P/bin/plugin.js" ] && ok "plugin is built" || bad "plugin not built" "cd plugin && npm run build"
+def bad(message, hint=""):
+    global failed
+    failed = True
+    print("  {}FAIL{}  {}".format(RED, RESET, message))
+    if hint:
+        print("        {}".format(hint))
 
-pgrep -f "Elgato Stream Deck" >/dev/null 2>&1 \
-  && ok "Stream Deck app running" || bad "Stream Deck app not running"
 
-# The classic silent killer: automation permission denied with no dialog.
-if osascript -e 'tell application "iTerm2" to count of windows' >/dev/null 2>&1; then
-  ok "iTerm2 automation permitted"
-else
-  bad "iTerm2 automation DENIED or iTerm2 not running" \
-      "System Settings > Privacy & Security > Automation, then re-run"
-fi
+def have(name):
+    """`command -v` is a shell builtin and is not executable via subprocess."""
+    return subprocess.run(["/usr/bin/which", name], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
 
-printf '\n'
-[ "$FAILED" -eq 0 ] && printf 'all checks passed\n' || printf 'some checks failed\n'
-exit "$FAILED"
+
+def main():
+    print("flightdeck doctor\n")
+
+    print("  python: {} ({})".format(sys.executable, sys.version.split()[0]))
+    if sys.version_info < (3, 9):
+        bad("python is older than 3.9")
+    else:
+        ok("python version supported")
+
+    pinned = fleetlib.fleet_home() / "interpreter"
+    if pinned.is_file():
+        path = pinned.read_text().strip()
+        if Path(path).exists():
+            ok("interpreter pinned to {}".format(path))
+        else:
+            bad("pinned interpreter {} does not exist".format(path), "re-run ./install.sh")
+    else:
+        bad("no pinned interpreter", "re-run ./install.sh")
+
+    for tool in ("git", "osascript", "node"):
+        ok("{} present".format(tool)) if have(tool) else bad("{} missing".format(tool))
+
+    home = fleetlib.fleet_home()
+    try:
+        fleetlib.sessions_dir().mkdir(parents=True, exist_ok=True)
+        probe = home / ".probe"
+        probe.write_text("x")
+        probe.unlink()
+        ok("{} writable".format(home))
+    except Exception as err:
+        bad("{} not writable: {}".format(home, err))
+
+    settings = Path.home() / ".claude" / "settings.json"
+    if settings.is_file():
+        data = fleetlib.read_json(settings, {}) or {}
+        count = sum(1 for v in (data.get("hooks") or {}).values()
+                    if "fleet-emit" in json.dumps(v))
+        if count == 5:
+            ok("all 5 hooks registered")
+        else:
+            bad("expected 5 fleet-emit hooks, found {}".format(count), "re-run ./install.sh")
+    else:
+        bad("{} not found".format(settings), "run claude once, then ./install.sh")
+
+    listing = subprocess.run(["launchctl", "list"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL)
+    if b"flightdeck.reaper" in listing.stdout:
+        ok("launchd reaper loaded")
+    else:
+        bad("launchd reaper not loaded", "re-run ./install.sh")
+
+    plugin = (Path.home() / "Library" / "Application Support" / "com.elgato.StreamDeck"
+              / "Plugins" / "com.louisalexander.flightdeck.sdPlugin")
+    if plugin.exists():
+        ok("plugin installed")
+    else:
+        bad("plugin not installed", "re-run ./install.sh")
+    if (plugin / "bin" / "plugin.js").is_file():
+        ok("plugin is built")
+    else:
+        bad("plugin not built", "cd plugin && npm run build")
+
+    running = subprocess.run(["pgrep", "-f", "Elgato Stream Deck"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if running.returncode == 0:
+        ok("Stream Deck app running")
+    else:
+        bad("Stream Deck app not running")
+
+    # The classic silent killer: automation permission denied with no dialog.
+    probe = subprocess.run(
+        ["osascript", "-e", 'tell application "iTerm2" to count of windows'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if probe.returncode == 0:
+        ok("iTerm2 automation permitted")
+    else:
+        bad("iTerm2 automation DENIED or iTerm2 not running",
+            "System Settings > Privacy & Security > Automation, then re-run")
+
+    print("\n" + ("all checks passed" if not failed else "some checks failed"))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 ```
 
 ```bash
@@ -2178,6 +2830,8 @@ chmod +x bin/fleet-doctor
 ```
 
 - [ ] **Step 3: Write `install.sh`**
+
+This stays bash — it is the bootstrap and cannot assume anything about the environment. It is also the one file shellcheck still lints.
 
 ```bash
 #!/usr/bin/env bash
@@ -2189,10 +2843,21 @@ FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
 printf 'installing flightdeck from %s\n' "$REPO"
 mkdir -p "$FLEET_HOME/sessions"
 
+# 0. Pin the interpreter. This machine has several python3 installs and
+#    launchd resolves a different one than an interactive shell, so every
+#    automated caller gets an absolute path.
+PY="$(command -v python3 || true)"
+[ -n "$PY" ] || { printf 'ERROR: no python3 on PATH\n' >&2; exit 1; }
+PY="$("$PY" -c 'import sys; print(sys.executable)')"
+"$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)' || {
+  printf 'ERROR: %s is older than python 3.9\n' "$PY" >&2; exit 1; }
+printf '%s' "$PY" >"$FLEET_HOME/interpreter"
+printf '  interpreter pinned: %s\n' "$PY"
+
 # 1. Local config from the example, if absent.
 if [ ! -f "$REPO/config/fleet.local.json" ]; then
   cp "$REPO/config/fleet.local.example.json" "$REPO/config/fleet.local.json"
-  printf '  created config/fleet.local.json — edit pins and vault path\n'
+  printf '  created config/fleet.local.json - edit pins and vault path\n'
 fi
 
 # 2. Merge hooks into ~/.claude/settings.json, preserving everything else.
@@ -2200,15 +2865,27 @@ S="$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude"
 [ -f "$S" ] || printf '{}' >"$S"
 cp "$S" "$S.flightdeck-backup.$(date +%s)"
-SNIP="$(sed "s|__REPO__|$REPO|g" "$REPO/hooks/settings.snippet.json")"
-printf '%s' "$SNIP" | jq -s '.[0] * .[1]' "$S" - >"$S.tmp" && mv "$S.tmp" "$S"
+sed -e "s|__PYTHON__|$PY|g" -e "s|__REPO__|$REPO|g" \
+  "$REPO/hooks/settings.snippet.json" >"$FLEET_HOME/.snippet.json"
+"$PY" - "$S" "$FLEET_HOME/.snippet.json" <<'PY'
+import json, sys
+target, snippet = sys.argv[1], sys.argv[2]
+def merge(a, b):
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = merge(out[k], v) if k in out and isinstance(out[k], dict) and isinstance(v, dict) else v
+    return out
+base = json.load(open(target))
+json.dump(merge(base, json.load(open(snippet))), open(target, "w"), indent=2)
+PY
+rm -f "$FLEET_HOME/.snippet.json"
 printf '  hooks merged into %s (backup written)\n' "$S"
 
 # 3. launchd reaper.
 LA="$HOME/Library/LaunchAgents"
 mkdir -p "$LA"
 PLIST="$LA/com.louisalexander.flightdeck.reaper.plist"
-sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" \
+sed -e "s|__PYTHON__|$PY|g" -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" \
   "$REPO/launchd/com.louisalexander.flightdeck.reaper.plist" >"$PLIST"
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
@@ -2222,7 +2899,7 @@ ln -sfn "$REPO/plugin/com.louisalexander.flightdeck.sdPlugin" \
         "$DEST/com.louisalexander.flightdeck.sdPlugin"
 printf '  plugin linked\n'
 
-# 5. Restart Stream Deck so it picks the plugin up.
+# 5. Restart Stream Deck so it picks up the plugin.
 osascript -e 'quit app "Elgato Stream Deck"' 2>/dev/null || true
 open -a "Elgato Stream Deck" 2>/dev/null || true
 
@@ -2252,13 +2929,13 @@ Open a new terminal and start a genuine agent:
 cd ~/code/homeassistant && claude
 ```
 
-Expected: a Row 1 key claims a slot and reads `homeassistan` over its branch. Submit a prompt → blue. Ask for something needing approval → **amber**. Approve → blue → green when it stops. Press the key from another window → that session focuses. `/exit` → the key goes dark.
+Expected: a Row 1 key claims a slot showing the repo above the branch. Submit a prompt → dark blue ▶. Ask for something needing approval → **amber ▲**. Approve → blue → green ✓ when it stops. Press the key from another window → that session focuses. `/exit` → the key goes fully black.
 
-Confirm nothing was disturbed: `tail -5 ~/.fleet/fleet.log` should show no errors, and the agent must behave exactly as before.
+Confirm nothing was disturbed: `tail -5 ~/.fleet/fleet.log` shows no errors, and the agent behaves exactly as before.
 
 - [ ] **Step 6: Write the README**
 
-Create `README.md` covering: what it is, the one-paragraph architecture, `./install.sh`, `./tests/run.sh`, `./bin/fleet-doctor`, the state table, and the two-machine config split.
+Cover: what it is, the one-paragraph architecture, `./install.sh`, `./tests/run.sh`, `./bin/fleet-doctor`, the state table with colours and glyphs, and the two-machine config split.
 
 Include a Row 3 section with deep links **inside a code block**, because GitHub strips the `claude-cli:` scheme from rendered Markdown:
 
@@ -2279,11 +2956,11 @@ untrusted input — a patched RCE smuggled `--settings` through `q`.
 ./tests/run.sh && (cd plugin && npm test)
 ```
 
-Expected: shellcheck clean over all of `bin/`, `install.sh` and `tools/`, then `54 tests, 0 failures`, then `render tests passed`.
+Expected: shellcheck clean, python clean, `66 tests, 0 failures`, `render tests passed`.
 
 ```bash
 git add bin/fleet-doctor install.sh hooks README.md
-git commit -m "feat: installer, doctor, and documentation"
+git commit -m "feat: installer with interpreter pinning, doctor, and documentation"
 git push origin main
 ```
 
@@ -2291,26 +2968,26 @@ git push origin main
 
 ## Self-Review
 
-**Spec coverage.** Every spec section maps to a task: architecture and data flow → 3, 4, 11; state model and colours → 2 (config), 3 (transitions), 10 (render); five-hook rule → 3, 12; `failed` semantics → 9; labels with title-beats-branch → 4; sticky slots, pins, overflow → 4; press semantics and host dispatch → 6, 7; arm/confirm → 7, 10, 11; teardown safety → 8; repo layout and layered config → 2; atomic writes and exit-0 → 3, and asserted in tests; `fleet-doctor` → 12; testing strategy → the harness in 2 plus per-task suites; deep links → 12's README; memory substrate reservation → `events.jsonl` in Task 3 and `journal.vault` in Task 2's example config.
+**Spec coverage.** Every spec section maps to a task: architecture and data flow → 3, 4, 11; visual principles → 2 (config), 10 (renderer); state model, colours and glyph geometry → 2, 10; five-hook rule → 3, 12; `failed` semantics → 9; token-aware labels → 2 (`fleetlib.shorten` + `labels.bats`), applied in 4; sticky slots, pins, overflow → 4; press semantics and host dispatch → 6, 7; arm/confirm and the not-red rule → 7, 10, 11; teardown safety → 8; Python language decision and interpreter pinning → Global Constraints, 5 (plist), 11 (plugin), 12 (installer); atomic writes and exit-0 → 3, asserted in tests; `fleet-doctor` → 12; deep links → 12's README; memory substrate reservation → `events.jsonl` in 3 and `journal.vault` in 2's example config.
 
-**Deliberately deferred, consistent with the spec:** Rows 2 and 4, the focused-slot border, title-glyph polling as a live state source (Task 1 records whether it is needed), and journal export.
-
-**Type consistency.** The `Slot` shape produced by `fleet-reconcile` in Task 4 is consumed verbatim by `fleet-press` (Task 7), `render.ts` (Task 10) and `plugin.ts` (Task 11) — nine fields, same names throughout. The session-file shape from Task 3 is read by Tasks 4, 5, 8, 9. `armed.json` is written in Task 7 and read in Task 11 with matching `index`/`expires` keys. `FLEET_HOME`, `FLEET_CONFIG_DIR`, `FLEET_SKIP_RECONCILE` and `FLEET_DRY_RUN` are honoured uniformly.
+**Deliberately deferred, consistent with the spec:** Rows 2 and 4, the focus underline, title-glyph polling as a live state source (Task 1 records whether it is needed), seen-vs-unseen intensity, slot numbers on empty keys, journal export, and the branding asset package.
 
 **Cumulative test counts** (each task's Step 4 asserts the running total, so a silently skipped file is caught):
 
 | After task | File added | New | Total |
 |---|---|---|---|
-| 2 | `config.bats` | 4 | 4 |
-| 3 | `emit.bats` | 11 | 15 |
-| 4 | `reconcile.bats` | 9 | 24 |
-| 5 | `reap.bats` | 5 | 29 |
-| 7 | `press.bats` | 11 | 40 |
-| 8 | `kill.bats` | 10 | 50 |
-| 9 | `fail.bats` | 4 | 54 |
+| 2 | `config.bats` + `labels.bats` | 12 | 12 |
+| 3 | `emit.bats` | 13 | 25 |
+| 4 | `reconcile.bats` | 9 | 34 |
+| 5 | `reap.bats` | 5 | 39 |
+| 7 | `press.bats` | 11 | 50 |
+| 8 | `kill.bats` | 12 | 62 |
+| 9 | `fail.bats` | 4 | 66 |
 
-Task 6 (`fleet-focus`) adds no bats tests by design — it needs live iTerm2 and is verified by `tools/focus-smoke.sh`. It is still linted, because `tests/run.sh` globs `bin/*`.
+Task 6 (`fleet-focus`) adds no bats tests by design — it needs live iTerm2 and is verified by `tools/focus-smoke.sh`.
 
-**Known ordering dependency.** Task 7's tests stub `fleet-kill` and Task 8 builds it, so 7 passes before 8 exists. That is intentional — it keeps the arm/confirm machine testable in isolation.
+**Type consistency.** The `Slot` shape written by `fleet-reconcile` (Task 4) is consumed verbatim by `fleet-press` (7), `render.ts` (10) and `plugin.ts` (11) — nine fields, same names. The session-file shape from Task 3 is read by 4, 5, 8, 9. `armed.json` is written in 7 and read in 11 with matching `index`/`expires`. `fleetlib`'s public surface is fixed in Task 2 and unchanged thereafter. `FLEET_HOME`, `FLEET_CONFIG_DIR`, `FLEET_SKIP_RECONCILE`, `FLEET_DRY_RUN` and `FLEET_NOW` are honoured uniformly.
 
-**Shellcheck policy.** `-S warning` is the gate. The only acceptable suppression is an inline `# shellcheck disable=SCxxxx` carrying a comment that says why; `SC2086` on the `$targets` word list in `tests/run.sh` is the one known case. In `bin/fleet-kill` an unquoted expansion is a defect, not a style note — a repo path with a space turns `git -C $CWD` into two arguments inside a teardown script.
+**Known ordering dependency.** Task 7's tests stub `fleet-kill`, which Task 8 builds — so 7 passes before 8 exists. Intentional: it keeps the arm/confirm machine testable in isolation.
+
+**Interpreter pinning appears in four places** and all four must agree: `~/.fleet/interpreter` (written by `install.sh`), the hook commands in `settings.json`, the launchd plist's `ProgramArguments`, and the plugin's `interpreter()`. `fleet-doctor` checks the pin exists and resolves. Scripts keep `#!/usr/bin/env python3` so the repo tree is never dirtied by installation.
