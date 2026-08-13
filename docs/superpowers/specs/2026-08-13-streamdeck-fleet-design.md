@@ -95,8 +95,18 @@ Confirmed on this machine during design:
 - `CLAUDE_CODE_SESSION_ID` is exported into the session, giving each agent a stable
   identity to key state on.
 - Obsidian vault present at `/Users/pk/Documents/Obsidian Vaults/Vault 101`.
-- `claude-cli://` is registered as a deep-link URL scheme. Purpose unverified;
-  a candidate second focus path to probe, not depended upon.
+- `claude-cli://` is registered and functional. LaunchServices reports
+  `claimed schemes: claude-cli:` bound to `com.anthropic.claude-code-url-handler`.
+  The handler at `~/Applications/Claude Code URL Handler.app` is background-only
+  and its `Contents/MacOS/claude` is a symlink to the real CLI. Requires Claude
+  Code ≥ 2.1.91; this machine runs 2.1.231. See "Deep links" below.
+- **A deep link opens a new iTerm2 session**, not Terminal.app — verified by
+  session-count delta on a live probe. Spawned agents therefore receive an
+  `ITERM_SESSION_ID`, fire the normal hooks, and appear in Row 1 automatically
+  with no additional host adapter.
+- **iTerm2 session names already carry Claude Code state and task titles**, e.g.
+  `◑ Set up Stream Deck XL as AI agent (node)` and `✳ break-state-exit-handling
+  (node)`. Enumerable over AppleScript. See "Titles as a second signal" below.
 
 **Unverified, must be checked first in implementation:** the exact Claude Code hook
 event names and their stdin payload shapes. The `claude` binary is compiled and
@@ -141,12 +151,39 @@ The real signal arrives with Row 2: when the user presses "run tests" and they
 fail, that slot goes red and stays red until cleared. Failure becomes something
 verification actions *report*, never something the deck guesses.
 
+### Titles as a second signal
+
+iTerm2 session names already carry Claude Code's own status glyph and a task title,
+enumerable over AppleScript with no hook involvement:
+
+```
+◑ Set up Stream Deck XL as AI agent (node)     ← busy
+✳ break-state-exit-handling (node)             ← ready
+```
+
+This is a **fallback state source, not the primary one.** Hooks stay primary: they
+are event-driven, so a key turns amber the instant an agent blocks, whereas titles
+must be polled. But the glyph is a genuine second signal that depends on nothing
+this project builds, which materially de-risks Open Risk 2 — if `Notification`
+turns out not to fire on permission prompts, the amber key has another way to work.
+
+Implementation note: treat the glyph vocabulary as **unversioned and liable to
+change without notice**. Parse defensively, map unknown glyphs to `idle`, and never
+let a parse failure propagate.
+
 ### Labels
 
-Two lines: repo short name on top, branch below. Branch alone is ambiguous as soon
-as `main` is checked out in three repos, which is the normal case. At 96px roughly
-8–10 characters fit per line, so `fleet-reconcile` strips known noise prefixes
-(`feat/`, `<repo>-wt-`) before the label reaches the key.
+Two lines: repo short name on top, and below it the **task title** taken from the
+iTerm2 session name, falling back to branch when no title is available.
+
+The originating concept assumed branch names, but the live data argues otherwise:
+`break-state-exit-handling` is more informative than `feat/break-state` at 96px,
+and enormously more informative than `main` when three repos all have one. Branch
+remains the fallback because pinned and non-CLI slots have no session title.
+
+At 96px roughly 8–10 characters fit per line, so `fleet-reconcile` shortens before
+the label reaches the key: strip the status glyph and the trailing `(node)`, strip
+known branch prefixes (`feat/`, `<repo>-wt-`), then truncate.
 
 ### Slot assignment
 
@@ -313,6 +350,53 @@ touched, diff stat). Expensive summarisation fires only on a deliberate Row 3
 keypress. This is also a better NotebookLM source than auto-summarising everything:
 a vault full of summaries of trivial turns buries the decisions worth searching for.
 
+## Deep links (`claude-cli://`) — Row 3 needs no code
+
+Claude Code registers a custom URL scheme with the OS, the same way `mailto:` opens
+a mail client. Requires ≥ 2.1.91.
+
+```
+claude-cli://open?q=<prompt>&cwd=<abs-path>&repo=<owner/repo>
+```
+
+Opening one hands the URL to the OS, which launches Claude Code in a new terminal
+window, in the given directory, with the prompt **already in the input box but not
+sent**. A deep link never executes anything on its own: the prompt sits inert, with
+a "Prompt from an external link" warning below the input, until it is read and Enter
+is pressed.
+
+**Architectural consequence.** Stream Deck's built-in *Website* action opens a URL.
+So all of Row 3 — spawn a worktree with the spec-first template, the bugfix
+template, the review-critic template — is three deep links configured in Elgato's
+app in about five minutes. No plugin code, no AppleScript, no terminal automation.
+
+This sharpens the scope boundary rather than widening it: **the custom plugin is
+needed only for Row 1, because Row 1 is the only row whose key images change.**
+Static-image rows are configuration, not software.
+
+Verified: a deep link opens a new **iTerm2** session, so a spawned agent flows into
+the state bus and appears in Row 1 automatically — pressing a Row 3 key makes a new
+Row 1 key light up, with no integration code between them.
+
+### Constraints
+
+- **`cwd` must be an absolute path.** `repo` only resolves to clones Claude Code has
+  already seen, so prefer `cwd`, or run `claude` once in each worktree first.
+- **GitHub-rendered Markdown strips the scheme** in READMEs, issues and wikis. Any
+  deep link in this repo's docs must sit inside a code block so it can be copied.
+
+### Security rule — hard
+
+**Never generate a deep link from untrusted input.** A patched RCE allowed a crafted
+`q` parameter to smuggle a `--settings` flag carrying a `SessionStart` hook,
+achieving arbitrary command execution.
+
+Hand-authored templates in local config are fine, and that is the entire v1 use.
+The rule exists because the memory-substrate and journal work later in this
+roadmap is exactly the kind of feature that starts templating links from captured
+text. Links are built only from literals in `fleet.local.json` — never from issue
+titles, CI output, branch names, or model output.
+
 ## Deferred
 
 **Conductor.** Not adopted. It would be a *host*, not a replacement — it runs real
@@ -322,9 +406,14 @@ unless per-workspace deep links exist, which is unverified), and it overlaps bot
 Row 1 and Row 3. Adopting it now would fork the design before the design exists.
 Later cost: one focus adapter case. Revisit when worktree pain is actually felt.
 
-**Rows 2–4.** Out of scope. Row 2 additionally requires knowing which session is
+**Row 3.** Out of scope as *engineering*, but effectively free once v1 ships: three
+`claude-cli://` deep links on built-in Website actions, configured in Elgato's app.
+Worth doing by hand the same day Row 1 works. Nothing in v1 blocks it and it needs
+no code from this repo beyond the template strings living in `fleet.local.json`.
+
+**Rows 2 and 4.** Out of scope. Row 2 additionally requires knowing which session is
 *currently focused* — a thin white border on the active slot — which is deferred
-with it.
+with it. Row 2 is also where `failed` gets its real signal.
 
 **Animation, dials, folders.** Not in v1.
 
@@ -332,7 +421,9 @@ with it.
 
 1. **Hook names and payload shapes are unverified.** First implementation step.
 2. **`Notification` may not fire exactly on permission prompts.** The amber key is
-   the highest-value element of the design; if this hook does not carry the right
-   signal, an alternative source must be found before building the rest.
+   the highest-value element of the design. **Downgraded from critical:** iTerm2
+   session-title glyphs are a verified independent fallback (see "Titles as a second
+   signal"), so failure here costs polling latency rather than sinking the design.
+   Still worth resolving early, because event-driven beats polled.
 3. **macOS automation permissions** must be granted for iTerm2 control, on both
    machines. `fleet-doctor` surfaces this.
