@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13
 **Status:** Approved design, ready for implementation planning
-**Repo:** https://github.com/louisalexander/stream-deck
+**Repo:** https://github.com/louisalexander/flightdeck
 
 ## Problem
 
