@@ -113,21 +113,50 @@ event names and their stdin payload shapes. The `claude` binary is compiled and
 could not be inspected. Everything below assumes the five hooks named; confirm
 before building on them.
 
+## Visual principles
+
+The design north star is **an annunciator panel for autonomous workers**. Row 1
+should be understood in peripheral vision before it is read.
+
+1. **State before identity.** Background colour communicates lifecycle state.
+   Repo and task labels identify the agent only after state is already obvious.
+2. **Peripheral vision first.** A blocked agent must be noticeable across the desk.
+   Working and idle agents must visually recede.
+3. **One semantic channel per visual property.** Background = lifecycle state.
+   Glyph = redundant lifecycle meaning. A future focus marker = selection. No cue
+   is ever reused for an unrelated meaning.
+4. **No decorative chrome.** No mini terminal windows, nested cards, gradients,
+   repo-colour backgrounds, logos, emoji, or ornamental borders.
+5. **Stable spatial memory is a visual requirement, not just a data one.** An agent
+   changing physical key position is a UX failure even when the data is correct.
+
 ## State model
 
 | State | Colour | Glyph | Meaning | Set by |
 |---|---|---|---|---|
-| `blocked` | bright amber | ▲ | Waiting on you — permission prompt or question | `Notification` |
-| `working` | deep blue | ● | Prompt submitted, tools running | `UserPromptSubmit` |
-| `done` | green | ✓ | Turn complete, awaiting next instruction | `Stop` |
-| `idle` | dim grey | · | Session alive, nothing in flight | `SessionStart` |
-| `failed` | deep red | ✕ | Something broke. Sticky until cleared | see below |
-| `empty` | off / black | — | No session in this slot | `fleet-reconcile` |
+| `blocked` | `#F5A623` amber | ▲ | Waiting on the operator | `Notification` |
+| `working` | `#1256A3` dark blue | ▶ | Prompt submitted, tools or reasoning active | `UserPromptSubmit` |
+| `done` | `#238636` green | ✓ | Turn complete, awaiting next instruction | `Stop` |
+| `idle` | `#25282D` near-black grey | · | Session alive, nothing in flight | `SessionStart` |
+| `failed` | `#B42318` red | × | Observed failure. Sticky until cleared | see below |
+| `empty` | `#000000` black | *(none)* | No session in this slot | `fleet-reconcile` |
 
-**Colour carries the message; the glyph is redundancy.** Row 1 is read with
-peripheral vision, so hue separation matters more than text. Amber and red are
-adjacent hues and red/green is the common colourblind failure, so a one-character
-glyph makes every state legible without relying on colour alone.
+**Attention hierarchy:** amber pulls attention, green reports completion, red
+reports a problem needing investigation, blue is background activity, grey is
+ignorable, black is absence. `working` is deliberately a *dark* blue so an agent
+doing its job recedes rather than competes with one that needs you.
+
+**Empty means fully black with no content.** Absence should look absent.
+
+**Colour carries the message; the glyph is redundancy.** Amber and red are adjacent
+hues and red/green is the common colourblind failure, so the glyph makes every
+state legible without relying on colour alone.
+
+**Glyphs are drawn as SVG geometry, never as text.** `▲` and `▶` (U+25B2, U+25B6)
+are absent from Helvetica, so a `<text>` glyph would fall back to an arbitrary font
+with different metrics — inconsistent positioning at best, a blank key at worst.
+Rendering them as `<polygon>`, `<path>`, `<circle>` and `<line>` makes position
+pixel-exact and guarantees the redundant channel cannot silently fail.
 
 **No animation in v1.** All states render solid.
 
@@ -181,9 +210,38 @@ The originating concept assumed branch names, but the live data argues otherwise
 and enormously more informative than `main` when three repos all have one. Branch
 remains the fallback because pinned and non-CLI slots have no session title.
 
-At 96px roughly 8–10 characters fit per line, so `fleet-reconcile` shortens before
-the label reaches the key: strip the status glyph and the trailing `(node)`, strip
-known branch prefixes (`feat/`, `<repo>-wt-`), then truncate.
+**Typography:** the repo line is smaller, semibold, uppercase and lower-contrast;
+the task line is larger and brighter. Identity is anchored near the bottom of the
+key so the state colour and glyph own the upper area.
+
+**Shortening is token-aware, not blind truncation.** At 96px roughly 11 characters
+fit per line, and naive truncation destroys exactly the distinguishing part:
+`break-state-exit-handling` and `break-state-entry-handling` both truncate to
+`break-state`, which is a collision on a key you are reading peripherally.
+
+The rule, applied by `fleet-reconcile`:
+
+1. Strip the status glyph and trailing `(node)` from session titles; strip known
+   branch prefixes (`feat/`, `fix/`, `chore/`, `<repo>-wt-`).
+2. Split on `-`, `_` and `/`.
+3. If it already fits, done. If there is only one token, truncate it.
+4. Otherwise keep the **first and last** tokens and trim whichever is currently
+   longer — tie-break toward trimming the first — until `first-last` fits.
+
+The last token is protected because it is usually what distinguishes sibling
+branches. Worked examples at 11 characters:
+
+| Source | Label |
+|---|---|
+| `break-state-exit-handling` | `break-handl` |
+| `agent-hook-notification` | `agent-notif` |
+| `feat/stream-deck-renderer` | `strea-rende` |
+| `flightdeck` | `FLIGHTDECK` |
+
+A richer scheme — dropping generic tokens via a stopword list, abbreviating via a
+vocabulary map — was considered and rejected for v1: the lists would be guesses
+until real branch names exist. `events.jsonl` records every branch name used, so
+the rule can be revisited against real data rather than hypotheticals.
 
 ### Slot assignment
 
@@ -214,9 +272,19 @@ That case statement is the entire host-portability story.
 
 Long press is destructive, so **it does not fire on the hold**:
 
-1. Hold ≥800ms **arms** the key: it flips red, reads `CONFIRM?`, and lives 3 seconds.
+1. Hold ≥800ms **arms** the key: it flips to the armed presentation and lives 3 seconds.
 2. A second press inside that window executes.
-3. Timeout, or any other key, disarms.
+3. Timeout, or any other key, disarms — and the key returns to its **previous
+   lifecycle state**, not to a neutral one.
+
+**The armed state must not be red.** Red is reserved for observed failure, and an
+operator merely *considering* teardown has not experienced one. Reusing red would
+make "this agent broke" and "you are one press from destroying a worktree"
+visually identical at the exact moment the distinction matters most.
+
+Armed renders as: near-black background, a large amber warning triangle, and
+`CONFIRM?` in high-contrast text. Red appears only *after* a teardown is refused —
+which is the correct time, because a refusal genuinely is an observed problem.
 
 The arm state lives in a marker file carrying an expiry timestamp, not in the
 plugin. The plugin's existing `fs.watch` repaints on arm; a single 3s timer
@@ -250,6 +318,41 @@ stream-deck/
 ├── config/        fleet.json (committed) + fleet.local.json (gitignored)
 └── install.sh
 ```
+
+### Implementation language — Python 3, stdlib only
+
+`bin/` is Python targeting **3.9 syntax**, standard library only. No third-party
+packages, no venv, no `jq`.
+
+Bash was the first choice and was measured rather than assumed. Per hook
+invocation: bash + jq 30ms, Python 3.13 44ms, Node 46ms, Python 3.9 66ms. The 14ms
+Python penalty is dwarfed by the two `git rev-parse` calls `fleet-emit` makes
+regardless, and hooks fire roughly five times per turn. The latency argument did
+not survive measurement.
+
+What decided it:
+
+- **`fleet-reconcile` is the file this design promises you can edit freely.** In
+  bash the slot algorithm becomes a three-pass `jq` reduce over a pending queue —
+  write-only code six months later, which defeats the entire rationale for
+  approach C.
+- **`fleet-kill`'s main risk class disappears.** The reason shellcheck mattered
+  there was `git -C $CWD` silently splitting into two arguments when a path
+  contains a space. `subprocess.run(["git", "-C", cwd, ...])` cannot word-split.
+  The highest-stakes script gets structurally safer, not merely tidier.
+- **The test suite is unaffected.** Tests assert the CLI contract — pipe JSON in,
+  inspect the file out — so they remain bats regardless of implementation language.
+- **One fewer runtime dependency.** `json` replaces `jq`.
+
+**Interpreter pinning is mandatory, not optional.** This machine has four `python3`
+on `PATH`; an interactive shell resolves to Homebrew 3.13.5 while launchd — whose
+`PATH` is unset, therefore `/usr/bin:/bin:/usr/sbin:/sbin` — resolves to
+CommandLineTools 3.9.6. `install.sh` therefore resolves the interpreter once and
+writes an absolute path into both the script shebangs and the launchd plist.
+Targeting 3.9 syntax means either interpreter works if pinning is ever bypassed.
+
+Node was rejected for the same class of reason, more severely: `/opt/homebrew/bin`
+is not on launchd's `PATH` at all, so the reaper would not find `node`.
 
 ### Configuration — layered for two machines
 
@@ -416,6 +519,35 @@ no code from this repo beyond the template strings living in `fleet.local.json`.
 with it. Row 2 is also where `failed` gets its real signal.
 
 **Animation, dials, folders.** Not in v1.
+
+**Visual language for later rows** — recorded now so Row 1's saturation stays
+meaningful. Row 1 owns saturated backgrounds *because state is the information*.
+Row 2 (commands: TEST, DIFF, LOG, COMMIT, PUSH, PR, NOTE, STOP) is monochrome and
+must not compete with Row 1; brief feedback flashes are acceptable. Row 3 (launch)
+is deep charcoal with white icons and a simple `+` motif. Row 4 (system) is quiet
+monochrome unless a state genuinely needs attention.
+
+**Focus marker.** When Row 2 introduces a focused session, it gets a small white
+bottom marker or underline — **not** a full white border, which would compete with
+the lifecycle background. Selection is its own visual channel.
+
+**Seen vs unseen.** A later refinement: bright green ✓ for newly completed versus
+dark green ✓ for acknowledged, bright amber ▲ for blocked-and-unseen versus dark
+amber for blocked-but-already-visited. Deferred, and *not* "nearly free" — it
+requires knowing which session the operator has focused, which is Row 2 work.
+Lifecycle state remains the primary axis.
+
+**Slot numbers on empty keys.** Optional, and declined for v1: it contradicts
+"absence should look absent," and nothing in v1 requires reading a slot number off
+the deck.
+
+**Branding and asset package.** A separate design deliverable, not engineering
+work, and it should not delay v1. Direction: an "Annunciator Grid" mark — a
+compact row of illuminated agent-state tiles, so the product itself becomes the
+logo. Avoid literal aircraft, cockpits, steering wheels, Claude logos and terminal
+screenshots. Repo-specific colours never appear on operational keys; lifecycle
+colour owns that channel. The README hero shot naturally comes *after* v1, since
+it depicts a working eight-agent row.
 
 ## Open risks
 
