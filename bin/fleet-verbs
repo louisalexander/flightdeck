@@ -17,7 +17,17 @@ TRUE_WORDS = ("true", "yes", "1")
 
 
 def verb_file(verb_id):
-    """The file that wins for this id, or None. Local beats shipped."""
+    """The file that wins for this id, or None. Local beats shipped.
+
+    Verb ids ultimately choose a filename under a directory we control, so
+    a `/`, a `\\`, or a `..` segment must never be allowed to walk the
+    lookup outside `verbs/` -- pathlib silently discards `base` for an
+    absolute id (e.g. one starting with `/`) and `..` climbs out of either
+    verbs directory entirely. Ids are local, per-key config today, but
+    reject the shape anyway rather than depend on that staying true.
+    """
+    if not verb_id or verb_id in (".", "..") or "/" in verb_id or "\\" in verb_id:
+        return None
     for base in (fleetlib.fleet_home() / "verbs",
                  fleetlib.repo_root() / "config" / "verbs"):
         candidate = base / "{}.md".format(verb_id)
@@ -32,11 +42,17 @@ def parse_verb(text):
     Rejecting rather than guessing matters: a file without frontmatter is
     far more likely to be a half-written verb than a deliberate one, and
     sending a half-written prompt to an agent is worse than sending none.
+    A body that is present but all whitespace is the same class of
+    half-written file, so it is rejected the same way rather than being
+    allowed through as a silently empty prompt.
     """
     if not text.startswith("---"):
         return None
     parts = text.split("---", 2)
     if len(parts) < 3:
+        return None
+    prompt = parts[2].strip()
+    if not prompt:
         return None
     meta = {}
     for line in parts[1].strip().splitlines():
@@ -49,7 +65,7 @@ def parse_verb(text):
         "label": meta.get("label", ""),
         "interrupt": meta.get("interrupt", "").lower() in TRUE_WORDS,
         "confirm": meta.get("confirm", "").lower() in TRUE_WORDS,
-        "prompt": parts[2].strip(),
+        "prompt": prompt,
     }
 
 

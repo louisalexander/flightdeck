@@ -18,10 +18,13 @@ setup() {
 @test "an unknown verb fails loudly rather than printing nothing" {
   # --separate-stderr: this bats keeps stdout+stderr merged in $output by
   # default, which would make the stderr message look like stdout output.
-  # The claim under test is specifically that stdout stays empty.
+  # The claim under test is specifically that stdout stays empty *and*
+  # something explaining the failure lands on stderr -- both halves of
+  # "loudly", not just the empty-stdout half.
   run --separate-stderr "$BIN/fleet-verbs" show nosuchverb
   [ "$status" -eq 1 ]
   [ -z "$output" ]
+  [[ "$stderr" == *"nosuchverb"* ]]
 }
 
 @test "a local override wins over the shipped verb" {
@@ -64,5 +67,25 @@ MD
 @test "a verb file with no frontmatter is rejected, not half-read" {
   printf 'just a body\n' > "$FLEET_HOME/verbs/broken.md"
   run "$BIN/fleet-verbs" show broken
+  [ "$status" -eq 1 ]
+}
+
+@test "a verb file with a whitespace-only body is rejected, not shown as empty" {
+  cat > "$FLEET_HOME/verbs/blank.md" <<'MD'
+---
+id: blank
+label: BLANK
+---
+
+
+MD
+  run "$BIN/fleet-verbs" show blank
+  [ "$status" -eq 1 ]
+}
+
+@test "a verb id that tries to escape the verbs directory is rejected" {
+  run "$BIN/fleet-verbs" show ../../../../etc/passwd
+  [ "$status" -eq 1 ]
+  run "$BIN/fleet-verbs" show /etc/passwd
   [ "$status" -eq 1 ]
 }
