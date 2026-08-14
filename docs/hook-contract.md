@@ -129,7 +129,62 @@ above — plus `effort` (object, e.g. `{"level":"high"}`), `hook_event_name` (li
 `"Stop"`), `stop_hook_active` (boolean, observed `false` — presumably `true` when a `Stop`
 hook is itself in the middle of re-triggering the loop, to guard against infinite recursion),
 `last_assistant_message` (string, full text of the assistant's final reply this turn),
-`background_tasks` (array, observed empty `[]`), `session_crons` (array, observed empty `[]`).
+`background_tasks` (array — see below), `session_crons` (array, observed empty `[]`).
+
+**`background_tasks` — in-flight background work.** Originally recorded here as "observed
+empty `[]`", which was true of the capture but badly misleading: the probe that produced the
+payload above never had background work in flight, so the field looked inert and went unused.
+It is not inert. Claude Code documents it as listing "in-flight background work
+(running/pending + backgrounded) registered in this session", whose purpose is to let hooks
+*"distinguish 'session is done' from 'session is paused waiting for background work to wake
+it'"*. That distinction is exactly the one `Stop` alone cannot make, and missing it is what
+painted busy sessions green — see
+[#5](https://github.com/louisalexander/flightdeck/issues/5).
+
+Re-probed against Claude Code 2.1.232 with work actually in flight. A backgrounded subagent:
+
+```json
+{"hook_event_name":"Stop","background_tasks":[{"id":"a9120695e511e34a9","type":"subagent","status":"running","description":"Background sleep test","agent_type":"general-purpose"}],"session_crons":[]}
+```
+
+A backgrounded shell command:
+
+```json
+{"hook_event_name":"Stop","background_tasks":[{"id":"b3l1piyt6","type":"shell","status":"running","description":"sleep 45","command":"sleep 45"}],"session_crons":[]}
+```
+
+Each entry carries `id`, `type`, `status` and `description`, plus type-specific extras
+(`command` for shell, `agent_type` for subagent, `server`/`tool` for monitors, `name` for
+workflows). Observed `type` labels: `subagent`, `shell`, `workflow`, `monitor`, `MCP task`,
+`teammate`, `cloud session`, `dream`, `auto-mode scan`. Entries are filtered by Claude Code to
+`status` of `running` or `pending`. A subagent's `id` matches the `agent_id` carried by
+`SubagentStart`/`SubagentStop`.
+
+The field is optional in Claude Code's schema, so older versions omit it entirely. Treat an
+absent field as *no information* — not as an empty list.
+
+### 4a. `SubagentStart` / `SubagentStop` — FIRED
+
+Not used by flightdeck, but confirmed to exist and recorded here so the next person does not
+have to rediscover them. They bracket every subagent, including backgrounded ones, and fire
+with the **parent** session's `session_id`:
+
+```
+SubagentStart  keys: agent_id, agent_type, cwd, hook_event_name, prompt_id, session_id, transcript_path
+SubagentStop   keys: agent_id, agent_transcript_path, agent_type, background_tasks, cwd,
+                     hook_event_name, last_assistant_message, permission_mode, prompt_id,
+                     session_crons, session_id, stop_hook_active, transcript_path
+```
+
+`background_tasks` on the `Stop` payload is preferred over counting these: it is stateless and
+self-describing, where a start/stop counter is persistent state that can desync if a session
+dies mid-subagent, and it covers backgrounded shells and workflows that these two never see.
+
+**Probing note.** Claude Code snapshots its hook registry at session start, so hooks added to
+a settings file mid-session never fire. Any future contract probe must launch a *fresh*
+session with the probe hooks already registered — e.g.
+`claude -p '<prompt>' --settings <probe-settings.json>`, with `FLEET_HOME` pointed at a
+throwaway directory so the probe does not write into the live deck.
 
 ### 5. `SessionEnd` — FIRED
 

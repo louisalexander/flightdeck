@@ -18,6 +18,51 @@ field() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.arg
 @test "Notification maps to blocked" { emit Notification; [ "$(field state)" = "blocked" ]; }
 @test "Stop maps to done" { emit Stop; [ "$(field state)" = "done" ]; }
 
+# --- Stop with background work in flight -----------------------------------
+#
+# Stop means "the assistant turn ended", not "the agent is awaiting the
+# operator". A turn that ends with a backgrounded subagent (or shell, workflow,
+# monitor) still in flight wakes itself back up with no operator action, so it
+# is `working` -- painting it green would claim a completion that has not
+# happened and invite the operator to give an instruction to a busy agent.
+#
+# Claude Code hands us exactly this distinction: the Stop payload's
+# background_tasks array, documented as letting hooks "distinguish 'session is
+# done' from 'session is paused waiting for background work to wake it'".
+#
+# The field is `.optional()` in Claude Code's schema, so an absent one means "no
+# information" and must keep the historical done mapping -- older Claude Code
+# omits it entirely, and the bare "Stop maps to done" test above covers that.
+stop_bg() { emit Stop "{\"session_id\":\"S1\",\"cwd\":\"/tmp\",\"background_tasks\":$1}"; }
+
+@test "Stop with a running subagent maps to working" {
+  stop_bg '[{"id":"a91","type":"subagent","status":"running","description":"d","agent_type":"general-purpose"}]'
+  [ "$(field state)" = "working" ]
+}
+
+@test "Stop with a backgrounded shell maps to working" {
+  stop_bg '[{"id":"b3l","type":"shell","status":"running","description":"sleep 45","command":"sleep 45"}]'
+  [ "$(field state)" = "working" ]
+}
+
+@test "Stop with an empty background_tasks array maps to done" {
+  stop_bg '[]'
+  [ "$(field state)" = "done" ]
+}
+
+@test "Stop with a malformed background_tasks maps to done" {
+  stop_bg '"not a list"'
+  [ "$(field state)" = "done" ]
+}
+
+@test "Stop with background work still clears a blocked marker" {
+  emit Notification
+  [ -e "$(marker)" ]
+  stop_bg '[{"id":"a91","type":"subagent","status":"running","description":"d"}]'
+  [ "$(field state)" = "working" ]
+  [ ! -e "$(marker)" ]
+}
+
 # --- blocked-marker lifecycle (the PreToolUse Resumed guard) ---------------
 #
 # Notification creates a marker at $FLEET_HOME/blocked/<session_id> so the
