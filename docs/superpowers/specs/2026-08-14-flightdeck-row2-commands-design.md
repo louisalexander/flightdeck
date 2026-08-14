@@ -175,10 +175,31 @@ the base-plus-local precedence `fleet.json`/`fleet.local.json` already uses.
 - `interrupt: true` — not a prompt; an interrupt (STOP sends ESC).
 - `confirm: true` — the verb arms on first press and fires only on a second
   press inside the arm window. Enforcement lives in `bin/fleet-send`, which
-  reuses `fleetlib`'s existing atomic arm-claim (the `os.replace` on
-  `armed.json` that `fleet-press` already relies on for destructive teardown),
-  so two near-simultaneous presses cannot both fire. The arm is keyed by verb,
-  not by slot.
+  reuses the atomic arm-claim *technique* `fleet-press` relies on for
+  destructive teardown — the `os.replace` ownership rename — so two
+  near-simultaneous presses cannot both fire.
+
+  **On a separate file, not `armed.json`.** An earlier draft of this spec said
+  to reuse that file directly. It must not: `armed.json` carries exactly one
+  meaning, "slot N is armed for destructive teardown", and `fleet-press` fires
+  `fleet-kill` off it. Sharing one file would let a verb arm and a teardown arm
+  consume each other, and any convergence of their shapes would turn a Row 2
+  press into a session teardown. Verb arms live in `armed-verb.json`.
+
+  The arm is keyed by verb **and by target**. Arming ISSUE against one agent,
+  changing the selection, then confirming would otherwise fire at whoever is
+  selected now — a different repository than the operator was looking at when
+  they decided.
+
+  A confirm verb also **never queues**: if the target is not immediately
+  deliverable (`working` or `blocked`) the press is refused outright rather
+  than staged, because an outward-facing action deferred to an unknown later
+  moment is the exact outcome `confirm` exists to prevent.
+
+  `fleet-send` therefore reports three outcomes, not two: `0` delivered, `1`
+  refused, `2` armed. The deck needs the distinction — painting an armed key
+  as refused would tell the operator the press failed at the moment it is
+  waiting on them to confirm.
 
 ### The sender: `bin/fleet-send <verb>`
 

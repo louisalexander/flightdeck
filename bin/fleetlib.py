@@ -59,6 +59,49 @@ def queue_path(session_id):
     return queue_dir() / "{}.json".format(session_id)
 
 
+def verb_armed_path():
+    """Where a pending confirm-verb arm lives.
+
+    Deliberately NOT armed.json. That file carries exactly one meaning --
+    "slot N is armed for destructive teardown" -- and fleet-press fires
+    fleet-kill off it. Sharing one file between the two would let a verb
+    arm and a teardown arm consume each other, and any future convergence
+    of their shapes would turn a Row 2 press into a session teardown. The
+    atomic claim technique is worth reusing; the storage is not.
+    """
+    return fleet_home() / "armed-verb.json"
+
+
+def claim_verb_arm():
+    """Takes sole ownership of a pending verb arm, or returns None.
+
+    Same os.replace ownership trick as fleet-press's claim_arm, for the
+    same reason: two near-simultaneous confirming presses must not both
+    fire an outward-facing verb. Exactly one caller can win the rename;
+    the loser finds the source already gone and must behave as though
+    there were no arm at all, which re-arms rather than firing.
+    """
+    claim = verb_armed_path().parent / "armed-verb.claim.{}.json".format(os.getpid())
+    try:
+        os.replace(str(verb_armed_path()), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
+
+def clear_verb_arm():
+    try:
+        verb_armed_path().unlink()
+    except Exception:
+        pass
+
+
 def claim_queue(session_id):
     """Takes sole ownership of a queued verb, or returns None.
 

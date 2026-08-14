@@ -34,6 +34,11 @@ OSASCRIPT_TIMEOUT_SECS = 10
 # an allow-list gives for free and a deny-list would not.
 WAKEABLE_STATES = ("idle", "done")
 
+# A third outcome the deck must be able to tell apart. 0 delivered, 1 refused,
+# 2 armed -- "I heard you, press again" is neither success nor failure, and a
+# key that showed either would be lying about what happens next.
+ARMED_EXIT = 2
+
 # iTerm2 session ids are UUIDs: 8-4-4-4-12 hex, case-insensitive. The target
 # is interpolated into an AppleScript string literal below, so anything not
 # matching this shape is rejected before osascript is ever invoked.
@@ -163,20 +168,46 @@ def main(argv):
         fleetlib.log("send: no such verb: {}".format(verb_id))
         return 1
 
-    # PLACEHOLDER until real arm/confirm enforcement lands (see the design
-    # doc's four-layer defence against a stale queued verb firing at an
-    # agent nobody is watching -- layer 1, "confirm: true verbs never
-    # queue", is the only layer this slice actually implements; TTL,
-    # queued-visibility and press-to-cancel are all deferred). Until
-    # arm/confirm is real, refusing outright is the only safe behaviour:
-    # queueing a confirm verb and delivering it later -- via the Stop
-    # drain, or worse, a wake minutes after the press -- lets an
-    # outward-facing action (ISSUE, PUSH, PR, COMMIT) fire unsupervised,
-    # which is exactly what confirm:true exists to prevent.
+    # An outward-facing verb (ISSUE, PUSH, PR, COMMIT) gets two guards, both
+    # from the spec's defence against one firing at an agent nobody is
+    # watching.
     if resolve_flags(verb_id).get("confirm"):
-        fleetlib.log("send: refusing {} -- confirm:true has no enforcement yet"
-                      .format(verb_id))
-        return 1
+        # Guard 1: it never queues. Staging a confirm verb against a working
+        # or blocked agent means it fires whenever that turn happens to end
+        # -- possibly long after the operator has stopped watching, which is
+        # the precise outcome confirm:true exists to prevent. There is no
+        # safe way to defer it, so an undeliverable target is a refusal.
+        if session.get("state") not in WAKEABLE_STATES:
+            fleetlib.log("send: refusing {} -- target is {}, and a confirm verb "
+                         "must fire while the operator is watching"
+                         .format(verb_id, session.get("state")))
+            return 1
+
+        # Guard 2: arm, then fire. Claiming rather than reading means two
+        # near-simultaneous confirming presses cannot both fire; the loser
+        # sees no arm and re-arms, which is the safe direction.
+        arm = fleetlib.claim_verb_arm()
+        live = (isinstance(arm, dict)
+                and isinstance(arm.get("expires"), int)
+                and int(time.time()) < arm["expires"]
+                and arm.get("verb") == verb_id
+                and arm.get("session_id") == session_id)
+
+        # The target is part of the arm on purpose. Arming ISSUE against one
+        # agent, changing the selection, then confirming would otherwise fire
+        # at whoever is selected now -- a different repo than the operator
+        # was looking at when they decided.
+        if not live:
+            config = fleetlib.load_config()
+            arm_ms = config.get("timings", {}).get("armMs", 3000)
+            fleetlib.write_json_atomic(fleetlib.verb_armed_path(), {
+                "verb": verb_id,
+                "session_id": session_id,
+                "expires": int(time.time()) + max(1, arm_ms // 1000),
+            })
+            fleetlib.log("send: armed {} for {} -- press again to confirm"
+                         .format(verb_id, session_id))
+            return ARMED_EXIT
 
     fleetlib.write_json_atomic(fleetlib.queue_path(session_id), {
         "verb": verb_id,

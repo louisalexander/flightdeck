@@ -261,3 +261,121 @@ SH
   # reason).
   [ "$status" -eq 1 ] && [ ! -e "$(queued)" ]
 }
+
+# --- confirm verbs: arm, then fire ----------------------------------------
+#
+# An outward-facing verb (ISSUE, PUSH, PR, COMMIT) must not fire on a single
+# press, and must not sit in a queue to fire later at an agent nobody is
+# watching. Two rules, both from the spec:
+#
+#   1. it never queues -- the target must be deliverable right now, or the
+#      press is refused outright;
+#   2. the first press arms and the second press inside the window fires.
+#
+# The arm deliberately does NOT share armed.json with fleet-press. That file
+# means "slot N is armed for destructive teardown", and fleet-press fires
+# fleet-kill off it. Sharing would let the two arms clobber each other, and a
+# shape collision could turn a verb arm into a session teardown.
+
+armfile() { printf '%s' "$FLEET_HOME/armed-verb.json"; }
+
+idle_target() {
+  python3 -c "
+import json
+p='$FLEET_HOME/sessions/S1.json'
+d=json.load(open(p)); d['state']='${1:-idle}'; json.dump(d, open(p,'w'))"
+}
+
+@test "CONFIRM: a first press arms rather than delivering" {
+  stub_osascript
+  idle_target idle
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 2 ]                 # 2 = armed, press again
+  [ -e "$(armfile)" ]
+  [ ! -e "$OSA_LOG" ] && [ ! -e "$(queued)" ]
+}
+
+@test "CONFIRM: a second press of the same verb fires" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ]
+}
+
+@test "CONFIRM: firing consumes the arm, so a third press re-arms" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 2 ]
+}
+
+@test "CONFIRM: a different verb does not fire an arm raised by another" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  run "$BIN/fleet-send" commit
+  [ "$status" -eq 2 ]                 # re-arms as commit, never fires issue
+  [ ! -e "$OSA_LOG" ]
+}
+
+@test "CONFIRM: changing the target between presses refuses to fire" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  python3 -c "
+import json
+json.dump({'session_id':'S1','state':'idle','repo':'r','branch':'b','title':'',
+ 'cwd':'/tmp','host':'iterm2','iterm_session':'22222222-3333-4444-5555-666666666666',
+ 'pid':0,'ts':1}, open('$FLEET_HOME/sessions/S2.json','w'))
+json.dump({'session_id':'S2'}, open('$FLEET_HOME/focus.json','w'))"
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 2 ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "CONFIRM: an expired arm does not fire; it re-arms" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  python3 -c "
+import json
+d=json.load(open('$FLEET_HOME/armed-verb.json')); d['expires']=1
+json.dump(d, open('$FLEET_HOME/armed-verb.json','w'))"
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 2 ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "CONFIRM: a working target refuses outright -- confirm verbs never queue" {
+  stub_osascript
+  idle_target working
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 1 ]
+  [ ! -e "$(armfile)" ] && [ ! -e "$(queued)" ]
+}
+
+@test "CONFIRM: a blocked target refuses too, and is never typed into" {
+  stub_osascript
+  idle_target blocked
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "CONFIRM: the verb arm never touches fleet-press's teardown arm" {
+  stub_osascript
+  idle_target idle
+  printf '{"index":0,"expires":9999999999}' > "$FLEET_HOME/armed.json"
+  "$BIN/fleet-send" issue || true    # arms; exit 2 is the point
+  [ -e "$FLEET_HOME/armed.json" ]
+  run python3 -c "
+import json;print(json.load(open('$FLEET_HOME/armed.json'))['index'])"
+  [ "$output" = "0" ]
+}
+
+@test "CONFIRM: a non-confirm verb is unaffected and delivers on one press" {
+  stub_osascript
+  idle_target idle
+  run "$BIN/fleet-send" test
+  [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ] && [ ! -e "$(armfile)" ]
+}

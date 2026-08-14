@@ -269,3 +269,24 @@ assert.notStrictEqual(refused, plain, "refused looks different from idle");
 assert.notStrictEqual(refused, queued, "refused is distinguishable from queued");
 
 console.log("render tests passed");
+
+// --- armed feedback on a confirm verb -----------------------------------
+// ARMED is the one Row 2 state that is genuinely "operator attention
+// required": the next press does something outward-facing. Row 1's armed
+// state already speaks that with amber, so the panel keeps one vocabulary
+// rather than inventing a second. This is a deliberate, narrow exception to
+// Row 2 being monochrome -- it is not decoration, and missing it is exactly
+// the failure that matters.
+{
+  const armed = renderCommandSvg("ISSUE", "armed");
+  assert.ok(armed.includes("#F5A623"), "armed speaks with amber, like Row 1's armed");
+  assert.ok(/CONFIRM|AGAIN/i.test(armed), "armed says what to do next");
+
+  const idle = renderCommandSvg("ISSUE", "");
+  const queued = renderCommandSvg("ISSUE", "queued");
+  const refused = renderCommandSvg("ISSUE", "refused");
+  for (const [name, svg] of [["idle", idle], ["queued", queued], ["refused", refused]]) {
+    assert.ok(!svg.includes("#F5A623"), `${name} must not borrow the armed amber`);
+  }
+  assert.notStrictEqual(armed, refused, "armed is not refused -- opposite meanings");
+}

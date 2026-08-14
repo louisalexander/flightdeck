@@ -276,11 +276,29 @@ export class BootTile extends SingletonAction<BootTileSettings> {
  * session, unknown verb) -- that refusal is the boolean the key needs in
  * order to show "queued" vs. "refused" rather than claiming success blind.
  */
-function runFleetSend(verb: string): Promise<boolean> {
+// fleet-send reports three outcomes, not two: 0 delivered, 1 refused, and 2
+// armed -- an outward-facing verb asking to be pressed again. Collapsing that
+// to a boolean would paint an armed key as "refused", telling the operator
+// the press failed at the exact moment it is waiting on them to confirm.
+type SendOutcome = "queued" | "refused" | "armed";
+const ARMED_EXIT = 2;
+
+function runFleetSend(verb: string): Promise<SendOutcome> {
   return new Promise((resolve) => {
     execFile(interpreter(), [join(REPO, "bin", "fleet-send"), verb], (err) => {
-      if (err) streamDeck.logger.error(`fleet-send ${verb} refused: ${err.message}`);
-      resolve(!err);
+      if (!err) return resolve("queued");
+      // execFile surfaces the exit status on `code`; anything else (a signal,
+      // a spawn failure) has no code and is a genuine refusal.
+      // Node puts the exit status on `code`, but the ErrnoException type
+      // declares it a string, so widen through unknown and compare numerically
+      // rather than trusting either shape.
+      const code = (err as unknown as { code?: number | string }).code;
+      if (Number(code) === ARMED_EXIT) {
+        streamDeck.logger.info(`fleet-send ${verb} armed; awaiting confirm`);
+        return resolve("armed");
+      }
+      streamDeck.logger.error(`fleet-send ${verb} refused: ${err.message}`);
+      resolve("refused");
     });
   });
 }
@@ -337,10 +355,13 @@ export class Command extends SingletonAction<{ verb?: string }> {
       return;
     }
 
-    const ok = await runFleetSend(verb);
-    ev.action.setImage(toDataUri(
-      renderCommandSvg(verb.toUpperCase(), ok ? "queued" : "refused")));
-    this.scheduleRestore(id, ev.action, verb);
+    const outcome = await runFleetSend(verb);
+    ev.action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), outcome)));
+    // An armed key must stay readable long enough to act on -- reverting it
+    // after the usual flash would hide the very prompt it exists to show, and
+    // the arm itself outlives that flash. Held just under the arm window so
+    // the key stops inviting a press it can no longer honour.
+    this.scheduleRestore(id, ev.action, verb, outcome === "armed" ? 2600 : 1200);
   }
 
   private paintIdle(action: { setImage(image?: string): Promise<void> }, verb: string): void {
@@ -351,7 +372,8 @@ export class Command extends SingletonAction<{ verb?: string }> {
   // to idle so it always reads as ready for the next press. What is painted
   // here never changes; only when the restore fires is now tracked.
   private scheduleRestore(
-    id: string, action: { setImage(image?: string): Promise<void> }, verb: string
+    id: string, action: { setImage(image?: string): Promise<void> }, verb: string,
+    afterMs = 1200
   ): void {
     // Clear-before-set, unconditionally: `pending` must never hold a timer
     // that has been superseded. Without this, two presses whose fleet-send
@@ -364,7 +386,7 @@ export class Command extends SingletonAction<{ verb?: string }> {
     const timer = setTimeout(() => {
       this.pending.delete(id);
       this.paintIdle(action, verb);
-    }, 1200);
+    }, afterMs);
     this.pending.set(id, timer);
   }
 
