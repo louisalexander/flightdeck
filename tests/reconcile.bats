@@ -108,3 +108,119 @@ EOF
   [ "$(top overflow)" = "0" ]
   [ "$(sf 3 state)" = "empty" ]
 }
+
+# --- renderers ------------------------------------------------------------
+
+# Rewrites the test config with a "renderers" list.
+set_renderers() {
+  python3 - "$FLEET_CONFIG_DIR/fleet.json" "$@" <<'PY'
+import json, sys
+path, renderers = sys.argv[1], sys.argv[2:]
+cfg = json.load(open(path))
+cfg["renderers"] = renderers
+json.dump(cfg, open(path, "w"))
+PY
+}
+
+@test "RENDERER SEAM: a renderer receives the fleet snapshot on stdin" {
+  cat > "$BATS_TEST_TMPDIR/capture" <<EOF
+#!/bin/sh
+cat > "$BATS_TEST_TMPDIR/got.json"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/capture"
+  set_renderers "$BATS_TEST_TMPDIR/capture"
+  mksession A working flightdeck main
+  mksession B blocked sisko feat/login
+
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+
+  run python3 -c "
+import json
+d = json.load(open('$BATS_TEST_TMPDIR/got.json'))
+states = {s['session_id']: s['state'] for s in d['sessions']}
+assert states == {'A': 'working', 'B': 'blocked'}, states
+assert d['states']['working']['color'] == '#1256A3', d['states']
+assert isinstance(d['ts'], int)
+print('OK')
+"
+  [ "$output" = "OK" ]
+}
+
+@test "RENDERER SEAM: no renderers configured behaves exactly as before" {
+  mksession A working flightdeck main
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+  [ "$(sf 0 session_id)" = "A" ]
+}
+
+@test "RENDERER SEAM: a missing renderer never fails reconcile" {
+  set_renderers "$BATS_TEST_TMPDIR/does-not-exist"
+  mksession A working flightdeck main
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+  [ "$(sf 0 session_id)" = "A" ]
+}
+
+@test "RENDERER SEAM: a crashing renderer never fails reconcile" {
+  cat > "$BATS_TEST_TMPDIR/boom" <<'EOF'
+#!/bin/sh
+exit 3
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/boom"
+  set_renderers "$BATS_TEST_TMPDIR/boom"
+  mksession A working flightdeck main
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+}
+
+@test "RENDERER SEAM: a hanging renderer is timed out, not waited on forever" {
+  cat > "$BATS_TEST_TMPDIR/hang" <<'EOF'
+#!/bin/sh
+sleep 30
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/hang"
+  set_renderers "$BATS_TEST_TMPDIR/hang"
+  mksession A working flightdeck main
+  start=$(date +%s)
+  run "$BIN/fleet-reconcile"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [ "$elapsed" -lt 10 ]
+}
+
+@test "RENDERER SEAM: slots.json is written before renderers run, so a bad one cannot delay the deck" {
+  cat > "$BATS_TEST_TMPDIR/checkslots" <<EOF
+#!/bin/sh
+cp "$FLEET_HOME/slots.json" "$BATS_TEST_TMPDIR/slots-at-render.json"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/checkslots"
+  set_renderers "$BATS_TEST_TMPDIR/checkslots"
+  mksession A working flightdeck main
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/slots-at-render.json" ]
+  run python3 -c "
+import json
+d = json.load(open('$BATS_TEST_TMPDIR/slots-at-render.json'))
+print([s for s in d['slots'] if s['index']==0][0]['session_id'])
+"
+  [ "$output" = "A" ]
+}
+
+@test "RENDERER SEAM: every configured renderer runs, even if an earlier one fails" {
+  cat > "$BATS_TEST_TMPDIR/boom" <<'EOF'
+#!/bin/sh
+exit 3
+EOF
+  cat > "$BATS_TEST_TMPDIR/second" <<EOF
+#!/bin/sh
+touch "$BATS_TEST_TMPDIR/second-ran"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/boom" "$BATS_TEST_TMPDIR/second"
+  set_renderers "$BATS_TEST_TMPDIR/boom" "$BATS_TEST_TMPDIR/second"
+  mksession A working flightdeck main
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/second-ran" ]
+}

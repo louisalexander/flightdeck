@@ -7,12 +7,16 @@ NOTHING ELSE MOVES. Keys that shift under your thumb destroy the whole
 value of the row.
 """
 
+import json
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleetlib  # noqa: E402
+
+RENDERER_TIMEOUT_SECS = 3
 
 
 def load_live_sessions():
@@ -66,6 +70,45 @@ def session_slot(index, session, max_chars, prefixes):
             "app": ""}
 
 
+def run_renderers(config, live):
+    """Pipes the fleet snapshot to each configured external renderer.
+
+    The snapshot is piped rather than letting renderers read ~/.fleet
+    themselves: that makes the seam an explicit contract, and lets a renderer
+    live in another repo without importing fleetlib.
+
+    Renderers are invoked directly as executables, so they may be written in
+    any language. A Python renderer must be 3.9-compatible -- this path is
+    reachable from launchd via fleet-reap.
+
+    Nothing a renderer does may break reconcile or the Stream Deck: a missing,
+    crashing, hanging, or chatty renderer is logged and stepped over.
+    """
+    renderers = config.get("renderers") or []
+    if not renderers:
+        return
+
+    snapshot = json.dumps({
+        "ts": int(time.time()),
+        "sessions": [{
+            "session_id": s.get("session_id", ""),
+            "state": s.get("state", "idle"),
+            "repo": s.get("repo", ""),
+            "branch": s.get("branch", ""),
+            "cwd": s.get("cwd", ""),
+        } for s in live],
+        "states": config.get("states", {}),
+    }, separators=(",", ":")).encode("utf-8")
+
+    for command in renderers:
+        try:
+            subprocess.run([command], input=snapshot,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=RENDERER_TIMEOUT_SECS)
+        except Exception as err:
+            fleetlib.log("reconcile: renderer {} failed: {}".format(command, err))
+
+
 def main():
     config = fleetlib.load_config()
     count = config.get("slots", {}).get("count", 8)
@@ -115,6 +158,8 @@ def main():
     })
     if pending:
         fleetlib.log("reconcile: {} session(s) unslotted (overflow)".format(len(pending)))
+
+    run_renderers(config, live)
 
 
 if __name__ == "__main__":

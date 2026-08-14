@@ -2,6 +2,7 @@
   "slots": { "count": 8 },
   "timings": { "armMs": 3000, "longPressMs": 800, "reaperSeconds": 15 },
   "labels": { "maxChars": 11, "stripPrefixes": ["feat/", "fix/", "chore/", "feature/"] },
+  "renderers": [],
   "states": {
     "blocked": { "color": "#F5A623", "glyph": "blocked", "glyphColor": "#1A1200", "textColor": "#1A1200" },
     "working": { "color": "#1256A3", "glyph": "working", "glyphColor": "#FFFFFFCC", "textColor": "#FFFFFF" },
