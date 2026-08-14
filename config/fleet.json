@@ -1,0 +1,14 @@
+{
+  "slots": { "count": 8 },
+  "timings": { "armMs": 3000, "longPressMs": 800, "reaperSeconds": 15 },
+  "labels": { "maxChars": 11, "stripPrefixes": ["feat/", "fix/", "chore/", "feature/"] },
+  "states": {
+    "blocked": { "color": "#F5A623", "glyph": "blocked", "glyphColor": "#1A1200", "textColor": "#1A1200" },
+    "working": { "color": "#1256A3", "glyph": "working", "glyphColor": "#FFFFFFCC", "textColor": "#FFFFFF" },
+    "done":    { "color": "#238636", "glyph": "done",    "glyphColor": "#FFFFFFEE", "textColor": "#FFFFFF" },
+    "idle":    { "color": "#25282D", "glyph": "idle",    "glyphColor": "#FFFFFF55", "textColor": "#FFFFFF99" },
+    "failed":  { "color": "#B42318", "glyph": "failed",  "glyphColor": "#FFFFFFEE", "textColor": "#FFFFFF" },
+    "empty":   { "color": "#000000", "glyph": "none",    "glyphColor": "#000000",   "textColor": "#000000" },
+    "armed":   { "color": "#0A0A0A", "glyph": "armed",   "glyphColor": "#F5A623",   "textColor": "#F5A623" }
+  }
+}

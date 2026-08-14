@@ -1,0 +1,6 @@
+{
+  "pins": {
+    "7": { "host": "pinned-app", "app": "ChatGPT", "label_top": "ask", "label_bottom": "ChatGPT" }
+  },
+  "journal": { "vault": "/Users/pk/Documents/Obsidian Vaults/Vault 101" }
+}

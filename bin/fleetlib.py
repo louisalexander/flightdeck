@@ -1,0 +1,164 @@
+"""Shared helpers for flightdeck. Standard library only, Python 3.9 compatible."""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+# --- paths -----------------------------------------------------------------
+
+def fleet_home():
+    return Path(os.environ.get("FLEET_HOME") or (Path.home() / ".fleet"))
+
+def sessions_dir():
+    return fleet_home() / "sessions"
+
+def slots_path():
+    return fleet_home() / "slots.json"
+
+def armed_path():
+    return fleet_home() / "armed.json"
+
+def events_path():
+    return fleet_home() / "events.jsonl"
+
+def log_path():
+    return fleet_home() / "fleet.log"
+
+def repo_root():
+    return Path(__file__).resolve().parent.parent
+
+def config_dir():
+    env = os.environ.get("FLEET_CONFIG_DIR")
+    return Path(env) if env else repo_root() / "config"
+
+# --- logging ---------------------------------------------------------------
+
+def log(message):
+    """Best-effort logging. Never raises — callers may be inside a hook."""
+    try:
+        fleet_home().mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(log_path(), "a", encoding="utf-8") as handle:
+            handle.write("{} {}\n".format(stamp, message))
+    except Exception:
+        pass
+
+# --- json io ---------------------------------------------------------------
+
+def read_json(path, default=None):
+    """Returns default on any failure, including a partially written file."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return default
+
+def write_json_atomic(path, obj):
+    """Writes via a temp file in the same directory, then os.replace()."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, separators=(",", ":"))
+        os.replace(tmp, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
+def append_jsonl(path, obj):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+# --- config ----------------------------------------------------------------
+
+def deep_merge(base, over):
+    out = dict(base)
+    for key, value in over.items():
+        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+def load_config():
+    base = read_json(config_dir() / "fleet.json", {}) or {}
+    local = read_json(config_dir() / "fleet.local.json", {}) or {}
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(local, dict):
+        local = {}
+    return deep_merge(base, local)
+
+# --- labels ----------------------------------------------------------------
+
+DEFAULT_PREFIXES = ("feat/", "fix/", "chore/", "feature/")
+
+def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
+    """Token-aware shortening.
+
+    Blind truncation destroys the distinguishing part of a name:
+    break-state-exit-handling and break-state-entry-handling both truncate
+    to 'break-state'. So keep the first and last tokens and trim whichever
+    is currently longer, tie-breaking toward trimming the first -- the last
+    token is usually what distinguishes sibling branches.
+    """
+    text = (text or "").strip()
+    for prefix in strip_prefixes or ():
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+
+    tokens = [t for t in re.split(r"[-_/]+", text) if t]
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return tokens[0][:max_chars]
+
+    joined = "-".join(tokens)
+    if len(joined) <= max_chars:
+        return joined
+
+    first, last = tokens[0], tokens[-1]
+    while len(first) + len(last) + 1 > max_chars:
+        if len(first) >= len(last):
+            if len(first) <= 1:
+                break
+            first = first[:-1]
+        else:
+            if len(last) <= 1:
+                break
+            last = last[:-1]
+    return (first + "-" + last)[:max_chars]
+
+# --- process ---------------------------------------------------------------
+
+def git(args, cwd):
+    """Runs git with an argument LIST -- never a shell string.
+
+    This is what makes a repo path containing a space safe.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd)] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8", "replace").strip()
+    except Exception:
+        return 1, ""
+
+def add_bin_to_path():
+    """Lets sibling scripts `import fleetlib` regardless of cwd."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
