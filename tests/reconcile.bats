@@ -186,7 +186,7 @@ EOF
   run "$BIN/fleet-reconcile"
   elapsed=$(( $(date +%s) - start ))
   [ "$status" -eq 0 ]
-  [ "$elapsed" -lt 10 ]
+  [ "$elapsed" -lt 5 ]
 }
 
 @test "RENDERER SEAM: slots.json is written before renderers run, so a bad one cannot delay the deck" {

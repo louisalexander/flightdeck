@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleetlib  # noqa: E402
 
-RENDERER_TIMEOUT_SECS = 3
+RENDERER_TIMEOUT_SECS = 1   # SessionEnd hooks SHARE a 1.5s budget; see below
 
 
 def load_live_sessions():
@@ -83,6 +83,15 @@ def run_renderers(config, live):
 
     Nothing a renderer does may break reconcile or the Stream Deck: a missing,
     crashing, hanging, or chatty renderer is logged and stepped over.
+
+    The timeout is deliberately kept under the SessionEnd hook budget: the
+    chain SessionEnd -> fleet-emit -> fleet-reconcile -> renderer runs on a
+    path where all SessionEnd hooks together share 1.5 seconds, so a renderer
+    that cannot answer within one second IS the pathological case this
+    timeout exists to step over. The renderer this seam was built for
+    dispatches its real work via a detached subprocess.Popen and returns in
+    milliseconds; a renderer that needs longer than that should do its slow
+    work detached rather than asking this seam for more time.
     """
     renderers = config.get("renderers") or []
     if not renderers:
