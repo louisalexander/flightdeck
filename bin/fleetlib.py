@@ -4,7 +4,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -156,9 +155,3 @@ def git(args, cwd):
         return proc.returncode, proc.stdout.decode("utf-8", "replace").strip()
     except Exception:
         return 1, ""
-
-def add_bin_to_path():
-    """Lets sibling scripts `import fleetlib` regardless of cwd."""
-    here = str(Path(__file__).resolve().parent)
-    if here not in sys.path:
-        sys.path.insert(0, here)
