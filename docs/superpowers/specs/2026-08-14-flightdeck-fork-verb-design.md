@@ -152,6 +152,31 @@ forgotten, produces an agent working on something nobody is watching.
 - **Not on a key by default.** Row 2's eight are spoken for. FORK is a ninth
   verb in the inventory, assigned to a key by the operator when wanted.
 
+## Sequencing: deliberately not part of Row 2
+
+This design lives on its own branch and does not land with Row 2's first slice.
+Row 2 has a queue, a drain, a claim race and an AppleScript wake to get right;
+adding a verb that spawns worktrees into that same slice would blur what is
+being proven when something breaks.
+
+That means FORK is **blocked on** Row 2's first slice, and the plan should open
+by checking rather than assuming. It needs three things that do not exist yet:
+
+| Needs | From | State |
+|---|---|---|
+| `config/verbs/` and the verb file format | Row 2 first slice, Task 4 | not implemented |
+| `bin/fleet-verbs` resolution | Row 2 first slice, Task 4 | not implemented |
+| `bin/fleet-send` staging and delivery | Row 2 first slice, Tasks 5–6 | not implemented |
+
+The `{FLEET_BIN}` substitution of decision 5 is therefore **a change to Row 2's
+`fleet-verbs`, not to anything on this branch.** It is specified here because
+this is where the need for it was found, and because it fixes `test.md` as much
+as it enables `fork.md` — but it can only be written once Task 4 exists. Landing
+it as part of FORK's work, after Row 2 is in, keeps Row 2's slice
+uncontaminated at the cost of `test.md` shipping briefly with the wrong path in
+it. That trade is accepted: the wrong path is inert until an agent outside the
+flightdeck repo presses TEST.
+
 ## Architecture
 
 ### `config/verbs/fork.md`
@@ -255,12 +280,18 @@ for deep-link spawns.
 already live. One place for the operator to look, and `fleet-kill`'s
 linked-worktree safety checks apply unchanged.
 
-**Verified and unresolved:** `.claude/` is neither tracked nor ignored in this
-repo, and there is no global excludes file. A worktree created there therefore
-leaves the origin branch's `git status` showing an untracked `.claude/`. That is
-already true of the two worktrees living there today, so FORK inherits the
-condition rather than creating it — but a verb that commits a plan to the origin
-branch should not also be quietly dirtying it. See *Open decisions*.
+**`.claude/worktrees/` is gitignored**, decided here and applied. It was
+neither tracked nor ignored, with no global excludes file, so a worktree created
+there left the origin branch's `git status` showing an untracked `.claude/`.
+Already true of the worktrees living there today — FORK inherits the condition
+rather than creating it — but FORK is the verb that also commits a plan to that
+same branch, and a key that both commits to a branch and dirties it muddles two
+things the operator reads as one signal.
+
+Scoped to `worktrees/` rather than all of `.claude/` deliberately: the untracked
+directory is the entire defect, and ignoring the parent would silently prevent
+this repo from ever tracking `.claude/settings.json` — project hooks and
+permissions, which is close to what this repo is *about*.
 
 ## Testing
 
@@ -316,13 +347,6 @@ historical.
 Accepted rather than solved. The plan travels *in* the worktree by decision 2,
 which is what makes it robust; the SHA is provenance, not a dependency.
 
-### An untracked directory on the branch FORK just committed to
-
-See *Worktree location*. The failure is small and cosmetic on its own, but it
-compounds: `fleet-kill` refuses to remove a worktree with uncommitted changes,
-and a verb that both commits to a branch and dirties it is muddling two things
-the operator reads as one signal.
-
 ### Row 1 filling with slots nobody chose
 
 Each fork adds a working slot. Row 1 has eight, with an overflow count beyond
@@ -333,10 +357,6 @@ that pressing FORK is a deliberate act.
 
 ## Open decisions
 
-- **The untracked `.claude/`.** Whether to add `.claude/worktrees/` to
-  `.gitignore`, put spawned worktrees somewhere outside the repository instead,
-  or leave the condition as it already is. It predates this verb; FORK just
-  makes it more visible.
 - **The deck label for a spawned branch.** `issue-7-splash-on-lock` shortens to
   `issue-lock` through `fleetlib.shorten`. Identifiable, not lovely. A different
   branch template — putting the slug first, or dropping `issue-` — would read
