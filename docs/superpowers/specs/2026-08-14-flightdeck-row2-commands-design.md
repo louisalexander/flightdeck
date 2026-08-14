@@ -274,7 +274,7 @@ Two properties follow from the prompt-to-agent model and must be designed for:
 |---|---|---|---|
 | TEST | `test` | Run the suite; report what fails. Ends by calling `bin/fleet-fail` on failure. | |
 | DIFF | `diff` | Summarise what changed and why — not a raw diff dump, which the terminal already shows. | |
-| LOG | `log` | Summarise the session so far and journal it. See *Obsidian*. | |
+| NOTE | `note` | Summarise the session so far and journal it. See *Obsidian*. | |
 | ISSUE | `issue` | File the live problem, open question, or noticed-and-not-chased tangent as a GitHub issue, so it survives the session. | `confirm` |
 | PUSH | `push` | Commit and push. | `confirm` |
 | PR | `pr` | Commit, push, open the PR. Branches first when on the default branch. | `confirm` |
@@ -328,9 +328,15 @@ use it rather than embedding assumptions about what the agent knows.
 
 ## Obsidian: recommended, not required
 
-LOG journals the session. The prior spec's LOG almost certainly meant `git log`,
-paired with DIFF; under the prompt-to-agent model that is a weak key, because
-the terminal already shows it and it tells the operator nothing new.
+NOTE journals the session. The prior spec called this key LOG, which almost
+certainly meant `git log`, paired with DIFF; under the prompt-to-agent model
+that is a weak key, because the terminal already shows it and it tells the
+operator nothing new.
+
+**Renamed LOG to NOTE deliberately.** Keeping the old label while changing the
+meaning would have left the panel with a key that reads as `git log` and does
+something else entirely — the worst of both, and a mistake an operator makes
+once per press. The name now says what the key does.
 
 **Recommended practice: a dedicated flightdeck vault, reached over MCP.**
 
@@ -342,9 +348,9 @@ A separate vault makes broad access to it unremarkable.
 
 This is a convention, not a requirement:
 
-- Shipped `config/verbs/log.md` stays dependency-free.
-- The MCP flavour is a documented **override** at `~/.fleet/verbs/log.md`.
-- With no Obsidian MCP server configured, LOG degrades to saying it cannot
+- Shipped `config/verbs/note.md` stays dependency-free.
+- The MCP flavour is a documented **override** at `~/.fleet/verbs/note.md`.
+- With no Obsidian MCP server configured, NOTE degrades to saying it cannot
   journal, rather than failing obscurely.
 
 ## Open decisions
