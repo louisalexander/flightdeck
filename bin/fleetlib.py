@@ -70,7 +70,18 @@ def claim_queue(session_id):
     caller can win, and the loser's rename finds the source already gone.
 
     This is the same ownership trick fleet-press's claim_arm() uses for
-    arming, for the same reason.
+    arming, for the same reason -- but the failure mode on the far side is
+    not the same. If this process dies between the successful os.replace()
+    and the `finally: claim.unlink()` below (including a crash inside
+    read_json), the renamed file <session>.claim.<pid>.json is orphaned on
+    disk and nothing ever revisits it. Ownership is still exactly-once --
+    no other caller will ever see or claim that file -- but the operator's
+    staged verb is then silently and permanently lost, not merely
+    delayed. claim_arm()'s "a stray file is inert" justification does NOT
+    transfer here: an inert confirmation window is cheap to lose, a queued
+    verb is not. Recovery of orphaned claim files is not implemented; this
+    is a known gap, tracked separately, not something this function papers
+    over.
     """
     claim = queue_dir() / "{}.claim.{}.json".format(session_id, os.getpid())
     try:

@@ -45,6 +45,7 @@ def resolve_verb(verb_id):
 
 def main(argv):
     if len(argv) < 2:
+        fleetlib.log("send: no verb given; usage: fleet-send <verb>")
         return 1
     verb_id = argv[1]
 

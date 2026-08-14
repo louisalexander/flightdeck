@@ -45,8 +45,15 @@ print(d['verb'], 'fleet-fail' in d['prompt'], isinstance(d['queued_at'], int))"
   rm -f "$FLEET_HOME/sessions/S1.json"
   run "$BIN/fleet-send" test
   [ "$status" -eq 1 ]
+  [ ! -e "$(queued)" ]
 }
 
+# Sequential, not concurrent: this proves the already-claimed case (a
+# second call finds the entry gone) but does not exercise an actual race
+# between simultaneous claimants. That race is covered by
+# tests/test_fleetlib.py's ThreadPoolExecutor test, which is the right
+# home for genuine concurrency (bats/subshells can't easily race threads
+# against one shared claim_queue() call).
 @test "CLAIM: exactly one claimant wins; the loser gets nothing" {
   "$BIN/fleet-send" test
   run python3 -c "
