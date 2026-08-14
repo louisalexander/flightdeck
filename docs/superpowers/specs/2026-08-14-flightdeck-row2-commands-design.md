@@ -205,6 +205,16 @@ the base-plus-local precedence `fleet.json`/`fleet.local.json` already uses.
   the second stages. And a `blocked` session is staged but never woken, so a
   permission dialog is never typed into.
 
+  **The arm window is `timings.verbArmSecs` (10s), not `armMs`.** The two
+  guards look alike and are not: `armMs` (3s) exists for slot teardown, where
+  a mistaken confirm destroys an agent's work and the operator should have to
+  mean it. A verb is recoverable. Observed live, 3s was too tight to read
+  `CONFIRM?` and decide within — three consecutive presses each re-armed
+  instead of confirming — and because a re-arm is visually identical to a
+  first arm, the operator could not tell "too slow" from "not registered".
+  The plugin holds the ARMED face for just under the same window; the two are
+  one decision split across two processes and must be changed together.
+
   Plain verbs carry no expiry. They are not outward-facing, so a late delivery
   costs nothing and waiting indefinitely is friendlier; a general TTL for every
   verb remains an open decision.

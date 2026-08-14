@@ -434,3 +434,35 @@ import json;print('expires_at' in json.load(open('$FLEET_HOME/queue/S1.json')))"
   run "$BIN/fleet-send" issue
   [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ] && [ ! -e "$(queued)" ]
 }
+
+# --- the verb arm window is its own setting -------------------------------
+#
+# It was inherited from armMs, which exists for slot teardown where 3s is
+# right because a mistaken teardown destroys an agent's work. For a verb it
+# is too tight: observed live, three consecutive presses each re-armed
+# instead of confirming, because the operator was reading CONFIRM? and
+# deciding while the window closed under them. Worse, a re-arm is
+# indistinguishable from a first arm, so "too slow" looks like "didn't
+# register". The two guards have different stakes and now have different
+# windows.
+
+@test "ARMWINDOW: a verb arm uses verbArmSecs, not the teardown armMs" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true
+  run python3 -c "
+import json, time
+d = json.load(open('$FLEET_HOME/armed-verb.json'))
+left = d['expires'] - int(time.time())
+# 10s window, allowing for the seconds fleet-send itself spends.
+print(7 <= left <= 10)"
+  [ "$output" = "True" ]
+}
+
+@test "ARMWINDOW: teardown's armMs is left alone at 3s" {
+  run python3 -c "
+import json
+t = json.load(open('$ROOT/config/fleet.json'))['timings']
+print(t['armMs'], t['verbArmSecs'])"
+  [ "$output" = "3000 10" ]
+}

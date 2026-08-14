@@ -1,6 +1,6 @@
 {
   "slots": { "count": 8 },
-  "timings": { "armMs": 3000, "longPressMs": 800, "reaperSeconds": 15, "confirmQueueSecs": 300 },
+  "timings": { "armMs": 3000, "longPressMs": 800, "reaperSeconds": 15, "verbArmSecs": 10, "confirmQueueSecs": 300 },
   "labels": { "maxChars": 11, "stripPrefixes": ["feat/", "fix/", "chore/", "feature/"] },
   "renderers": [],
   "boot": { "enabled": true, "durationMs": 2000 },

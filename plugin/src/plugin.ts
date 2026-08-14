@@ -357,11 +357,14 @@ export class Command extends SingletonAction<{ verb?: string }> {
 
     const outcome = await runFleetSend(verb);
     ev.action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), outcome)));
-    // An armed key must stay readable long enough to act on -- reverting it
-    // after the usual flash would hide the very prompt it exists to show, and
-    // the arm itself outlives that flash. Held just under the arm window so
-    // the key stops inviting a press it can no longer honour.
-    this.scheduleRestore(id, ev.action, verb, outcome === "armed" ? 2600 : 1200);
+    // An armed key must stay readable for as long as the arm is actually
+    // live. Reverting early is worse than reverting late: the key would stop
+    // inviting a press it would still honour, and the operator reads that as
+    // the arm having lapsed. Held just under fleet-send's verbArmSecs (10s)
+    // so it stops inviting a press only once it truly cannot honour one.
+    // If that setting changes, change this with it -- they are one decision
+    // split across two processes.
+    this.scheduleRestore(id, ev.action, verb, outcome === "armed" ? 9000 : 1200);
   }
 
   private paintIdle(action: { setImage(image?: string): Promise<void> }, verb: string): void {

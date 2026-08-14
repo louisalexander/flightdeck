@@ -204,12 +204,21 @@ def main(argv):
         # at whoever is selected now -- a different repo than the operator
         # was looking at when they decided.
         if not live:
+            # Its own window, deliberately not fleet-press's armMs. That 3s
+            # is right for slot teardown, where a mistaken confirm destroys an
+            # agent's work and the operator should have to mean it. A verb is
+            # recoverable, and 3s was observed live to be too tight to read
+            # CONFIRM? and decide in -- three consecutive presses each
+            # re-armed instead of confirming. A re-arm looks exactly like a
+            # first arm, so the operator could not tell "too slow" from "not
+            # registered", which is the part that made it feel broken rather
+            # than strict.
             config = fleetlib.load_config()
-            arm_ms = config.get("timings", {}).get("armMs", 3000)
+            arm_secs = config.get("timings", {}).get("verbArmSecs", 10)
             fleetlib.write_json_atomic(fleetlib.verb_armed_path(), {
                 "verb": verb_id,
                 "session_id": session_id,
-                "expires": int(time.time()) + max(1, arm_ms // 1000),
+                "expires": int(time.time()) + max(1, int(arm_secs)),
             })
             fleetlib.log("send: armed {} for {} -- press again to confirm"
                          .format(verb_id, session_id))
