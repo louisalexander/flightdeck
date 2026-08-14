@@ -97,3 +97,63 @@ spawn() { (cd "$REPO" && "$BIN/fleet-spawn" "$@"); }
   run spawn 7
   [ "$status" -eq 1 ]
 }
+
+# --- worktree creation --------------------------------------------------
+
+wt() { printf '%s' "$REPO/.claude/worktrees/issue-7"; }
+
+@test "WT: a worktree is created at a path built from the issue number" {
+  run spawn 7
+  [ "$status" -eq 0 ]
+  [ -d "$(wt)" ]
+}
+
+@test "WT: the branch carries the number and the slugified title" {
+  spawn 7
+  run git -C "$(wt)" rev-parse --abbrev-ref HEAD
+  [ "$output" = "issue-7-show-the-splash-on-screen-lock" ]
+}
+
+@test "WT: the worktree is branched from the branch we were on" {
+  # The plan the fresh agent must execute was committed on this branch.
+  # Branching from anywhere else hands it a plan describing code its
+  # worktree does not contain.
+  echo plan > "$REPO/PLAN.md"
+  git -C "$REPO" add PLAN.md
+  git -C "$REPO" commit -qm "add plan"
+  spawn 7
+  [ -f "$(wt)/PLAN.md" ]
+}
+
+@test "WT: the path contains no text from the issue title" {
+  # Spec decision 4: the slug goes in the branch name, which reaches git
+  # through an argv list, and deliberately NOT in the path, which is
+  # interpolated into a shell command and an AppleScript literal.
+  stub_gh 'Fix the widget'
+  spawn 7
+  [ -d "$(wt)" ]
+  [ ! -d "$REPO/.claude/worktrees/issue-7-fix-the-widget" ]
+}
+
+@test "WT: a title of pure punctuation still yields a usable branch" {
+  stub_gh '!!! ???'
+  run spawn 7
+  [ "$status" -eq 0 ]
+  run git -C "$(wt)" rev-parse --abbrev-ref HEAD
+  [ "$output" = "issue-7" ]
+}
+
+@test "WT: a second call creates no second worktree" {
+  spawn 7
+  run spawn 7
+  [ "$status" -eq 0 ]
+  run bash -c "ls '$REPO/.claude/worktrees' | wc -l | tr -d ' '"
+  [ "$output" = "1" ]
+}
+
+@test "WT: nothing is created when the issue does not exist" {
+  stub_gh_missing
+  run spawn 7
+  [ "$status" -eq 1 ]
+  [ ! -d "$REPO/.claude/worktrees" ]
+}

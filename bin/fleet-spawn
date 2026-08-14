@@ -103,6 +103,29 @@ def issue_title(number, cwd):
     return title if isinstance(title, str) else None
 
 
+def worktree_path(repo_root, number):
+    """Where issue <n>'s worktree lives.
+
+    Built from the issue number alone. A path including the slug would
+    read better in `ls`, and buying that would mean interpolating
+    model-authored text into a shell command and an AppleScript string
+    literal -- the exact thing the v1 spec's hard rule forbids. The slug
+    goes in the branch name instead, which git receives as an argv element.
+    """
+    return Path(repo_root) / ".claude" / "worktrees" / "issue-{}".format(number)
+
+
+def create_worktree(repo_root, path, branch, origin_branch):
+    """Adds the worktree. False on any failure, having logged why."""
+    code, out = fleetlib.git(
+        ["worktree", "add", "-b", branch, str(path), origin_branch],
+        repo_root, timeout=60)
+    if code != 0:
+        fleetlib.log("spawn: worktree add failed for {}: {}".format(path, out))
+        return False
+    return True
+
+
 def main(argv):
     args = argv[1:]
     if args and args[0] == "--":
@@ -130,6 +153,19 @@ def main(argv):
     title = issue_title(number, cwd)
     if title is None:
         sys.stderr.write("fleet-spawn: cannot read issue {}\n".format(number))
+        return 1
+
+    path = worktree_path(repo_root, number)
+    if path.exists():
+        # Idempotent by contract -- see --explain. Two agents in two
+        # worktrees on one issue is the failure this prevents.
+        fleetlib.log("spawn: issue {} already has a worktree".format(number))
+        return 0
+
+    slug = fleetlib.slugify(title)
+    branch = "issue-{}-{}".format(number, slug) if slug else "issue-{}".format(number)
+    if not create_worktree(repo_root, path, branch, origin_branch):
+        sys.stderr.write("fleet-spawn: could not create the worktree\n")
         return 1
 
     return 0
