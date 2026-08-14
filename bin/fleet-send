@@ -178,6 +178,15 @@ def main(argv):
         # the precise outcome confirm:true exists to prevent. There is no
         # safe way to defer it, so an undeliverable target is a refusal.
         if session.get("state") not in WAKEABLE_STATES:
+            # Note this runs BEFORE the arm is claimed, so a target that goes
+            # busy between the arming press and the confirming one refuses
+            # without consuming the arm -- and if it goes quiet again inside
+            # the window, the next press fires off that original arm. Three
+            # presses rather than two. Left as-is deliberately: every one of
+            # those presses is a deliberate operator action, the window is
+            # seconds, and consuming the arm here would instead mean an
+            # operator who armed correctly loses it to a momentary state
+            # flicker they never saw.
             fleetlib.log("send: refusing {} -- target is {}, and a confirm verb "
                          "must fire while the operator is watching"
                          .format(verb_id, session.get("state")))
