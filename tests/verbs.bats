@@ -201,3 +201,22 @@ MD
   run "$BIN/fleet-verbs" keyinfo bad
   [ "$status" -eq 1 ]
 }
+
+# --- every verb must be reachable -----------------------------------------
+#
+# A verb file that no key can select is dead weight: it resolves, it works,
+# and the operator cannot get to it. That happened to FORK -- shipped, valid,
+# and absent from the property inspector, so it could not be assigned to a key
+# at all. The design says the operator assigns it "when wanted", which needs
+# it to be offerable in the first place.
+
+@test "REACHABLE: every shipped verb appears in the property inspector" {
+  local pi="$ROOT/plugin/com.louisalexander.flightdeck.sdPlugin/ui/command.html"
+  local missing=""
+  for f in "$ROOT"/config/verbs/*.md; do
+    local id
+    id="$(basename "$f" .md)"
+    grep -q "value=\"$id\"" "$pi" || missing="$missing $id"
+  done
+  [ -z "$missing" ] || { echo "not offered in the picker:$missing"; false; }
+}
