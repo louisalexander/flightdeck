@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Resolves a Row 2 verb id to its prompt.
+
+A verb is a markdown file: frontmatter for the flags the dispatcher needs,
+body for the prompt the agent receives. Local files in $FLEET_HOME/verbs
+win over the shipped ones in config/verbs, per verb rather than wholesale,
+so overriding one verb does not mean maintaining copies of the rest.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+TRUE_WORDS = ("true", "yes", "1")
+
+
+def verb_file(verb_id):
+    """The file that wins for this id, or None. Local beats shipped."""
+    for base in (fleetlib.fleet_home() / "verbs",
+                 fleetlib.repo_root() / "config" / "verbs"):
+        candidate = base / "{}.md".format(verb_id)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def parse_verb(text):
+    """Splits frontmatter from body. Returns None if the shape is wrong.
+
+    Rejecting rather than guessing matters: a file without frontmatter is
+    far more likely to be a half-written verb than a deliberate one, and
+    sending a half-written prompt to an agent is worse than sending none.
+    """
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    meta = {}
+    for line in parts[1].strip().splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        meta[key.strip()] = value.strip()
+    return {
+        "id": meta.get("id", ""),
+        "label": meta.get("label", ""),
+        "interrupt": meta.get("interrupt", "").lower() in TRUE_WORDS,
+        "confirm": meta.get("confirm", "").lower() in TRUE_WORDS,
+        "prompt": parts[2].strip(),
+    }
+
+
+def load_verb(verb_id):
+    path = verb_file(verb_id)
+    if path is None:
+        return None, None
+    try:
+        parsed = parse_verb(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    return parsed, path
+
+
+def main(argv):
+    if len(argv) < 3:
+        return 1
+    command, verb_id = argv[1], argv[2]
+    parsed, path = load_verb(verb_id)
+    if parsed is None:
+        sys.stderr.write("fleet-verbs: no such verb: {}\n".format(verb_id))
+        return 1
+    if command == "show":
+        sys.stdout.write(parsed["prompt"] + "\n")
+    elif command == "path":
+        sys.stdout.write(str(path) + "\n")
+    elif command == "flags":
+        sys.stdout.write("interrupt={} confirm={}\n".format(
+            str(parsed["interrupt"]).lower(), str(parsed["confirm"]).lower()))
+    else:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
