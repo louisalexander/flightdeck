@@ -57,6 +57,9 @@ print(d['decision'], d['reason'])"
   run emit Stop '{"session_id":"S1","cwd":"/tmp","stop_hook_active":true}'
   [ -z "$output" ]
   [ "$(state)" = "done" ]
+  # The distinguishing assertion: the entry survives un-drained. Without
+  # this, deleting the drain feature entirely would still pass this test.
+  [ -e "$FLEET_HOME/queue/S1.json" ]
 }
 
 @test "a queued verb for another session is not drained by this one" {
@@ -67,6 +70,12 @@ json.dump({'verb':'test','prompt':'X','verb_path':'','queued_at':1},
   run emit Stop
   [ -z "$output" ]
   [ -e "$FLEET_HOME/queue/OTHER.json" ]
+  # Not just present but intact and unclaimed -- proves isolation, not
+  # merely that some file with this name still exists.
+  run python3 -c "
+import json
+print(json.load(open('$FLEET_HOME/queue/OTHER.json'))['prompt'])"
+  [ "$output" = "X" ]
 }
 
 @test "a malformed queue entry is discarded, never emitted as a block" {
@@ -75,4 +84,5 @@ json.dump({'verb':'test','prompt':'X','verb_path':'','queued_at':1},
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [ "$(state)" = "done" ]
+  [ ! -e "$FLEET_HOME/queue/S1.json" ]
 }
