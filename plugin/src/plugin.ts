@@ -55,7 +55,8 @@ function loadConfig(): Config {
 
 const EMPTY = (index: number): Slot => ({
   index, state: "empty", label_top: "", label_bottom: "",
-  session_id: "", host: "", iterm_session: "", cwd: "", app: ""
+  session_id: "", host: "", iterm_session: "", cwd: "", app: "",
+  focused: false
 });
 
 @action({ UUID: "com.louisalexander.flightdeck.slot" })

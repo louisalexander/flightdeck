@@ -215,4 +215,36 @@ assert.ok(!shouldShowSplash(enabledCfg, 5000, "working"), "no splash once the bo
 
 assert.ok(toDataUri(splashTileSvg(0, 0)).startsWith("data:image/svg+xml;base64,"), "splash tile encodes as a data uri");
 
+// --- focus border -------------------------------------------------------
+const focusedSlot = {
+  index: 0, state: "working", label_top: "REPO", label_bottom: "main",
+  session_id: "S1", host: "iterm2", iterm_session: "U1", cwd: "/tmp", app: "",
+  focused: true
+};
+const unfocusedSlot = { ...focusedSlot, focused: false };
+
+assert.ok(
+  renderSvg(focusedSlot, cfg, false).includes('stroke="#FFFFFF"'),
+  "a focused slot draws a white border"
+);
+assert.ok(
+  !renderSvg(unfocusedSlot, cfg, false).includes('stroke="#FFFFFF"'),
+  "an unfocused slot draws no border"
+);
+// The lifecycle fill must still dominate: a thin stroke, not a thick frame.
+{
+  const m = renderSvg(focusedSlot, cfg, false).match(/stroke-width="(\d+)"/);
+  assert.ok(m && Number(m[1]) <= 6, "focus border stays thin (<=6 at 144px)");
+}
+// Selection is not a state. The background must be the lifecycle colour.
+assert.ok(
+  renderSvg(focusedSlot, cfg, false).includes('fill="#1256A3"'),
+  "focus does not replace the lifecycle background"
+);
+// Arming owns the whole key; a stale selection must not draw over it.
+assert.ok(
+  !renderSvg(focusedSlot, cfg, true).includes('stroke="#FFFFFF"'),
+  "an armed key shows no focus border"
+);
+
 console.log("render tests passed");
