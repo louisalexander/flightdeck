@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Stages a Row 2 verb for the selected session.
+
+A press never types a prompt. It writes the verb to
+$FLEET_HOME/queue/<session_id>.json and lets delivery happen on whichever
+path suits the session's state -- the Stop drain for a working session, a
+wake for an idle one. Staging is the whole contract; delivery is separate
+and can fail without losing the operator's intent.
+
+Not a hook: unlike fleet-emit this may exit non-zero, because a press that
+could not be staged must be visible rather than silently dropped.
+"""
+
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import fleetlib  # noqa: E402
+
+VERBS_TIMEOUT_SECS = 5
+
+
+def resolve_verb(verb_id):
+    """(prompt, verb_path) for a verb id, or (None, None)."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "fleet-verbs"), "show", verb_id],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=VERBS_TIMEOUT_SECS)
+        if proc.returncode != 0:
+            return None, None
+        prompt = proc.stdout.decode("utf-8", "replace").strip()
+        path = subprocess.run(
+            [sys.executable, str(HERE / "fleet-verbs"), "path", verb_id],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=VERBS_TIMEOUT_SECS).stdout.decode("utf-8", "replace").strip()
+        return (prompt or None), (path or None)
+    except Exception as err:
+        fleetlib.log("send: could not resolve verb {}: {}".format(verb_id, err))
+        return None, None
+
+
+def main(argv):
+    if len(argv) < 2:
+        return 1
+    verb_id = argv[1]
+
+    session_id = fleetlib.read_focus()
+    if not session_id:
+        fleetlib.log("send: no selection; press a Row 1 key first")
+        return 1
+
+    session = fleetlib.read_json(fleetlib.sessions_dir() / "{}.json".format(session_id))
+    if not isinstance(session, dict):
+        fleetlib.log("send: selected session {} is gone".format(session_id))
+        return 1
+
+    prompt, verb_path = resolve_verb(verb_id)
+    if not prompt:
+        fleetlib.log("send: no such verb: {}".format(verb_id))
+        return 1
+
+    fleetlib.write_json_atomic(fleetlib.queue_path(session_id), {
+        "verb": verb_id,
+        "prompt": prompt,
+        "verb_path": verb_path or "",
+        "queued_at": int(time.time()),
+    })
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as err:
+        fleetlib.log("send: unhandled error: {}".format(err))
+        sys.exit(1)

@@ -50,6 +50,41 @@ def clear_focus():
     except Exception:
         pass
 
+
+def queue_dir():
+    return fleet_home() / "queue"
+
+
+def queue_path(session_id):
+    return queue_dir() / "{}.json".format(session_id)
+
+
+def claim_queue(session_id):
+    """Takes sole ownership of a queued verb, or returns None.
+
+    Two deliverers can race for the same entry: the Stop drain when a turn
+    ends, and fleet-send's wake path when it judged the session idle. A
+    read-then-delete is racy -- both could read the same entry before
+    either removed it, and the verb would run twice. Rename to a unique
+    per-pid sibling with os.replace() instead, which is atomic: exactly one
+    caller can win, and the loser's rename finds the source already gone.
+
+    This is the same ownership trick fleet-press's claim_arm() uses for
+    arming, for the same reason.
+    """
+    claim = queue_dir() / "{}.claim.{}.json".format(session_id, os.getpid())
+    try:
+        os.replace(str(queue_path(session_id)), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
 def events_path():
     return fleet_home() / "events.jsonl"
 
