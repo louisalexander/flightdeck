@@ -340,5 +340,87 @@ class ClaimQueueTests(unittest.TestCase):
                     os.environ["FLEET_HOME"] = old_home
 
 
+class SlugifyTests(unittest.TestCase):
+    """A branch-name slug built from an issue title.
+
+    The title is model-authored text. These tests are the executable form
+    of the FORK spec's decision 4: whatever goes in, only [a-z0-9-] comes
+    out.
+    """
+
+    def test_ordinary_title_becomes_a_hyphenated_slug(self):
+        self.assertEqual(
+            fleetlib.slugify("Show the splash on screen lock"),
+            "show-the-splash-on-screen-lock")
+
+    def test_punctuation_collapses_to_single_hyphens(self):
+        self.assertEqual(fleetlib.slugify("Fix: the  thing -- badly!"),
+                         "fix-the-thing-badly")
+
+    def test_leading_and_trailing_separators_are_stripped(self):
+        self.assertEqual(fleetlib.slugify("  --hello--  "), "hello")
+
+    def test_a_title_of_only_punctuation_yields_empty(self):
+        self.assertEqual(fleetlib.slugify("!!! ??? ***"), "")
+
+    def test_empty_and_none_yield_empty(self):
+        self.assertEqual(fleetlib.slugify(""), "")
+        self.assertEqual(fleetlib.slugify(None), "")
+
+    def test_output_never_exceeds_the_cap(self):
+        self.assertLessEqual(len(fleetlib.slugify("a" * 200)), 32)
+
+    def test_truncation_drops_a_partial_trailing_token(self):
+        # Cutting mid-word leaves a fragment that reads like a typo in
+        # `git branch`. Prefer a whole token, even a shorter slug.
+        self.assertEqual(
+            fleetlib.slugify("alpha beta gamma delta epsilon zeta eta"),
+            "alpha-beta-gamma-delta-epsilon")
+
+    def test_shell_metacharacters_cannot_survive(self):
+        hostile = "$(rm -rf /); `whoami`; \"quoted\"; 'single'; a\\b; x\ny"
+        self.assertRegex(fleetlib.slugify(hostile), r"\A[a-z0-9-]*\Z")
+
+    def test_non_ascii_is_dropped_not_transliterated(self):
+        # Dropping is honest and safe; transliteration would need a table
+        # and would still not be reversible.
+        self.assertRegex(fleetlib.slugify("Ünïcödé bug"), r"\A[a-z0-9-]*\Z")
+
+
+class SpawnRecordTests(unittest.TestCase):
+    """Where a spawned worktree's iTerm2 session id is remembered."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old_home = os.environ.get("FLEET_HOME")
+        os.environ["FLEET_HOME"] = self.tmp
+
+    def tearDown(self):
+        if self.old_home is None:
+            os.environ.pop("FLEET_HOME", None)
+        else:
+            os.environ["FLEET_HOME"] = self.old_home
+
+    def test_record_lives_under_fleet_home(self):
+        path = fleetlib.spawn_record_path("/repo/.claude/worktrees/issue-7")
+        self.assertEqual(path.parent, Path(self.tmp) / "spawns")
+
+    def test_same_worktree_maps_to_the_same_record(self):
+        a = fleetlib.spawn_record_path("/repo/.claude/worktrees/issue-7")
+        b = fleetlib.spawn_record_path("/repo/.claude/worktrees/issue-7")
+        self.assertEqual(a, b)
+
+    def test_same_issue_number_in_two_repos_does_not_collide(self):
+        # Issue #7 exists in every repo. Keying on the number alone would
+        # make one repo's fork focus another repo's tab.
+        a = fleetlib.spawn_record_path("/one/.claude/worktrees/issue-7")
+        b = fleetlib.spawn_record_path("/two/.claude/worktrees/issue-7")
+        self.assertNotEqual(a, b)
+
+    def test_record_filename_is_filesystem_safe(self):
+        path = fleetlib.spawn_record_path("/a b/c'd/.claude/worktrees/issue-7")
+        self.assertRegex(path.name, r"\A[a-f0-9]+\.json\Z")
+
+
 if __name__ == "__main__":
     unittest.main()

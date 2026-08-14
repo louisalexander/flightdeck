@@ -1,5 +1,6 @@
 """Shared helpers for flightdeck. Standard library only, Python 3.9 compatible."""
 
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,23 @@ def slots_path():
 
 def armed_path():
     return fleet_home() / "armed.json"
+
+
+def spawns_dir():
+    return fleet_home() / "spawns"
+
+
+def spawn_record_path(worktree_path):
+    """Where the iTerm2 session id for a spawned worktree is remembered.
+
+    Keyed by a hash of the absolute worktree path rather than by issue
+    number: issue #7 exists in every repository, and keying on the number
+    would make one repo's FORK focus another repo's tab. Hashing rather
+    than sanitising because a path may contain anything a filesystem
+    allows, and this filename is never read by a human.
+    """
+    digest = hashlib.sha256(str(worktree_path).encode("utf-8")).hexdigest()[:16]
+    return spawns_dir() / "{}.json".format(digest)
 
 def focus_path():
     return fleet_home() / "focus.json"
@@ -331,6 +349,33 @@ def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
                 break
             last = last[:-1]
     return (first + "-" + last)[:max_chars]
+
+SLUG_MAX_CHARS = 32
+
+def slugify(text, max_chars=SLUG_MAX_CHARS):
+    """Reduces arbitrary text to [a-z0-9-], for use in a branch name.
+
+    Sanitising, not escaping. The input is an issue title -- model-authored
+    text -- and the output is interpolated into a branch name. Escaping
+    would mean reasoning about which of git, the shell and AppleScript each
+    metacharacter is dangerous to; reducing to a charset with no
+    metacharacters in it at all means there is nothing left to reason
+    about.
+
+    `shorten` above solves a different problem -- fitting a label on a 96px
+    key -- and deliberately keeps the original characters, so it is not a
+    substitute for this.
+
+    Truncation prefers a whole trailing token: cutting mid-word leaves a
+    fragment that reads like a typo in `git branch`.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    cut = cleaned[:max_chars]
+    if "-" in cut:
+        cut = cut.rsplit("-", 1)[0]
+    return cut.strip("-")
 
 # --- process ---------------------------------------------------------------
 
