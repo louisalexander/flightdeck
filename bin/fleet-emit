@@ -23,6 +23,10 @@ EVENT_STATES = {
 }
 
 
+PS_TIMEOUT_SECS = 2
+RECONCILE_TIMEOUT_SECS = 10
+
+
 def _ps_field(pid, field):
     """Runs `ps -o <field>= -p <pid>` and returns the stripped single-field value.
 
@@ -33,14 +37,22 @@ def _ps_field(pid, field):
     this function did -- silently truncates `comm` at the first space and
     misparses the pid. Two single-field calls sidestep both problems: no
     whitespace-splitting is needed since each field is read whole.
+
+    Bounded with a short timeout: this runs synchronously inside a live
+    agent session, and `ps` answers immediately or is wedged -- there is no
+    legitimate slow case to accommodate. subprocess.run raises
+    TimeoutExpired (a subclass of SubprocessError, itself a subclass of
+    Exception, so it is caught below) rather than hanging forever.
     """
     try:
         proc = subprocess.run(
             ["ps", "-o", "{}=".format(field), "-p", str(pid)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=PS_TIMEOUT_SECS,
         )
         return proc.stdout.decode("utf-8", "replace").strip()
-    except Exception:
+    except Exception as err:
+        fleetlib.log("emit: ps -o {} -p {} failed: {}".format(field, pid, err))
         return ""
 
 
@@ -51,8 +63,10 @@ def find_agent_pid():
         if pid <= 1:
             break
         comm = _ps_field(pid, "comm")
+        if not comm:
+            break
         ppid_out = _ps_field(pid, "ppid")
-        if not comm or not ppid_out:
+        if not ppid_out:
             break
         base = comm.rsplit("/", 1)[-1]
         if base in ("claude", "node"):
@@ -123,9 +137,10 @@ def run(event):
     if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
         try:
             subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fleet-reconcile")],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=RECONCILE_TIMEOUT_SECS)
+        except Exception as err:
+            fleetlib.log("emit: fleet-reconcile call failed: {}".format(err))
 
 
 if __name__ == "__main__":

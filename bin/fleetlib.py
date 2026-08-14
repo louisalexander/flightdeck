@@ -74,10 +74,23 @@ def write_json_atomic(path, obj):
         raise
 
 def append_jsonl(path, obj):
+    """Appends one JSON line, safe under concurrent writers.
+
+    Opens with O_APPEND (POSIX guarantees each write() to an O_APPEND fd is
+    positioned at EOF atomically with respect to other writers on the same
+    file) and issues the complete encoded line -- payload plus trailing
+    newline -- in a single os.write() call. A single small write to a local
+    filesystem does not interleave with concurrent writers, so multiple
+    agents' hooks appending at once cannot produce a merged or partial line.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    line = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
 
 # --- config ----------------------------------------------------------------
 

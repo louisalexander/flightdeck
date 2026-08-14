@@ -115,3 +115,59 @@ print('OK')
   [ "$status" -eq 0 ]
   [ "$output" = "OK" ]
 }
+
+# --- bounded subprocess timeouts --------------------------------------------
+#
+# fleet-emit shells out twice: to `ps` (inside find_agent_pid) and to
+# fleet-reconcile. Both calls now carry a timeout= so a wedged child process
+# cannot hang the hook -- this matters more once Task 4 lands a real
+# fleet-reconcile that globs a directory and reads N files. Both tests below
+# genuinely exercise the timeout branch (a stub that sleeps past the bound)
+# rather than asserting the timeout value by inspection, and time the whole
+# invocation to prove it returns promptly rather than only checking status.
+
+@test "a wedged ps does not hang fleet-emit; it still exits 0 promptly" {
+  FAKEBIN="$BATS_TEST_TMPDIR/fakepsbin"
+  mkdir -p "$FAKEBIN"
+  cat > "$FAKEBIN/ps" <<'SH'
+#!/bin/sh
+sleep 30
+SH
+  chmod +x "$FAKEBIN/ps"
+
+  start=$(date +%s)
+  run env PATH="$FAKEBIN:$PATH" bash -c "printf '%s' '$PAYLOAD' | '$BIN/fleet-emit' SessionStart"
+  end=$(date +%s)
+  elapsed=$((end - start))
+
+  [ "$status" -eq 0 ]
+  [ "$elapsed" -lt 10 ]
+  [ "$(field pid)" = "0" ]
+}
+
+@test "a wedged fleet-reconcile does not hang fleet-emit; it still exits 0 within the bound" {
+  # fleet-emit resolves fleet-reconcile relative to its own directory, so a
+  # full copy of fleet-emit (plus a symlink to the real fleetlib.py) is
+  # staged in a scratch bin alongside a stub fleet-reconcile that sleeps
+  # well past the 10s timeout.
+  FAKEBIN="$BATS_TEST_TMPDIR/fakereconcilebin"
+  mkdir -p "$FAKEBIN"
+  cp "$BIN/fleet-emit" "$FAKEBIN/fleet-emit"
+  chmod +x "$FAKEBIN/fleet-emit"
+  ln -s "$BIN/fleetlib.py" "$FAKEBIN/fleetlib.py"
+  cat > "$FAKEBIN/fleet-reconcile" <<'PY'
+#!/usr/bin/env python3
+import time
+time.sleep(30)
+PY
+  chmod +x "$FAKEBIN/fleet-reconcile"
+
+  unset FLEET_SKIP_RECONCILE
+  start=$(date +%s)
+  run bash -c "printf '%s' '$PAYLOAD' | '$FAKEBIN/fleet-emit' Stop"
+  end=$(date +%s)
+  elapsed=$((end - start))
+
+  [ "$status" -eq 0 ]
+  [ "$elapsed" -lt 15 ]
+}

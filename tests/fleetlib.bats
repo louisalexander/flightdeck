@@ -123,6 +123,50 @@ print('OK')
   [ "$output" = "OK" ]
 }
 
+@test "append_jsonl produces intact, individually-parseable lines under concurrent writers" {
+  # Multiple agents fire hooks simultaneously and append to the same
+  # events.jsonl. append_jsonl opens with O_APPEND and writes the fully
+  # encoded line (payload + trailing newline) in a single os.write() call,
+  # which POSIX guarantees does not interleave with other writers on a local
+  # filesystem. Pad each record so a naive buffered write (the pre-fix
+  # implementation used a text-mode `handle.write()`) would have a
+  # realistic chance of splitting across more than one underlying write()
+  # if it were going to misbehave, then assert every one of
+  # WORKERS * LINES records round-trips as valid, distinct JSON with no
+  # partial or merged lines.
+  P="$BATS_TEST_TMPDIR/concurrent.jsonl"
+  WORKERS=8
+  LINES=40
+  pids=()
+  for w in $(seq 1 "$WORKERS"); do
+    pyrun "
+import fleetlib
+for i in range($LINES):
+    fleetlib.append_jsonl('$P', {'worker': $w, 'i': i, 'pad': 'x' * 300})
+" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
+
+  run python3 -c "
+import json
+lines = open('$P', encoding='utf-8').read().splitlines()
+expected = $WORKERS * $LINES
+assert len(lines) == expected, ('line count', len(lines), expected)
+seen = set()
+for l in lines:
+    obj = json.loads(l)  # raises on a partial or merged line
+    assert obj.keys() == {'worker', 'i', 'pad'}, obj
+    seen.add((obj['worker'], obj['i']))
+assert len(seen) == expected, ('distinct records', len(seen), expected)
+print('OK')
+"
+  [ "$status" -eq 0 ]
+  [ "$output" = "OK" ]
+}
+
 @test "git() returns non-zero and empty output for a non-git directory" {
   dir="$BATS_TEST_TMPDIR/notgit"
   mkdir -p "$dir"
