@@ -147,9 +147,20 @@ def run(event):
     host = "iterm2" if iterm_uuid else "unknown"
 
     repo = branch = ""
-    code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
-    if code == 0 and top:
-        repo = Path(top).name
+    # The REPOSITORY, not this working tree. --show-toplevel returns the
+    # worktree's own root, so a linked worktree reported its directory name
+    # -- a FORK-spawned agent showed "issue-13" and nothing about which repo
+    # it belonged to. The common git dir is shared by the primary checkout
+    # and every linked worktree, so its parent is the repository for both.
+    #
+    # Resolved against cwd rather than assumed absolute: --path-format is
+    # git >= 2.31, and older git prints --git-common-dir relative to cwd.
+    code, common = fleetlib.git(["rev-parse", "--git-common-dir"], cwd)
+    if code == 0 and common:
+        repo = (Path(cwd) / common).resolve().parent.name
+        # Branch stays per-worktree. Only the repo half moves -- taking the
+        # branch from the primary checkout would report one branch for
+        # every worktree of a repo, which is the opposite of useful.
         _, branch = fleetlib.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
 
     now = int(time.time())

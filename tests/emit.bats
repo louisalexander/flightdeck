@@ -424,3 +424,66 @@ print([r.get('notification_type') for r in rows if r['event']=='Notification'][0
 "
   [ "$output" = "permission_prompt" ]
 }
+
+# --- repo label in a linked worktree ------------------------------------
+#
+# Row 1's top line is meant to be the repository (v1 spec line 20). A linked
+# worktree's --show-toplevel is the worktree, so the label used to read the
+# worktree's directory name -- and a FORK-spawned agent showed "issue-13"
+# with no indication of which repo it belonged to.
+
+@test "REPOLABEL: a linked worktree reports the repository, not its own dir" {
+  R="$BATS_TEST_TMPDIR/myrepo"
+  git init -q "$R"
+  git -C "$R" config user.email t@t
+  git -C "$R" config user.name t
+  echo x > "$R/f.txt"
+  git -C "$R" add .
+  git -C "$R" commit -qm seed
+  git -C "$R" worktree add -q -b wt "$BATS_TEST_TMPDIR/issue-99"
+
+  printf '{"session_id":"WT1","cwd":"%s"}' "$BATS_TEST_TMPDIR/issue-99" \
+    | "$BIN/fleet-emit" UserPromptSubmit
+  run python3 -c "import json;print(json.load(open('$FLEET_HOME/sessions/WT1.json'))['repo'])"
+  [ "$output" = "myrepo" ]
+}
+
+@test "REPOLABEL: a primary checkout is unaffected" {
+  R="$BATS_TEST_TMPDIR/plainrepo"
+  git init -q "$R"
+  git -C "$R" config user.email t@t
+  git -C "$R" config user.name t
+  echo x > "$R/f.txt"
+  git -C "$R" add .
+  git -C "$R" commit -qm seed
+
+  printf '{"session_id":"P1","cwd":"%s"}' "$R" | "$BIN/fleet-emit" UserPromptSubmit
+  run python3 -c "import json;print(json.load(open('$FLEET_HOME/sessions/P1.json'))['repo'])"
+  [ "$output" = "plainrepo" ]
+}
+
+@test "REPOLABEL: a non-repo cwd still yields an empty label, not a crash" {
+  mkdir -p "$BATS_TEST_TMPDIR/notarepo"
+  printf '{"session_id":"N1","cwd":"%s"}' "$BATS_TEST_TMPDIR/notarepo" \
+    | "$BIN/fleet-emit" UserPromptSubmit
+  run python3 -c "import json;print(repr(json.load(open('$FLEET_HOME/sessions/N1.json'))['repo']))"
+  [ "$output" = "''" ]
+}
+
+@test "REPOLABEL: the branch still comes from the worktree, not the primary" {
+  # Only the repo half moves. Branch must stay per-worktree or every
+  # worktree of a repo would report the primary checkout's branch.
+  R="$BATS_TEST_TMPDIR/br"
+  git init -q "$R"
+  git -C "$R" config user.email t@t
+  git -C "$R" config user.name t
+  echo x > "$R/f.txt"
+  git -C "$R" add .
+  git -C "$R" commit -qm seed
+  git -C "$R" worktree add -q -b feature/thing "$BATS_TEST_TMPDIR/wt2"
+
+  printf '{"session_id":"B1","cwd":"%s"}' "$BATS_TEST_TMPDIR/wt2" \
+    | "$BIN/fleet-emit" UserPromptSubmit
+  run python3 -c "import json;print(json.load(open('$FLEET_HOME/sessions/B1.json'))['branch'])"
+  [ "$output" = "feature/thing" ]
+}
