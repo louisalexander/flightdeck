@@ -24,165 +24,30 @@
 
 ---
 
-## Preconditions — read before starting
+## Preconditions — satisfied
 
-**This plan is blocked on Row 2's first slice.** It consumes three things from `docs/superpowers/plans/2026-08-14-flightdeck-row2-first-slice.md` that do not exist on `main`:
+This plan was blocked on Row 2's first slice. **Row 2 landed on `main`**, and the gate was run before execution began:
 
-| Needs | From | Used by |
-|---|---|---|
-| `bin/fleet-verbs`, `config/verbs/`, `tests/verbs.bats` | Row 2 Task 4 | Task 1, Task 6 |
-| `bin/fleet-send` | Row 2 Tasks 5, 8 | Task 6 (delivery only) |
-| `bin/fleet-fail` | already on `main` | Task 1 |
-
-Task 1 opens with a gate that checks these. **If the gate fails, stop and report — do not implement Row 2 as a side effect of this plan.** That separation is spec decision *Sequencing*, and collapsing it is the one mistake that makes this plan worse than not running it.
-
----
-
-### Task 1: `{FLEET_BIN}` substitution, and the `test.md` path bug it fixes
-
-`config/verbs/test.md` as shipped by Row 2 tells the agent to run `bin/fleet-fail` "from the repository root". That is true only when the focused agent happens to be working in the flightdeck repo. Row 2 sends verbs to agents in **any** repo, where `bin/` holds something else or nothing. FORK cannot work around this — it depends on a sink script by definition — so it gets fixed first.
-
-**Files:**
-- Modify: `bin/fleet-verbs` (add `substitute`, call it from the `show` branch of `main`)
-- Modify: `config/verbs/test.md`
-- Test: `tests/verbs.bats` (append)
-
-**Interfaces:**
-- Consumes: `fleetlib.repo_root()`
-- Produces: `fleet-verbs show <id>` expands `{FLEET_BIN}` to the absolute path of flightdeck's `bin/` directory. `path` and `flags` are unaffected.
-
-- [ ] **Step 1: Gate — verify Row 2's first slice has landed**
-
-Run:
-
-```bash
-ls bin/fleet-verbs bin/fleet-send bin/fleet-fail config/verbs/test.md tests/verbs.bats
+```
+bin/fleet-verbs  bin/fleet-send  bin/fleet-fail  config/verbs/test.md  tests/verbs.bats   ✓ all present
 ```
 
-Expected: all five listed with no `No such file` error.
+Two things changed while this plan waited, and both are absorbed below rather than papered over:
 
-If any are missing, **stop here and report that this plan is blocked on Row 2's first slice.** Do not create them.
+- **`{{FLIGHTDECK_REPO}}` shipped upstream.** Row 2's implementation hit the relative-sink-path bug independently, verified it live, and fixed it in `bin/fleet-verbs`. **Task 1 is superseded and must not be implemented** — see the note in its place.
+- **`confirm` enforcement shipped.** `bin/fleet-send` arms and fires on a second press within `verbArmSecs` (10s), keyed by verb *and* target session. Confirm verbs may also queue against a busy target with a `confirmQueueSecs` (300s) expiry, superseding the "confirm verbs never queue" rule the spec was written against. FORK's `confirm: true` is therefore live on arrival, not inert.
 
-- [ ] **Step 2: Write the failing test**
-
-Append to `tests/verbs.bats`:
-
-```bash
-# --- {FLEET_BIN} substitution ------------------------------------------
-
-@test "a verb prompt's {FLEET_BIN} expands to an absolute path" {
-  cat > "$FLEET_HOME/verbs/ping.md" <<'MD'
 ---
-id: ping
-label: PING
----
-Run {FLEET_BIN}/fleet-fail when it breaks.
-MD
-  run "$BIN/fleet-verbs" show ping
-  [ "$status" -eq 0 ]
-  [ "$output" = "Run $ROOT/bin/fleet-fail when it breaks." ]
-}
 
-@test "the expanded path is absolute, so it resolves from any repo" {
-  cat > "$FLEET_HOME/verbs/ping.md" <<'MD'
----
-id: ping
-label: PING
----
-{FLEET_BIN}/fleet-fail
-MD
-  run "$BIN/fleet-verbs" show ping
-  [[ "$output" == /* ]]
-}
+### Task 1: SUPERSEDED — do not implement
 
-@test "a prompt with no placeholder is passed through untouched" {
-  cat > "$FLEET_HOME/verbs/ping.md" <<'MD'
----
-id: ping
-label: PING
----
-no placeholder here
-MD
-  run "$BIN/fleet-verbs" show ping
-  [ "$output" = "no placeholder here" ]
-}
+This task added a `{FLEET_BIN}` placeholder to `bin/fleet-verbs` and fixed `config/verbs/test.md`, which named `bin/fleet-fail` by a path that is only correct inside the flightdeck repo.
 
-@test "the shipped TEST verb names fleet-fail by an absolute path" {
-  rm -f "$FLEET_HOME/verbs/test.md"
-  run "$BIN/fleet-verbs" show test
-  [ "$status" -eq 0 ]
-  # The bug this fixes: a bare `bin/fleet-fail` is wrong everywhere except
-  # inside the flightdeck repo, and Row 2 sends verbs to agents anywhere.
-  [[ "$output" != *"run \`bin/fleet-fail\`"* ]]
-  [[ "$output" == *"$ROOT/bin/fleet-fail"* ]]
-}
-```
+**Row 2's implementation found and fixed the same bug first.** `bin/fleet-verbs` ships `REPO_TOKEN = "{{FLIGHTDECK_REPO}}"`, substituted by `parse_verb` on every `show`, plus a `resolved-path` subcommand that materialises a token-substituted copy to `$FLEET_HOME/verbs-resolved/<id>.md` — needed because `fleet-send`'s wake path points an idle agent at a *file*, which would otherwise contain the raw token. `config/verbs/test.md` already uses it. The comment in `fleet-verbs` records that the bug was **verified live**.
 
-- [ ] **Step 3: Run test to verify it fails**
+Implementing this task would introduce a second placeholder for a solved problem. **Skip it.** Task 6 uses `{{FLIGHTDECK_REPO}}/bin/fleet-spawn` instead.
 
-Run: `bats tests/verbs.bats`
-Expected: FAIL on "a verb prompt's {FLEET_BIN} expands to an absolute path" — the output still contains the literal `{FLEET_BIN}`.
-
-- [ ] **Step 4: Add the substitution to `bin/fleet-verbs`**
-
-Add after `parse_verb`:
-
-```python
-def substitute(prompt):
-    """Expands {FLEET_BIN} to the absolute path of flightdeck's bin/.
-
-    A verb prompt travels to an agent working in an arbitrary repository,
-    where a relative `bin/fleet-fail` names something else entirely or
-    nothing at all. Substituting at resolution time keeps the verb file
-    portable and readable -- the alternative, an absolute path baked into
-    the markdown, would be wrong on every machine but one.
-
-    Only the prompt body is expanded. `path` reports which file won and
-    must stay a real filesystem path; `flags` carries no prose.
-    """
-    return prompt.replace("{FLEET_BIN}", str(fleetlib.repo_root() / "bin"))
-```
-
-In `main`, change the `show` branch:
-
-```python
-    if command == "show":
-        sys.stdout.write(substitute(parsed["prompt"]) + "\n")
-```
-
-- [ ] **Step 5: Fix the shipped TEST verb**
-
-Replace the body of `config/verbs/test.md` (leave the frontmatter unchanged):
-
-```markdown
-Run this project's test suite and report what fails.
-
-Report the outcome so the deck can show it:
-
-- If the suite fails, run `{FLEET_BIN}/fleet-fail`.
-- If you are unsure what that does or how flightdeck expects it to be
-  called, run `{FLEET_BIN}/fleet-fail --explain` and follow what it tells
-  you.
-
-Do not fix anything yet. Report first; wait to be told to fix.
-```
-
-- [ ] **Step 6: Run tests to verify they pass**
-
-Run: `bats tests/verbs.bats`
-Expected: all PASS — Row 2's original 6 cases plus the 4 added here.
-
-- [ ] **Step 7: Run the whole suite for regressions**
-
-Run: `tests/run.sh`
-Expected: all PASS.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add bin/fleet-verbs config/verbs/test.md tests/verbs.bats
-git commit -m "fix: resolve verb prompts' {FLEET_BIN} so sinks work from any repo"
-```
+The one thing worth carrying forward is the test intent: Task 6 asserts that `fleet-verbs show fork` emits an absolute path, which is what this task existed to guarantee.
 
 ---
 

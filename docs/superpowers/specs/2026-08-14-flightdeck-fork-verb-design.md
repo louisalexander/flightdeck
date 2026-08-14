@@ -108,38 +108,41 @@ records as "what makes a repo path containing a space safe."
 GitHub and through a file on a branch. The command line carries an integer. That
 is not a workaround for the rule; it is the rule holding.
 
-### 5. Verb prompts address sink scripts through `{FLEET_BIN}`
+### 5. Verb prompts address sink scripts through `{{FLIGHTDECK_REPO}}`
 
-`config/verbs/test.md` as planned says "run `bin/fleet-fail` from the repository
-root." That is true only when the focused agent happens to be working in the
-flightdeck repo. Row 2 sends verbs to agents in **any** repo, where `bin/` holds
-something else entirely or nothing.
+A verb prompt runs in whatever repo the *selected agent* is working in, not in
+flightdeck's. So a verb naming one of flightdeck's own sinks by a relative path
+— `bin/fleet-fail` — sends the agent hunting for something that does not exist
+there. FORK cannot work around this: it depends on a sink script by definition.
 
-This is a latent bug in the shipped TEST verb, not a new problem FORK
-introduces, but FORK cannot work around it: it depends on a sink script by
-definition.
+**Resolved upstream, not here.** This design originally specified a `{FLEET_BIN}`
+placeholder to fix it. While it was being written, Row 2's implementation hit the
+same bug independently, verified it live, and shipped `{{FLIGHTDECK_REPO}}` in
+`bin/fleet-verbs` — substituted by `parse_verb` at every `show`, and materialised
+to `$FLEET_HOME/verbs-resolved/<id>.md` for the wake path, which points an idle
+agent at a *file* and would otherwise hand it the raw token.
 
-**Fix:** `bin/fleet-verbs` substitutes a `{FLEET_BIN}` placeholder for the
-absolute path to flightdeck's `bin/` when it resolves a verb. One `str.replace`
-in the resolver. Verb files stay portable and readable, prompts name a path that
-exists from wherever the agent is standing, and `test.md` is corrected on the way
-past.
+FORK therefore adopts the existing token and adds nothing. Introducing a second
+placeholder for the same job would be the worse outcome by some distance.
 
-### 6. `confirm: true`, accepted as inert at first
+### 6. `confirm: true`, and it is enforced
 
 FORK files a public issue and starts an unsupervised agent. COMMIT, PUSH and PR
 carry `confirm` for less.
 
-The parent spec's plan defers `confirm` enforcement out of the first slice, so
-the flag will be read and ignored for a while: the verb is live and unguarded on
-the day it lands, and becomes double-press-guarded for free when enforcement
-arrives. Shipping the flag anyway records the intent in the place that will be
-consulted, rather than in a follow-up nobody reads.
+This was specified when `confirm` enforcement was still deferred, on the
+assumption the flag would ship inert. It no longer is: `bin/fleet-send` arms on
+first press and fires on a second, within a window (`verbArmSecs`, 10s by
+default) deliberately separate from `fleet-press`'s 3s teardown arm, and the arm
+is keyed by verb **and** target session so arming against one agent and
+confirming against another cannot fire.
 
-It also inherits the parent spec's rule that `confirm` verbs never queue — an
-idle target or a refusal. That is correct here for the same reason it is correct
-for PUSH: a fork firing twenty minutes later, from a queue the operator has
-forgotten, produces an agent working on something nobody is watching.
+One inherited rule is superseded rather than upheld. The parent spec said
+`confirm` verbs never queue. Row 2 relaxed that: a confirm verb may queue against
+a busy target, bounded by an expiry (`confirmQueueSecs`, 300s). The reasoning
+transfers to FORK unchanged — the danger was never "queued", it was "twenty
+minutes later, forgotten", and an expiry addresses the danger without discarding
+the operator's intent the moment their agent happens to be mid-turn.
 
 ## Non-goals
 
@@ -154,28 +157,40 @@ forgotten, produces an agent working on something nobody is watching.
 
 ## Sequencing: deliberately not part of Row 2
 
-This design lives on its own branch and does not land with Row 2's first slice.
-Row 2 has a queue, a drain, a claim race and an AppleScript wake to get right;
-adding a verb that spawns worktrees into that same slice would blur what is
-being proven when something breaks.
+This design was written on its own branch and deliberately did not land with Row
+2. Row 2 had a queue, a drain, a claim race and an AppleScript wake to get right;
+adding a verb that spawns worktrees into that slice would have blurred what was
+being proven when something broke.
 
-That means FORK is **blocked on** Row 2's first slice, and the plan should open
-by checking rather than assuming. It needs three things that do not exist yet:
+**Row 2 has since landed**, so FORK is unblocked and this section is history
+rather than a gate. Two things changed under it while it waited, both recorded in
+the decisions above: `{{FLIGHTDECK_REPO}}` arrived upstream and made decision 5's
+proposed change unnecessary, and `confirm` enforcement arrived and made decision
+6's "inert" caveat obsolete.
 
-| Needs | From | State |
-|---|---|---|
-| `config/verbs/` and the verb file format | Row 2 first slice, Task 4 | not implemented |
-| `bin/fleet-verbs` resolution | Row 2 first slice, Task 4 | not implemented |
-| `bin/fleet-send` staging and delivery | Row 2 first slice, Tasks 5–6 | not implemented |
+Keeping FORK separate is what made both of those cheap to absorb. Had it been
+folded into Row 2's slice, the same two collisions would have been merge
+conflicts in a branch that was also trying to prove a claim race.
 
-The `{FLEET_BIN}` substitution of decision 5 is therefore **a change to Row 2's
-`fleet-verbs`, not to anything on this branch.** It is specified here because
-this is where the need for it was found, and because it fixes `test.md` as much
-as it enables `fork.md` — but it can only be written once Task 4 exists. Landing
-it as part of FORK's work, after Row 2 is in, keeps Row 2's slice
-uncontaminated at the cost of `test.md` shipping briefly with the wrong path in
-it. That trade is accepted: the wrong path is inert until an agent outside the
-flightdeck repo presses TEST.
+## Relationship to the ISSUE verb
+
+Row 2 shipped `config/verbs/issue.md` — capture what is live right now as a
+GitHub issue, written for someone who was not here, and *do not fix it*.
+
+FORK is its sibling, and the split is worth stating so the two do not drift into
+each other:
+
+- **ISSUE** puts the depth in the **issue body**. Nothing else happens; the
+  capture is the whole job.
+- **FORK** puts the depth in a **committed plan file** and keeps the issue body
+  thin — a pointer to the plan, the branch, and the SHA — then hands it to an
+  agent.
+
+The reason for the asymmetry is the consumer. ISSUE's reader is a human scanning
+a backlog later, and an issue body is the right shape for that. FORK's reader is
+an agent that must execute, immediately, with no memory of the conversation —
+which is what `superpowers:executing-plans` already consumes, and why the plan
+file rather than the issue body carries the weight.
 
 ## Architecture
 
@@ -196,8 +211,8 @@ The prompt instructs the focused agent to:
 3. Commit the plan to the current branch.
 4. File the issue with `gh issue create`, its body naming the plan path, the
    origin branch, and the SHA the plan was committed at.
-5. Run `{FLEET_BIN}/fleet-spawn <n>`, falling back to
-   `{FLEET_BIN}/fleet-spawn --explain` if unsure how it is called.
+5. Run `{{FLIGHTDECK_REPO}}/bin/fleet-spawn <n>`, falling back to
+   `{{FLIGHTDECK_REPO}}/bin/fleet-spawn --explain` if unsure how it is called.
 6. **Return to what it was doing**, with one line saying what was forked.
 
 Step 6 is what makes this "park it and fork it" rather than "abandon task A",
