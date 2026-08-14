@@ -29,10 +29,16 @@ repo, it can read the failure, and it can fix it. Flightdeck running the command
 directly would need per-repo configuration of every command, and would leave the
 agent unaware that anything happened.
 
-**Cost, accepted:** flightdeck sees hook events, not exit codes, so it cannot
-observe pass or fail. The prior spec's claim that "Row 2 is where `failed` gets
-its real signal" does not survive this choice as written. See *The failed
-signal* below for how it is recovered.
+**On `failed`:** this is not a cost. Flightdeck learns the result because the
+verb's prompt tells the agent to report it — see *The failed signal*. That is
+the prior spec's intent word for word: "failure becomes something verification
+actions *report*, never something the deck guesses."
+
+Nor is reporting a weaker link than the rest of the chain. Under this decision
+everything is agent-mediated: the tests run at all only because the prompt asked.
+Treating "run the tests" as reliable while treating "report the result" as
+best-effort would be incoherent — it is one instruction, in one prompt, to one
+agent.
 
 ### 2. Focus is declared, not derived
 
@@ -97,10 +103,18 @@ erase it.
 
 ### Focus marker
 
-A small white underline at the bottom of the focused Row 1 key. Explicitly not a
-full border: the lifecycle colour owns the background because state is the
-information, and selection must not compete with it. Selection is its own
-visual channel.
+A thin white border, inset, around the focused Row 1 key. Whatever agent you
+most recently focused is the one a Row 2 press acts on, and that must be
+unmistakable at a glance — you are about to send work to it.
+
+**This reverses the v1 spec deliberately**, which called for "a small white
+bottom marker or underline — not a full white border, which would compete with
+the lifecycle background." That concern is real: the saturated fill carries
+state, and selection must not read as a state change. It is answered by
+restraint rather than by choosing a weaker affordance — the border stays thin
+and inset so the lifecycle colour remains the dominant element of the key. An
+underline is easy to miss on a glanced-at panel, and being wrong about which
+agent you just sent a command to is expensive.
 
 ### Row 2 keys
 
@@ -184,8 +198,12 @@ it.
 
 Two properties follow from the prompt-to-agent model and must be designed for:
 
-- **A prompt is a request, not a guarantee.** The agent may decline, or call the
-  script twice. Sinks must be idempotent and safe to re-run.
+- **Sinks must be idempotent.** Not because the agent is unreliable, but because
+  a verb can be pressed twice, a turn can be retried, and an agent may
+  reasonably call a script again after an error. Safe to re-run is the contract.
+- **Sinks should explain themselves.** A `--explain` mode lets a verb prompt
+  point at the convention instead of restating it, which keeps prompts short and
+  keeps them working when the convention changes.
 - **Outward-facing sinks trip permission prompts**, turning the slot amber
   mid-verb. That is correct behaviour, not a bug, but it means pressing PUSH can
   leave an amber key waiting on approval.
@@ -207,17 +225,27 @@ COMMIT / PUSH / PR are a deliberate ladder of increasing commitment, each a
 superset of the last. The PR verb branches first when on the default branch,
 matching the repo's own convention.
 
-## The failed signal, recovered
+## The failed signal
 
-Decision 1 means flightdeck cannot observe pass or fail. The capability seam
-recovers it without code: the TEST verb's prompt ends by instructing the agent
-to run `bin/fleet-fail <slot>` when the suite fails.
+This is where `failed` gets its real signal, exactly as the v1 spec promised.
+The TEST verb's prompt ends by instructing the agent to run `bin/fleet-fail`
+when the suite fails. Failure is something a verb *reports*, never something the
+deck guesses — and it is configuration rather than a release.
 
-Failure therefore becomes something a verb *reports* — which is what the
-original spec always wanted — and it is configuration rather than a release.
-The honest caveat from the seam applies: this is a request to the agent, so
-`failed` is best-effort, not guaranteed. `bin/fleet-fail` remains available
-manually.
+A verb prompt is not limited to naming a script. It can carry its own fallbacks
+and teach the convention it depends on:
+
+> If the tests fail, run `bin/fleet-fail`.
+> If you are unsure what that does or how flightdeck expects it to be called,
+> run `bin/fleet-verbs --explain` and follow what it tells you.
+
+This matters more than it first appears. A prompt that assumes the agent already
+knows a local convention is brittle across repos and across model versions; one
+that points at a script which explains the convention is self-repairing. Sink
+scripts should therefore ship with a `--explain` mode, and verb prompts should
+use it rather than embedding assumptions about what the agent knows.
+
+`bin/fleet-fail` remains available manually, as it is today.
 
 ## Obsidian: recommended, not required
 
