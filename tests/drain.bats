@@ -52,14 +52,32 @@ print(d['decision'], d['reason'])"
   [ "$(state)" = "done" ]
 }
 
-@test "stop_hook_active suppresses draining, as a loop backstop" {
+# FIX 6 (fix wave, 2026-08-14): this test used to pin the OPPOSITE
+# behaviour -- that stop_hook_active suppressed draining, as a loop
+# backstop. That gate stranded verbs: press TEST while working, Stop
+# blocks, the agent continues into TEST, a second verb gets pressed
+# during that continuation, and the Stop ending IT carries
+# stop_hook_active -- so the old gate skipped the drain, the session went
+# idle, and no further Stop was ever coming to retry it. The queued verb
+# sat forever having flashed "queued".
+#
+# The actual loop guard is drain-before-block (see fleet-emit): the queue
+# entry is removed before the block is returned, so an empty queue on the
+# very next Stop -- re-fired or not -- yields claim_queue() is None and no
+# block. stop_hook_active is not load-bearing for correctness, so this
+# test now asserts the corrected intent: a verb staged during a
+# continuation IS drained, regardless of stop_hook_active.
+@test "a verb staged during a stop_hook_active continuation is still drained" {
   queue
   run emit Stop '{"session_id":"S1","cwd":"/tmp","stop_hook_active":true}'
-  [ -z "$output" ]
-  [ "$(state)" = "done" ]
-  # The distinguishing assertion: the entry survives un-drained. Without
-  # this, deleting the drain feature entirely would still pass this test.
-  [ -e "$FLEET_HOME/queue/S1.json" ]
+  [ "$status" -eq 0 ]
+  run python3 -c "
+import json,sys
+d=json.loads('''$output''')
+print(d['decision'], d['reason'])"
+  [ "$output" = "block RUN THE TESTS" ]
+  [ ! -e "$FLEET_HOME/queue/S1.json" ]
+  [ "$(state)" = "working" ]
 }
 
 @test "a queued verb for another session is not drained by this one" {

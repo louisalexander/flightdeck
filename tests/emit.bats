@@ -86,6 +86,24 @@ marker() { printf '%s' "$FLEET_HOME/blocked/S1"; }
   [ ! -f "$FLEET_HOME/sessions/S1.json" ]
 }
 
+# FIX 5 (fix wave, 2026-08-14): the spec requires SessionEnd to clear any
+# queue entry for that session, alongside the focus/marker clearing it
+# already did. A resumed Claude Code session keeps its session id, so a
+# leftover entry would otherwise be delivered by the first Stop after
+# resume -- a verb staged before the session ended firing into whatever
+# comes back under the same id.
+@test "SessionEnd clears any queued verb for that session" {
+  emit SessionStart
+  mkdir -p "$FLEET_HOME/queue"
+  python3 -c "
+import json
+json.dump({'verb':'test','prompt':'X','verb_path':'','queued_at':1},
+          open('$FLEET_HOME/queue/S1.json','w'))"
+  [ -e "$FLEET_HOME/queue/S1.json" ]
+  emit SessionEnd
+  [ ! -e "$FLEET_HOME/queue/S1.json" ]
+}
+
 @test "every event appends one line to the journal spine, removals included" {
   emit SessionStart; emit UserPromptSubmit; emit Stop; emit SessionEnd
   [ "$(wc -l <"$FLEET_HOME/events.jsonl" | tr -d ' ')" = "4" ]

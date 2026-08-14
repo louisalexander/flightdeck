@@ -143,6 +143,67 @@ d=json.load(open(p)); d['iterm_session']='not-a-uuid; rm -rf /'
 json.dump(d, open(p,'w'))"
   run "$BIN/fleet-send" test
   [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
+  # FIX 3 (fix wave, 2026-08-14): validation must run BEFORE claim_queue(),
+  # not after. Every session not launched under iTerm2 has
+  # iterm_session=="" (fleet-emit's default), so if the claim ran first
+  # here, this refusal would have already destroyed the freshly staged
+  # entry -- permanently, since each retry destroys the fresh one staged
+  # in its place, and it also destroys the Stop-drain fallback that would
+  # otherwise have delivered it. The entry must survive intact.
+  [ -e "$(queued)" ]
+}
+
+@test "FIX 1: the wake script submits the pointer, not just types it" {
+  stub_osascript
+  idle_session idle
+  "$BIN/fleet-send" test
+  # write text does not self-submit in Claude Code's TUI (verified live) --
+  # the script must send a second, session-addressed write text of an
+  # empty line to actually submit the pointer it just typed. Matched on
+  # "tell s to write text", not the bare phrase "write text", because the
+  # script's own explanatory comment mentions "write text" in prose too.
+  [ "$(grep -c 'tell s to write text' "$OSA_LOG")" -eq 2 ]
+}
+
+@test "FIX 4: a confirm:true verb is refused outright, never queued" {
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 1 ]
+  [ ! -e "$FLEET_HOME/queue/S1.json" ]
+}
+
+@test "FIX 4: a non-confirm verb is unaffected by the confirm check" {
+  run "$BIN/fleet-send" test
+  [ "$status" -eq 0 ]
+  [ -e "$(queued)" ]
+}
+
+@test "FIX 7: an unresolvable verb_path refuses rather than typing a bare pointer" {
+  FAKEBIN="$BATS_TEST_TMPDIR/fakeverbsbin"
+  mkdir -p "$FAKEBIN"
+  cp "$BIN/fleet-send" "$FAKEBIN/fleet-send"
+  chmod +x "$FAKEBIN/fleet-send"
+  ln -s "$BIN/fleetlib.py" "$FAKEBIN/fleetlib.py"
+  # Simulates fleet-verbs's `path` subcommand exiting 0 with empty
+  # output -- e.g. the verb file vanishing in the gap between
+  # resolve_verb()'s separate `show` and `path` subprocess calls.
+  # resolve_verb() does not check `path`'s exit status, so this must be
+  # caught by fleet-send's own validation instead.
+  cat > "$FAKEBIN/fleet-verbs" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  show) echo "a real prompt"; exit 0 ;;
+  path) exit 0 ;;
+  flags) echo "interrupt=false confirm=false"; exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$FAKEBIN/fleet-verbs"
+
+  stub_osascript
+  idle_session idle
+  run "$FAKEBIN/fleet-send" test
+  [ "$status" -eq 1 ]
+  [ ! -e "$OSA_LOG" ]
 }
 
 @test "WAKE: an osascript failure refuses loudly rather than losing the verb silently" {

@@ -201,10 +201,33 @@ def run(event):
             target.unlink()
         except Exception:
             pass
+        # A resumed Claude Code session keeps its session id, so a queue
+        # entry staged before SessionEnd would otherwise survive to be
+        # delivered by the first Stop after resume -- a verb pressed
+        # against a session that has since ended firing into whatever
+        # session comes back under the same id. The spec requires this.
+        try:
+            fleetlib.queue_path(session_id).unlink()
+        except Exception:
+            pass
         fleetlib.clear_blocked_marker(session_id)
     else:
         drained = None
-        if event == "Stop" and not payload.get("stop_hook_active"):
+        # Deliberately NOT gated on stop_hook_active. The old gate skipped
+        # the drain whenever a Stop was itself the result of a previous
+        # block continuing -- which strands a verb queued during that
+        # continuation forever: press TEST while working, Stop blocks,
+        # the agent continues into TEST, a second verb gets pressed during
+        # that continuation, and the Stop ending IT carries
+        # stop_hook_active -- so the gate skipped it, the session went
+        # idle, and no further Stop was ever coming to retry it. The
+        # no-re-fire guarantee this gate was defending does not need it:
+        # drain-before-block (claim, THEN emit the block) is what actually
+        # prevents a loop, because the entry is gone before the block is
+        # returned -- an empty queue on the very next Stop, re-fired or
+        # not, yields claim_queue() is None and no block. stop_hook_active
+        # buys nothing here and costs a permanent silent stranding.
+        if event == "Stop":
             claimed = fleetlib.claim_queue(session_id)
             if isinstance(claimed, dict) and isinstance(claimed.get("prompt"), str) \
                     and claimed["prompt"].strip():

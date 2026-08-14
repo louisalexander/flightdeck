@@ -15,6 +15,20 @@ import fleetlib  # noqa: E402
 
 TRUE_WORDS = ("true", "yes", "1")
 
+# A verb prompt runs in whatever repo the selected agent is working in, not
+# in flightdeck's own repo -- so a verb file that names one of flightdeck's
+# own sink scripts by a bare relative path (e.g. `bin/fleet-fail`) sends
+# the agent hunting for a path that does not exist there. Verified live.
+# `fleetlib.repo_root()` already knows exactly where flightdeck lives, so
+# rather than baking that machine-specific absolute path into the shipped,
+# git-tracked markdown (which install.sh's __REPO__/__PYTHON__ templating
+# never does to a tracked source file -- only to generated output like the
+# hooks snippet and the launchd plist), a verb file spells the token below
+# and this resolver substitutes it at every `show`, using the interpreter's
+# own idea of where it is running from. Correct wherever the checkout
+# lives, and never goes stale the way a baked-in path would after a move.
+REPO_TOKEN = "{{FLIGHTDECK_REPO}}"
+
 
 def verb_file(verb_id):
     """The file that wins for this id, or None. Local beats shipped.
@@ -54,6 +68,7 @@ def parse_verb(text):
     prompt = parts[2].strip()
     if not prompt:
         return None
+    prompt = prompt.replace(REPO_TOKEN, str(fleetlib.repo_root()))
     meta = {}
     for line in parts[1].strip().splitlines():
         if ":" not in line:
