@@ -11,6 +11,8 @@ Not a hook: unlike fleet-emit this may exit non-zero, because a press that
 could not be staged must be visible rather than silently dropped.
 """
 
+import os
+import re
 import subprocess
 import sys
 import time
@@ -21,6 +23,43 @@ sys.path.insert(0, str(HERE))
 import fleetlib  # noqa: E402
 
 VERBS_TIMEOUT_SECS = 5
+OSASCRIPT_TIMEOUT_SECS = 10
+
+# Written as an allow-list on purpose: only these states get woken by a
+# keystroke. `working` and `blocked` -- and any state added later -- fall
+# through to staging only and wait for the Stop drain. This matters most
+# for `blocked`: that session is sitting on a permission prompt, and
+# typing into it would answer the dialog with junk text instead of
+# delivering a verb. An unfamiliar state must default to not-woken, which
+# an allow-list gives for free and a deny-list would not.
+WAKEABLE_STATES = ("idle", "done")
+
+# iTerm2 session ids are UUIDs: 8-4-4-4-12 hex, case-insensitive. The target
+# is interpolated into an AppleScript string literal below, so anything not
+# matching this shape is rejected before osascript is ever invoked.
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\Z"
+)
+
+# Addressed by UUID across every window and tab, never by window index.
+# `window 1` is whichever window is frontmost, which during design was
+# observed delivering a message into the wrong session entirely. Mirrors
+# bin/fleet-focus's tree-walk for the same reason.
+WAKE_SCRIPT = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{uuid}" then
+          tell s to write text "{line}"
+          return "sent"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not found"
+end tell
+'''
 
 
 def resolve_verb(verb_id):
@@ -70,6 +109,44 @@ def main(argv):
         "verb_path": verb_path or "",
         "queued_at": int(time.time()),
     })
+
+    # Not wakeable (working, blocked, or anything unrecognised): staging is
+    # the whole contract here. The Stop drain serves `working`, and for
+    # `blocked` a keystroke now would answer a live permission prompt with
+    # junk -- it must wait for the operator and the Stop that follows.
+    if session.get("state") not in WAKEABLE_STATES:
+        return 0
+
+    # An idle/done session will never fire a Stop, so a keystroke is the
+    # only wake. Claim first: if the Stop drain won the race between the
+    # write above and here, claim_queue() returns None and there is
+    # nothing left to deliver -- typing a pointer for an entry the drain
+    # already took would send the agent to a file no longer queued.
+    claimed = fleetlib.claim_queue(session_id)
+    if not isinstance(claimed, dict):
+        return 0
+
+    uuid = session.get("iterm_session", "")
+    if not UUID_RE.match(uuid or ""):
+        fleetlib.log("send: refusing malformed iterm target {!r}".format(uuid))
+        return 1
+
+    # The pointer, never the prompt. The verb's instruction can run to
+    # several paragraphs; it stays in the file. Typing only a short line
+    # naming the file keeps this fragile channel small, and makes the
+    # failure mode benign -- a pointer colliding with a half-typed draft
+    # in the operator's prompt box yields something the agent queries,
+    # rather than a mangled multi-paragraph instruction it half-obeys.
+    line = "Read {} and follow it.".format(claimed.get("verb_path", ""))
+    script = WAKE_SCRIPT.format(uuid=uuid, line=line.replace('"', '\\"'))
+    osa = os.environ.get("FLEET_OSASCRIPT") or "osascript"
+    try:
+        subprocess.run([osa, "-e", script],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=OSASCRIPT_TIMEOUT_SECS)
+    except Exception as err:
+        fleetlib.log("send: wake failed for {}: {}".format(session_id, err))
+        return 1
     return 0
 
 
