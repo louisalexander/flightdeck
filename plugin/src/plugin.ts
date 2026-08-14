@@ -314,6 +314,11 @@ export class Command extends SingletonAction<{ verb?: string }> {
   }
 
   override onDidReceiveSettings(ev: DidReceiveSettingsEvent<{ verb?: string }>): void {
+    // A settings change makes any in-flight feedback stale by definition --
+    // it refers to a verb this key may no longer send -- so a pending
+    // restore is cancelled here on its own terms, not just to dodge a
+    // stale closure over the old verb.
+    this.clearPending(ev.action.id);
     // The operator just picked a different verb in the property inspector;
     // the key face must catch up now, not wait for the next profile switch.
     this.paintIdle(ev.action, ev.payload.settings?.verb ?? "");
@@ -348,6 +353,14 @@ export class Command extends SingletonAction<{ verb?: string }> {
   private scheduleRestore(
     id: string, action: { setImage(image?: string): Promise<void> }, verb: string
   ): void {
+    // Clear-before-set, unconditionally: `pending` must never hold a timer
+    // that has been superseded. Without this, two presses whose fleet-send
+    // round-trips overlap can both reach here with clearPending already
+    // behind them (called at the top of onKeyUp, before either awaited) --
+    // the first press's timer would then be silently overwritten in the
+    // map without being cancelled, so it still fires later and reverts the
+    // second press's feedback early.
+    this.clearPending(id);
     const timer = setTimeout(() => {
       this.pending.delete(id);
       this.paintIdle(action, verb);
