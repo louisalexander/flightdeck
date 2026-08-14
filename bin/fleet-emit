@@ -32,6 +32,31 @@ EVENT_STATES = {
 # become the problem it was meant to solve.
 MARKER_CLEARING_EVENTS = ("UserPromptSubmit", "Stop", "SessionEnd")
 
+# Claude Code fires Notification for two unrelated situations and hands us a
+# notification_type to tell them apart. Amber is a request for input, so only
+# the types where the agent has stopped and cannot continue until the operator
+# decides something may paint one: permission_prompt, worker_permission_prompt,
+# agent_needs_input, elicitation_dialog, elicitation_url_dialog.
+#
+# Everything below is informational -- chiefly idle_prompt, the ~60s nudge
+# after a finished turn. Mapping those to blocked is what made `done` decay
+# into `blocked` after a minute of not looking at the deck, collapsing the
+# distinction between "finished" and "stuck".
+#
+# This is the ignore-list rather than the block-list on purpose: a type Claude
+# Code adds later is then treated as blocking until someone classifies it. That
+# asymmetry is the safety argument -- an unexpected amber is visible and the
+# Resumed guard clears it on the next tool call, but an unexpected green on a
+# stuck agent is invisible and stays wrong until a human happens to notice.
+IGNORED_NOTIFICATION_TYPES = frozenset((
+    "idle_prompt",
+    "agent_completed",
+    "auth_success",
+    "push_notification",
+    "computer_use_enter",
+    "computer_use_exit",
+))
+
 
 PS_TIMEOUT_SECS = 2
 RECONCILE_TIMEOUT_SECS = 10
@@ -123,14 +148,35 @@ def run(event):
 
     now = int(time.time())
 
+    # A Notification only means "blocked" for the types that actually await an
+    # operator decision. An absent or unrecognised type keeps the old
+    # unconditional behaviour on purpose: a false amber is visible and clears
+    # itself on the next tool call via the Resumed guard, whereas treating a
+    # real block as informational would leave a stuck agent showing green --
+    # the one failure a fleet deck must not have.
+    notification_type = ""
+    ignored_notification = False
+    if event == "Notification":
+        raw = payload.get("notification_type")
+        notification_type = raw if isinstance(raw, str) else ""
+        ignored_notification = notification_type in IGNORED_NOTIFICATION_TYPES
+
     # Journal spine first, so removals are recorded too.
+    record = {
+        "event": event, "session_id": session_id, "repo": repo,
+        "branch": branch, "cwd": cwd, "ts": now,
+    }
+    if notification_type:
+        record["notification_type"] = notification_type
     try:
-        fleetlib.append_jsonl(fleetlib.events_path(), {
-            "event": event, "session_id": session_id, "repo": repo,
-            "branch": branch, "cwd": cwd, "ts": now,
-        })
+        fleetlib.append_jsonl(fleetlib.events_path(), record)
     except Exception as err:
         fleetlib.log("emit: could not append event: {}".format(err))
+
+    # Journalled above so the trail stays complete, but the slot keeps whatever
+    # state it already had: no session write, no marker, no reconcile.
+    if ignored_notification:
+        return
 
     target = fleetlib.sessions_dir() / "{}.json".format(session_id)
     if is_resumed:

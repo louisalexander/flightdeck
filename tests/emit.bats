@@ -232,3 +232,132 @@ PY
   [ "$status" -eq 0 ]
   [ "$elapsed" -lt 15 ]
 }
+
+# --- Notification classification by notification_type ----------------------
+#
+# Claude Code fires Notification for two unrelated situations and hands us a
+# notification_type to tell them apart. Only the types that genuinely need an
+# operator decision may paint a slot amber; the informational ones (chiefly
+# idle_prompt, the ~60s nudge after a finished turn) must leave the slot
+# exactly as they found it, or `done` decays into `blocked` and green stops
+# meaning anything. A missing or unrecognised type keeps the old behaviour:
+# a false amber is visible and self-clearing via the Resumed guard, whereas a
+# missed real block leaves a stuck agent looking green.
+
+notif() { emit Notification "{\"session_id\":\"S1\",\"cwd\":\"/tmp\",\"notification_type\":\"$1\"}"; }
+
+@test "a permission_prompt notification still blocks and marks" {
+  notif permission_prompt
+  [ "$(field state)" = "blocked" ]
+  [ -e "$(marker)" ]
+}
+
+@test "a worker_permission_prompt notification blocks" {
+  notif worker_permission_prompt
+  [ "$(field state)" = "blocked" ]
+}
+
+@test "an agent_needs_input notification blocks" {
+  notif agent_needs_input
+  [ "$(field state)" = "blocked" ]
+}
+
+@test "an elicitation_dialog notification blocks" {
+  notif elicitation_dialog
+  [ "$(field state)" = "blocked" ]
+}
+
+@test "an elicitation_url_dialog notification blocks" {
+  notif elicitation_url_dialog
+  [ "$(field state)" = "blocked" ]
+}
+
+@test "IDLE: an idle_prompt after Stop leaves the session file byte-identical" {
+  emit Stop
+  before="$(cat "$FLEET_HOME/sessions/S1.json")"
+  notif idle_prompt
+  [ "$(cat "$FLEET_HOME/sessions/S1.json")" = "$before" ]
+  [ "$(field state)" = "done" ]
+}
+
+@test "IDLE: an idle_prompt writes no blocked marker" {
+  emit Stop
+  notif idle_prompt
+  [ ! -e "$(marker)" ]
+}
+
+@test "IDLE: an idle_prompt mid-turn does not disturb a working session" {
+  emit UserPromptSubmit
+  notif idle_prompt
+  [ "$(field state)" = "working" ]
+  [ ! -e "$(marker)" ]
+}
+
+@test "IDLE: an idle_prompt never clears an existing marker" {
+  notif permission_prompt
+  [ -e "$(marker)" ]
+  notif idle_prompt
+  [ -e "$(marker)" ]
+  [ "$(field state)" = "blocked" ]
+}
+
+@test "an agent_completed notification leaves the state alone" {
+  emit Stop
+  notif agent_completed
+  [ "$(field state)" = "done" ]
+  [ ! -e "$(marker)" ]
+}
+
+@test "an auth_success notification leaves the state alone" {
+  emit Stop
+  notif auth_success
+  [ "$(field state)" = "done" ]
+}
+
+@test "a push_notification leaves the state alone" {
+  emit Stop
+  notif push_notification
+  [ "$(field state)" = "done" ]
+}
+
+@test "computer_use_enter leaves the state alone" {
+  emit Stop
+  notif computer_use_enter
+  [ "$(field state)" = "done" ]
+}
+
+@test "BACK-COMPAT: a notification with no notification_type still blocks" {
+  emit Notification
+  [ "$(field state)" = "blocked" ]
+  [ -e "$(marker)" ]
+}
+
+@test "FAIL-SAFE: an unrecognised notification_type still blocks" {
+  notif some_future_type
+  [ "$(field state)" = "blocked" ]
+  [ -e "$(marker)" ]
+}
+
+@test "an ignored notification is still journalled, with its type" {
+  emit Stop
+  notif idle_prompt
+  run python3 -c "
+import json
+rows=[json.loads(l) for l in open('$FLEET_HOME/events.jsonl')]
+n=[r for r in rows if r['event']=='Notification']
+assert len(n)==1, n
+print(n[0].get('notification_type'))
+"
+  [ "$status" -eq 0 ]
+  [ "$output" = "idle_prompt" ]
+}
+
+@test "a blocking notification records its type in the journal too" {
+  notif permission_prompt
+  run python3 -c "
+import json
+rows=[json.loads(l) for l in open('$FLEET_HOME/events.jsonl')]
+print([r.get('notification_type') for r in rows if r['event']=='Notification'][0])
+"
+  [ "$output" = "permission_prompt" ]
+}
