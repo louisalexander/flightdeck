@@ -45,7 +45,9 @@ def main():
         if not isinstance(data, dict):
             continue
         pid = data.get("pid", 0)
-        if not isinstance(pid, int) or pid <= 0:
+        # bool is a subclass of int in Python, so "pid": true would
+        # otherwise be treated as pid 1 -- exclude bool explicitly.
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             continue
         if not alive(pid):
             try:

@@ -17,13 +17,19 @@ import fleetlib  # noqa: E402
 HERE = Path(__file__).resolve().parent
 
 # Bounded with a short timeout: this runs synchronously from a physical
-# Stream Deck key press. Neither focusing nor tearing down a session should
-# take long, but fleet-kill does git work, so 10s gives it real headroom
-# without letting a wedged child hang the key indefinitely.
+# Stream Deck key press. Focusing should be near-instant, so 10s gives it
+# real headroom without letting a wedged child hang the key indefinitely.
+# fleet-kill is bounded differently: it does its own git work internally
+# against a 15s-per-call fleetlib.git() timeout, potentially across several
+# sequential checks (status, ignored files, upstream, rev-list) plus the
+# worktree removal itself. A 10s outer bound could cut it off mid
+# `git worktree remove` -- leaving the worktree gone but the session file
+# never unlinked. 30s gives the child room to finish its own bounded work
+# end to end rather than being killed mid-mutation by an outer race.
 # subprocess.TimeoutExpired subclasses SubprocessError, not OSError, so it
 # is caught explicitly rather than folded into a broad `except Exception`.
 FOCUS_TIMEOUT_SECS = 10
-KILL_TIMEOUT_SECS = 10
+KILL_TIMEOUT_SECS = 30
 
 
 def run_bounded(cmd, timeout_secs, label):

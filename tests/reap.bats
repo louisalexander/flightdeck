@@ -36,6 +36,25 @@ PY
   mk WEIRD "not-a-number"; "$BIN/fleet-reap"; [ -f "$FLEET_HOME/sessions/WEIRD.json" ]
 }
 
+@test "a boolean pid (JSON true) is never mistaken for pid 1" {
+  # bool is a subclass of int in Python -- isinstance(True, int) is True --
+  # so "pid": true in a session file would otherwise be treated as pid 1
+  # (a real, almost certainly alive process on any Unix system) by a bare
+  # `isinstance(pid, int)` check. That would make this session un-reapable
+  # forever, or worse, treat pid 1 as this agent's process. Confirm the
+  # guard explicitly excludes bool: a true/false pid is "unknown", same as
+  # 0 or a non-numeric string, and the session is kept either way.
+  python3 - "$FLEET_HOME/sessions/BOOLPID.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+json.dump({"session_id": "BOOLPID", "state": "working", "repo": "r", "branch": "b",
+           "title": "", "cwd": "/tmp", "host": "iterm2", "iterm_session": "U",
+           "pid": True, "ts": 1}, open(p, "w"))
+PY
+  "$BIN/fleet-reap"
+  [ -f "$FLEET_HOME/sessions/BOOLPID.json" ]
+}
+
 @test "reaping an empty directory is safe and idempotent" {
   run "$BIN/fleet-reap"; [ "$status" -eq 0 ]
   run "$BIN/fleet-reap"; [ "$status" -eq 0 ]

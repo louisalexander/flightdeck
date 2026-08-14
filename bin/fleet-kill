@@ -40,36 +40,84 @@ def mark_failed(session_path, dry_run):
             pass
 
 
-def unsafe_reason(cwd):
-    """Returns a human reason the worktree must not be removed, or None."""
+def check_worktree(cwd):
+    """Decides whether `cwd`'s worktree may be removed.
+
+    Returns (reason, top, branch). `reason` is None iff every safety
+    condition holds and `top`/`branch` are populated; otherwise `reason`
+    is a human-readable explanation and `top`/`branch` may be partially
+    filled in or None, depending on how far the checks got. Callers must
+    treat any non-None reason as REFUSE, full stop -- ambiguity (a git
+    call that failed, timed out, or returned something unexpected) always
+    resolves to refusal here, never to "assume safe".
+    """
     if not cwd or not Path(cwd).is_dir():
-        return "session has no usable working directory"
+        return "session has no usable working directory", None, None
 
     code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
     if code != 0 or not top:
-        return "not a git repository"
+        return "not a git repository", None, None
 
-    # A linked worktree has .git as a FILE; a primary working tree has a directory.
-    if not (Path(top) / ".git").is_file():
-        return "this is a primary working tree, not a linked worktree"
+    # A linked worktree's --git-dir (its private per-worktree admin area,
+    # e.g. .git/worktrees/<name>) differs from its --git-common-dir (the
+    # shared repo .git). For a primary working tree OR a submodule working
+    # directory, .git is ALSO just a file -- but git-dir and git-common-dir
+    # are the SAME path in both cases, since neither participates in git's
+    # worktree machinery. Comparing the two is what actually distinguishes
+    # "safe to `git worktree remove`" from "this would corrupt something
+    # else's checkout", which a bare `.git is a file` test cannot do.
+    code_gd, gitdir = fleetlib.git(["rev-parse", "--git-dir"], cwd)
+    code_cd, commondir = fleetlib.git(["rev-parse", "--git-common-dir"], cwd)
+    if code_gd != 0 or code_cd != 0 or not gitdir or not commondir:
+        return "could not determine worktree structure", top, None
+    gitdir_abs = (Path(cwd) / gitdir).resolve()
+    commondir_abs = (Path(cwd) / commondir).resolve()
+    if gitdir_abs == commondir_abs:
+        return ("this is a primary working tree or a submodule, "
+                "not a linked worktree"), top, None
 
     code, status = fleetlib.git(["status", "--porcelain"], cwd)
     if code != 0:
-        return "could not read git status"
+        return "could not read git status", top, None
     if status:
-        return "uncommitted changes or untracked files present"
+        return "uncommitted changes or untracked files present", top, None
+
+    # `git status --porcelain` never reports ignored files, and
+    # `git worktree remove` deletes them without needing --force. A real
+    # agent worktree routinely holds a gitignored .env, local notes, or
+    # scratch files -- all three ordinary guard conditions above would
+    # pass while that work is destroyed. Check separately, with its own
+    # distinct reason string, so this is never conflated with ordinary
+    # uncommitted changes.
+    code, ignored = fleetlib.git(["clean", "-n", "-d", "-X"], cwd)
+    if code != 0:
+        return "could not check for ignored-but-present files", top, None
+    if ignored:
+        return "ignored-but-present files in worktree", top, None
 
     code, _ = fleetlib.git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
     if code != 0:
-        return "no upstream branch configured, cannot prove work is pushed"
+        return "no upstream branch configured, cannot prove work is pushed", top, None
 
     code, ahead = fleetlib.git(["rev-list", "@{u}..HEAD"], cwd)
     if code != 0:
-        return "could not compare against upstream"
+        return "could not compare against upstream", top, None
     if ahead:
-        return "unpushed commits present"
+        return "unpushed commits present", top, None
 
-    return None
+    _, branch = fleetlib.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    return None, top, branch
+
+
+def is_dry_run():
+    """Any non-empty value other than "0"/"false" (case-insensitive) means
+    dry-run. Matching only the exact string "1" is a footgun pointed at
+    exactly the person trying to be careful -- FLEET_DRY_RUN=true must not
+    perform a real removal. Fail toward not destroying things: unset or
+    empty is the only way to get real execution.
+    """
+    raw = os.environ.get("FLEET_DRY_RUN", "")
+    return raw != "" and raw.strip().lower() not in ("0", "false")
 
 
 def main(argv):
@@ -81,12 +129,15 @@ def main(argv):
     if not isinstance(data, dict):
         return 0
 
-    dry_run = os.environ.get("FLEET_DRY_RUN") == "1"
+    dry_run = is_dry_run()
     cwd = data.get("cwd", "")
     pid = data.get("pid", 0)
 
     # 1. Stop the agent regardless of what happens to the worktree.
-    if isinstance(pid, int) and pid > 0:
+    #    bool is a subclass of int in Python -- isinstance(True, int) is
+    #    True -- so a session file with "pid": true would otherwise send
+    #    SIGTERM to pid 1 (True == 1). Exclude bool explicitly.
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
         if dry_run:
             say("WOULD KILL pid {}".format(pid))
         else:
@@ -97,15 +148,12 @@ def main(argv):
                 pass
 
     # 2. Decide whether the worktree may be removed.
-    reason = unsafe_reason(cwd)
+    reason, top, branch = check_worktree(cwd)
     if reason:
         say("REFUSING to remove worktree: {}".format(reason))
         say("  path: {}".format(cwd or "<unknown>"))
         mark_failed(session_path, dry_run)
         return 0
-
-    _, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
-    _, branch = fleetlib.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
 
     # 3. Safe. Remove the worktree -- but never delete the branch: worktree
     #    removal is reversible with `git worktree add`, branch deletion is not.

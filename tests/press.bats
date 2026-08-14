@@ -106,9 +106,14 @@ armfield() { python3 -c "import json;print(json.load(open('$BATS_TEST_TMPDIR/arm
 # whole invocation, rather than asserting the timeout value by inspection.
 
 @test "a wedged fleet-kill does not hang fleet-press; it returns promptly" {
+  # fleet-kill's own outer bound is 30s (KILL_TIMEOUT_SECS in fleet-press),
+  # raised from an earlier 10s so a real fleet-kill has room to finish its
+  # own bounded git work rather than being cut off mid `worktree remove`.
+  # The stub here sleeps well past that 30s bound so this still genuinely
+  # exercises the timeout branch rather than the stub simply finishing.
   cat >"$BATS_TEST_TMPDIR/wedged-kill" <<'SH'
 #!/usr/bin/env bash
-sleep 30
+sleep 60
 SH
   chmod +x "$BATS_TEST_TMPDIR/wedged-kill"
   export FLEET_KILL_CMD="$BATS_TEST_TMPDIR/wedged-kill"
@@ -121,7 +126,7 @@ SH
   elapsed=$((end - start))
 
   [ "$status" -eq 0 ]
-  [ "$elapsed" -lt 15 ]
+  [ "$elapsed" -lt 40 ]
   ! armed_exists
 }
 
