@@ -54,22 +54,46 @@ marker honest.
 **Cost, accepted:** the selection can go stale relative to what you are looking
 at. You can switch sessions by hand and the target will not follow.
 
-### 3. Delivery is hardened iTerm2 automation, not the messaging socket
+### 3. Delivery is a staged queue, drained by the hook flightdeck already owns
 
-Text reaches the session through AppleScript, using the same UUID tree-walk
-`bin/fleet-focus` already performs.
+A press does not type a prompt. It **stages** the verb in
+`~/.fleet/queue/<session_id>.json` with an atomic write. What happens next
+depends on the session's state — which flightdeck already tracks, and which is
+the one thing it has been doing since Row 1:
 
-**Why:** the alternative was `/tmp/cc-socks/<pid>.sock`, the transport behind
-Claude Code's session-to-session messages. It was probed during design. The
-socket exists and accepts connections, but returned nothing to any of four probe
-shapes — HTTP/1.1, bare newline, newline-delimited JSON, and a plain connect.
-It is an opaque framed protocol that would have to be reverse-engineered out of
-a minified bundle and would carry no stability guarantee across Claude Code
-updates. There is also no supported CLI path: `claude agents` manages `--bg`
-background agents, not running interactive sessions.
+- **Working** — nothing else happens. When the turn ends, flightdeck's existing
+  `Stop` hook drains the queue and returns
+  `{"decision": "block", "reason": "<verb prompt>"}`. The agent continues into
+  the verb. No keystrokes, no race, and the right semantics: the command runs
+  after the current work finishes instead of colliding with it.
+- **Idle** — no `Stop` will ever fire, so something must wake the session, and
+  input is the only wake. AppleScript types a **single short line pointing at
+  the queue file**. The verb's actual prompt never travels through AppleScript.
 
-**Cost, accepted:** AppleScript delivery is fragile in specific, known ways. It
-is made safe by guards rather than by hope — see *The sender*.
+**Why not the messaging socket:** `/tmp/cc-socks/<pid>.sock`, the transport
+behind Claude Code's session-to-session messages, was probed during design. It
+exists and accepts connections but returned nothing to any of four probe shapes
+— HTTP/1.1, bare newline, newline-delimited JSON, and a plain connect. It is an
+opaque framed protocol that would have to be reverse-engineered out of a
+minified bundle, with no stability guarantee across updates. There is also no
+supported CLI path: `claude agents` manages `--bg` background agents, not
+running interactive sessions.
+
+**Why not type the prompt directly:** that was the previous form of this
+decision, and staging is better in four ways. The fragile channel shrinks from
+several paragraphs to roughly fifty characters. Its failure mode becomes benign
+— a draft concatenating with a pointer produces something the agent queries or
+ignores, rather than a mangled instruction it half-follows. Verbs pressed at an
+awkward moment queue instead of being dropped. And the queue file becomes the
+interface, so most of the path is testable without driving a real iTerm2.
+
+**Verified, not assumed:** the `Stop` hook's `decision: "block"` with a `reason`
+field is real — there are explicit code paths and operator-visible strings for
+it ("Stop hook denied continuation", "Stop hook block discarded"), and the hook
+payload carries `stop_hook_active` specifically to keep a blocking hook from
+looping. Prompt injection via a `UserPromptSubmit` `additionalContext` field was
+*considered and rejected*: the strings that appeared to support it belong to the
+bundled AWS SDK, not to Claude Code's hook system. Nothing here depends on it.
 
 ### 4. Verbs are markdown files, not code and not config strings
 
@@ -158,23 +182,59 @@ the base-plus-local precedence `fleet.json`/`fleet.local.json` already uses.
 
 ### The sender: `bin/fleet-send <verb>`
 
-Resolves selection to a session, then to its `iterm_session` UUID, then sends.
-Three guards, each earned by an observed failure during design rather than
-imagined:
+Resolves selection to a session, resolves the verb to its prompt, and stages it:
+
+```json
+{ "verb": "test", "prompt": "...", "queued_at": 1786700000 }
+```
+
+Written atomically to `~/.fleet/queue/<session_id>.json`, the same
+write-temp-then-`os.replace` pattern the rest of the repo uses. Then it acts on
+the session's state:
+
+- **Working** — done. The `Stop` drain will pick it up.
+- **Idle** — wake the session (see below).
+- **No selection, or the selected session is gone** — refuse and report.
+
+Unlike the hook scripts, `fleet-send` is not required to exit 0. A press that
+could not be staged must say so.
+
+### The `Stop` drain
+
+Flightdeck's `Stop` hook gains one responsibility: if a queued verb exists for
+this session, remove it and return
+`{"decision": "block", "reason": "<verb prompt>"}`.
+
+Two properties are load-bearing:
+
+- **Drain before returning.** Delete the queue entry *first*, then emit the
+  block. Returning the block while the entry still exists re-fires the same verb
+  on the next `Stop`, forever. `stop_hook_active` in the payload is a backstop
+  against runaway loops, but correctness must not lean on it.
+- **The empty case must be nearly free.** This now sits on the latency path of
+  every turn end, for every session. It gets the same treatment as the
+  `PreToolUse` guard: a file-existence check that costs nothing when there is no
+  queued verb, and pays for a full interpreter only on a real transition.
+
+### Waking an idle session
+
+The only case that touches AppleScript. It types one short line pointing at the
+queue file — never the verb prompt itself. Two guards, each earned by a failure
+observed during design rather than imagined:
 
 1. **Address by UUID via tree-walk, never `window 1`.** A send addressed by
    window index was observed delivering into the wrong window. `fleet-focus`
    already has the correct script and the malformed-UUID rejection; reuse both.
-2. **Refuse when the prompt box holds a draft.** Observed: injected text
-   concatenates onto whatever the operator has half-typed. This is a
-   correctness failure, not flakiness. Read the pane first; abort rather than
-   corrupt.
-3. **Confirm submission.** Observed: `write text` delivered the text but did not
+2. **Confirm submission.** Observed: `write text` delivered text but did not
    submit it; a separate Return was required. Verify the prompt actually
    cleared, and report failure rather than assuming success.
 
-Unlike the hook scripts, `fleet-send` is not required to exit 0 — a press that
-could not be delivered must say so.
+The draft guard from the previous design is no longer a correctness
+requirement, because staging removed what made a draft dangerous: concatenating
+a pointer onto half-typed text yields something the agent will question or
+ignore, not a corrupted instruction it partially obeys. Refusing on a visible
+draft is still worth doing — typing over someone's half-written thought is rude
+— but it is now politeness, not safety, and it must not block the verb.
 
 ### Feedback
 
@@ -274,34 +334,79 @@ This is a convention, not a requirement:
   Confirm against the real renderer before the verb set is frozen.
 - **STOP's mechanism.** ESC via AppleScript is assumed but unverified; confirm
   it interrupts a running turn rather than dismissing something else.
-- **Flash vocabulary.** Sent / refused / no-target need three distinguishable
-  brief states that do not read as lifecycle colour.
+- **Flash vocabulary.** Queued / delivered / refused / no-target need
+  distinguishable brief states that do not read as lifecycle colour. Note that
+  *queued* and *delivered* are now genuinely different moments — a verb staged
+  against a working session may not run for minutes — and the deck should
+  probably say so rather than claim success at press time.
+- **Queue depth.** Whether a second press of the same verb replaces the queued
+  entry, queues behind it, or is refused. Replacing is probably right for TEST
+  and clearly wrong for DOUBT.
+- **Stale queue policy.** How old a queued verb may get before it is dropped,
+  and what the operator sees when that happens.
 
 ## Risks
 
-- **Draft detection is inherently racy.** The operator can type between the read
-  and the send. Mitigation is read, send, verify — and report on mismatch rather
-  than assume. It narrows the window; it does not close it.
-- **Sending to a busy agent.** A verb pressed mid-turn queues rather than
-  interrupting. This is probably desirable but should be confirmed, and it is
-  the reason STOP exists as a separate mechanism.
+- **A verb queued against a session that never stops again** sits in the queue
+  indefinitely — the operator walks away mid-turn, or the agent blocks on a
+  permission prompt and is never answered. The queue needs an age, and a stale
+  entry needs a visible fate rather than silent eviction.
+- **State can change between staging and delivery.** `fleet-send` decides
+  working-or-idle, and the session may finish in the interval — the verb is
+  staged, the `Stop` fires, and the drain delivers it. That is the benign
+  ordering. The harmful one is the reverse: judged idle, woken by a pointer,
+  and the drain also fires. The queue entry must therefore be claimed exactly
+  once, by the same atomic-claim pattern `fleet-press` uses for arming.
+- **The `Stop` hook is now on every turn's latency path** for every session,
+  including sessions that never use Row 2. The empty case must cost effectively
+  nothing.
 - **AppleScript automation permission** is already required by Row 1's focus
-  verb, so no new consent surface — but a revoked permission now breaks sending
-  as well as focusing, and the failure must be legible on the key.
+  verb, so no new consent surface — but a revoked permission breaks waking an
+  idle session, and the failure must be legible on the key rather than silent.
+- **Blocking a `Stop` makes an agent continue on its own.** To an operator
+  watching the terminal this looks like the agent deciding to keep working. The
+  verb prompt should make its origin obvious in the first line.
 
 ## Testing
+
+The staged queue is what makes this testable: the file is the interface, so
+almost everything can be exercised without driving a real terminal.
 
 - **Pure functions** — verb file parsing, verb-to-prompt resolution, selection
   resolution, marker geometry — unit tested, following the existing split
   between bats and the node tests in `plugin/src/render.test.mjs`.
-- **The guards** are the point of this feature and get the most coverage. The
-  osascript layer is injected as a command runner so each guard is testable
-  against fakes, following the stub-bin pattern already used in `tests/emit.bats`.
-- **What cannot be faked** — that a real iTerm2 actually submits — gets a live
-  check on real sessions, the way the hook chain was verified.
+- **Staging and draining** are plain file operations and get the bulk of the
+  coverage: a queued verb blocks the `Stop` with the right reason; the entry is
+  removed before the block is emitted; a second `Stop` does not re-fire it; no
+  queued verb produces no block and no interpreter startup; two claimants get
+  exactly one delivery.
+- **The wake path** keeps its guards, with the osascript layer injected as a
+  command runner so each is testable against fakes, following the stub-bin
+  pattern already used in `tests/emit.bats`.
+- **What cannot be faked** — that a real iTerm2 submits, and that a real agent
+  continues from a blocked `Stop` — gets a live check on real sessions, the way
+  the hook chain was verified.
 
 ## First slice
 
-Selection state, the focus marker, `fleet-send` with all three guards, feedback,
-and one verb end-to-end: TEST. That exercises every part of the path. The
-remaining seven verbs are then genuinely configuration.
+The queue is the core, so it goes first and the terminal automation goes last:
+
+1. **Selection state and the focus marker** — `~/.fleet/focus.json`, written on
+   a Row 1 press, rendered as the inset border. Independently useful: it makes
+   the deck show which agent you are working on, before any verb exists.
+2. **Verb files and resolution** — parse `config/verbs/*.md`, apply the
+   `~/.fleet/verbs/` override, resolve a verb to its prompt. Pure, fully tested.
+3. **Stage and drain** — `bin/fleet-send` writes the queue entry; the `Stop`
+   hook claims and drains it into a block. This is the whole mechanism, and it
+   is testable end-to-end without a terminal or a Stream Deck.
+4. **The Row 2 key and feedback** — the action type, monochrome render, flash.
+5. **Waking an idle session** — the AppleScript pointer and its two guards. Last
+   because it is the only part that needs a real iTerm2, and by this point
+   everything it delivers has already been proven.
+
+One verb end-to-end: TEST. The remaining seven are then genuinely configuration.
+
+Steps 1–3 are worth landing before the deck can press anything, because a
+queued verb can be staged by hand — `bin/fleet-send test` from a terminal — and
+observed to arrive. The keypress is the last thing that needs to work, not the
+first.
