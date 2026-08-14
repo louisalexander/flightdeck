@@ -30,6 +30,15 @@
       "PropertyInspectorPath": "ui/boottile.html",
       "Controllers": ["Keypad"],
       "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
+    },
+    {
+      "Name": "Command",
+      "UUID": "com.louisalexander.flightdeck.command",
+      "Icon": "imgs/action",
+      "Tooltip": "Send a verb to the focused agent",
+      "PropertyInspectorPath": "ui/command.html",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
     }
   ]
 }

@@ -247,4 +247,25 @@ assert.ok(
   "an armed key shows no focus border"
 );
 
+// --- Row 2 command keys -------------------------------------------------
+import { renderCommandSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/command.js";
+
+const plain = renderCommandSvg("TEST", "");
+assert.ok(plain.includes("TEST"), "the verb label is drawn");
+// Row 1 owns saturation because state is the information. Row 2 must not
+// compete, and must never borrow the one colour that means "come look".
+assert.ok(!plain.includes("#F5A623"), "a command key is never amber");
+assert.ok(!plain.includes("#1256A3"), "a command key is never lifecycle blue");
+assert.ok(!plain.includes("#238636"), "a command key is never lifecycle green");
+
+// Queued and delivered are different moments; the key must not claim success
+// at press time, so queued gets its own restrained treatment.
+const queued = renderCommandSvg("TEST", "queued");
+assert.notStrictEqual(queued, plain, "queued looks different from idle");
+assert.ok(!queued.includes("#F5A623"), "queued is not amber either");
+
+const refused = renderCommandSvg("TEST", "refused");
+assert.notStrictEqual(refused, plain, "refused looks different from idle");
+assert.notStrictEqual(refused, queued, "refused is distinguishable from queued");
+
 console.log("render tests passed");

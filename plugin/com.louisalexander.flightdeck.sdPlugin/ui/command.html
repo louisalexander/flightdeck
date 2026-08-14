@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {
+      font: 13px -apple-system, "Helvetica Neue", Arial, sans-serif;
+      color: #d8d8d8; background: #2d2d2d; margin: 0; padding: 14px;
+    }
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    label { width: 74px; text-align: right; color: #9a9a9a; }
+    select { flex: 1; padding: 4px; background: #3d3d3d; color: #d8d8d8;
+             border: 1px solid #4a4a4a; border-radius: 4px; }
+    .note { color: #8a8a8a; line-height: 1.45; }
+    .note b { color: #b8b8b8; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <label for="verb">Verb</label>
+    <select id="verb">
+      <option value="">(none)</option>
+      <option value="test">test</option>
+      <option value="diff">diff</option>
+      <option value="note">note</option>
+      <option value="issue">issue</option>
+      <option value="push">push</option>
+      <option value="pr">pr</option>
+      <option value="doubt">doubt</option>
+      <option value="stop">stop</option>
+      <option value="commit">commit</option>
+    </select>
+  </div>
+  <p class="note">
+    A press stages this verb against whichever agent Row 1 has selected --
+    delivery happens on that agent's own schedule, not at press time.
+    <b>test</b>, <b>issue</b> and <b>commit</b> have verbs defined today; the
+    rest are reserved slots. Picking one of those now is not an error, but
+    pressing the key will flash "refused" until its verb file is added --
+    that refusal is expected, not a bug. <b>commit</b> is deliberately left
+    off the eight-key panel row so that slot can be swapped in later without
+    a code change.
+  </p>
+
+<script>
+// Self-contained: no CDN. A property inspector that needs the network is a
+// property inspector that can silently render blank.
+let websocket = null, uuid = null, actionInfo = null;
+
+function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
+  uuid = inUUID;
+  actionInfo = JSON.parse(inActionInfo);
+  websocket = new WebSocket("ws://127.0.0.1:" + inPort);
+
+  websocket.onopen = function () {
+    websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+    const saved = (actionInfo.payload && actionInfo.payload.settings) || {};
+    const el = document.getElementById("verb");
+    el.value = saved.verb || "";
+  };
+}
+
+document.getElementById("verb").addEventListener("change", function (e) {
+  if (!websocket || websocket.readyState !== 1) return;
+  const raw = e.target.value;
+  const settings = raw === "" ? {} : { verb: raw };
+  websocket.send(JSON.stringify({
+    event: "setSettings", context: uuid, payload: settings
+  }));
+});
+</script>
+</body>
+</html>

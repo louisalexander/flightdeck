@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { renderSvg, toDataUri } from "./render.js";
 import { bootConfig, shouldShowSplash, splashTileSvg, renderBootTile } from "./splash.js";
+import { renderCommandSvg } from "./command.js";
 import type { Slot, SlotsFile, Config } from "./types.js";
 
 const FLEET_HOME = join(homedir(), ".fleet");
@@ -268,6 +269,51 @@ export class BootTile extends SingletonAction<BootTileSettings> {
   }
 }
 
+/**
+ * Stages a Row 2 verb against whichever agent is currently selected.
+ * Mirrors the fleet-press invocation above, but unlike fleet-press this
+ * script is deliberately allowed to exit non-zero (no selection, dead
+ * session, unknown verb) -- that refusal is the boolean the key needs in
+ * order to show "queued" vs. "refused" rather than claiming success blind.
+ */
+function runFleetSend(verb: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(interpreter(), [join(REPO, "bin", "fleet-send"), verb], (err) => {
+      if (err) streamDeck.logger.error(`fleet-send ${verb} refused: ${err.message}`);
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Row 2: one key, one verb, sent to whichever agent Row 1 has selected.
+ * A press only stages the verb -- delivery happens on the agent's own
+ * schedule -- so the feedback here can only say "queued" or "refused",
+ * never "done".
+ */
+@action({ UUID: "com.louisalexander.flightdeck.command" })
+export class Command extends SingletonAction<{ verb?: string }> {
+  override onWillAppear(ev: WillAppearEvent<{ verb?: string }>): void {
+    const verb = ev.payload.settings?.verb ?? "";
+    ev.action.setTitle("");           // the SVG carries the label
+    ev.action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), "")));
+  }
+
+  override async onKeyUp(ev: KeyUpEvent<{ verb?: string }>): Promise<void> {
+    const verb = ev.payload.settings?.verb ?? "";
+    if (!verb) return;
+    const ok = await runFleetSend(verb);
+    ev.action.setImage(toDataUri(
+      renderCommandSvg(verb.toUpperCase(), ok ? "queued" : "refused")));
+    // Feedback is a brief change of ink, not a lasting one -- the key
+    // returns to idle so it always reads as ready for the next press.
+    setTimeout(() => {
+      ev.action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), "")));
+    }, 1200);
+  }
+}
+
 streamDeck.actions.registerAction(new FleetSlot());
 streamDeck.actions.registerAction(new BootTile());
+streamDeck.actions.registerAction(new Command());
 streamDeck.connect();
