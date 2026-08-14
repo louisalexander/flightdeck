@@ -466,3 +466,75 @@ t = json.load(open('$ROOT/config/fleet.json'))['timings']
 print(t['armMs'], t['verbArmSecs'])"
   [ "$output" = "3000 10" ]
 }
+
+# --- keystroke verbs: sent now, or not at all -----------------------------
+#
+# STOP interrupts; CONFIRM answers a permission dialog. Neither is a prompt,
+# so neither may be staged: an interrupt that arrives at the end of a turn is
+# not an interrupt, and a dialog answer typed after the dialog closed is a
+# stray keypress into whatever replaced it. They also refuse outside the
+# states where they mean something, which is the whole safety story --
+# CONFIRM must never press Enter at a session that is not actually asking.
+
+@test "KEY: STOP interrupts a working agent" {
+  stub_osascript
+  idle_target working
+  run "$BIN/fleet-send" stop
+  [ "$status" -eq 0 ]
+  [ -e "$OSA_LOG" ]
+  [ ! -e "$(queued)" ]                       # never staged
+}
+
+@test "KEY: STOP also interrupts a blocked agent" {
+  stub_osascript
+  idle_target blocked
+  run "$BIN/fleet-send" stop
+  [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ]
+}
+
+@test "KEY: STOP refuses an idle agent -- there is nothing to interrupt" {
+  stub_osascript
+  idle_target idle
+  run "$BIN/fleet-send" stop
+  [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "KEY: CONFIRM answers a blocked agent" {
+  stub_osascript
+  idle_target blocked
+  run "$BIN/fleet-send" confirm
+  [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ]
+}
+
+@test "KEY: CONFIRM refuses a working agent, which is not asking anything" {
+  stub_osascript
+  idle_target working
+  run "$BIN/fleet-send" confirm
+  [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "KEY: CONFIRM refuses an idle agent, so a stray Enter cannot be sent" {
+  stub_osascript
+  idle_target idle
+  run "$BIN/fleet-send" confirm
+  [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "KEY: a keystroke verb never arms, so it stays a single press" {
+  stub_osascript
+  idle_target working
+  "$BIN/fleet-send" stop
+  [ ! -e "$(armfile)" ]
+}
+
+@test "KEY: STOP sends escape, CONFIRM sends a bare return" {
+  stub_osascript
+  idle_target blocked
+  "$BIN/fleet-send" stop
+  run cat "$OSA_LOG"
+  [[ "$output" == *"ASCII character 27"* ]]
+  rm -f "$OSA_LOG"
+  "$BIN/fleet-send" confirm
+  run cat "$OSA_LOG"
+  [[ "$output" != *"ASCII character 27"* ]]
+}
