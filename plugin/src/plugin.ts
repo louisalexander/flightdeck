@@ -293,23 +293,74 @@ function runFleetSend(verb: string): Promise<boolean> {
  */
 @action({ UUID: "com.louisalexander.flightdeck.command" })
 export class Command extends SingletonAction<{ verb?: string }> {
+  // House pattern from FleetSlot's downAt/visible maps: per-action-id state
+  // keyed by action.id. Here it tracks the pending feedback-restore timer,
+  // so a second press inside the 1200ms window cancels the first press's
+  // restore instead of racing it -- without this, the first timer fires
+  // during the second press's feedback and blanks it early, even though the
+  // verb genuinely was staged.
+  private pending = new Map<string, ReturnType<typeof setTimeout>>();
+
   override onWillAppear(ev: WillAppearEvent<{ verb?: string }>): void {
-    const verb = ev.payload.settings?.verb ?? "";
     ev.action.setTitle("");           // the SVG carries the label
-    ev.action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), "")));
+    this.paintIdle(ev.action, ev.payload.settings?.verb ?? "");
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<{ verb?: string }>): void {
+    // A pending restore firing against a torn-down action context is
+    // probably a harmless no-op in the SDK, but both sibling actions clean
+    // up on disappear and there is no reason for this one not to.
+    this.clearPending(ev.action.id);
+  }
+
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<{ verb?: string }>): void {
+    // The operator just picked a different verb in the property inspector;
+    // the key face must catch up now, not wait for the next profile switch.
+    this.paintIdle(ev.action, ev.payload.settings?.verb ?? "");
   }
 
   override async onKeyUp(ev: KeyUpEvent<{ verb?: string }>): Promise<void> {
+    const id = ev.action.id;
+    this.clearPending(id);
+
     const verb = ev.payload.settings?.verb ?? "";
-    if (!verb) return;
+    if (!verb) {
+      // Unconfigured is a refusal too: without this the operator can't
+      // tell "nothing to send" from "the press was missed".
+      ev.action.setImage(toDataUri(renderCommandSvg("", "refused")));
+      this.scheduleRestore(id, ev.action, "");
+      return;
+    }
+
     const ok = await runFleetSend(verb);
     ev.action.setImage(toDataUri(
       renderCommandSvg(verb.toUpperCase(), ok ? "queued" : "refused")));
-    // Feedback is a brief change of ink, not a lasting one -- the key
-    // returns to idle so it always reads as ready for the next press.
-    setTimeout(() => {
-      ev.action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), "")));
+    this.scheduleRestore(id, ev.action, verb);
+  }
+
+  private paintIdle(action: { setImage(image?: string): Promise<void> }, verb: string): void {
+    action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), "")));
+  }
+
+  // Feedback is a brief change of ink, not a lasting one -- the key returns
+  // to idle so it always reads as ready for the next press. What is painted
+  // here never changes; only when the restore fires is now tracked.
+  private scheduleRestore(
+    id: string, action: { setImage(image?: string): Promise<void> }, verb: string
+  ): void {
+    const timer = setTimeout(() => {
+      this.pending.delete(id);
+      this.paintIdle(action, verb);
     }, 1200);
+    this.pending.set(id, timer);
+  }
+
+  private clearPending(id: string): void {
+    const timer = this.pending.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.pending.delete(id);
+    }
   }
 }
 
