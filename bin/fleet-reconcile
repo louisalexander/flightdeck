@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Turns session files into a sticky slot map at $FLEET_HOME/slots.json.
+
+Stickiness is the point: a session claims the lowest free slot on first
+sight and holds it until it dies. When it dies the slot goes empty and
+NOTHING ELSE MOVES. Keys that shift under your thumb destroy the whole
+value of the row.
+"""
+
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+
+def load_live_sessions():
+    """Every parseable session file, oldest first for stable assignment."""
+    sessions = []
+    directory = fleetlib.sessions_dir()
+    if not directory.is_dir():
+        return sessions
+    for path in sorted(directory.glob("*.json")):
+        data = fleetlib.read_json(path)
+        if isinstance(data, dict) and data.get("session_id"):
+            sessions.append(data)
+    sessions.sort(key=lambda s: (s.get("ts", 0), s.get("session_id", "")))
+    return sessions
+
+
+def previous_assignment():
+    """slot index (as int) -> session_id, from the last written slots.json."""
+    previous = fleetlib.read_json(fleetlib.slots_path(), {}) or {}
+    result = {}
+    for slot in previous.get("slots", []):
+        if slot.get("session_id"):
+            result[slot["index"]] = slot["session_id"]
+    return result
+
+
+def empty_slot(index):
+    return {"index": index, "state": "empty", "label_top": "", "label_bottom": "",
+            "session_id": "", "host": "", "iterm_session": "", "cwd": "", "app": ""}
+
+
+def pinned_slot(index, pin):
+    return {"index": index, "state": "idle",
+            "label_top": pin.get("label_top", ""),
+            "label_bottom": pin.get("label_bottom", ""),
+            "session_id": "", "host": pin.get("host", "pinned-app"),
+            "iterm_session": "", "cwd": "", "app": pin.get("app", "")}
+
+
+def session_slot(index, session, max_chars, prefixes):
+    title = (session.get("title") or "").strip()
+    bottom = title if title else (session.get("branch") or "")
+    return {"index": index,
+            "state": session.get("state", "idle"),
+            "label_top": fleetlib.shorten(session.get("repo", ""), max_chars, prefixes),
+            "label_bottom": fleetlib.shorten(bottom, max_chars, prefixes),
+            "session_id": session["session_id"],
+            "host": session.get("host", "unknown"),
+            "iterm_session": session.get("iterm_session", ""),
+            "cwd": session.get("cwd", ""),
+            "app": ""}
+
+
+def main():
+    config = fleetlib.load_config()
+    count = config.get("slots", {}).get("count", 8)
+    pins = config.get("pins", {}) or {}
+    labels = config.get("labels", {})
+    max_chars = labels.get("maxChars", 11)
+    prefixes = labels.get("stripPrefixes", fleetlib.DEFAULT_PREFIXES)
+
+    live = load_live_sessions()
+    by_id = {s["session_id"]: s for s in live}
+    previous = previous_assignment()
+
+    # Pass 1: every index is a pin, a retained session, or free.
+    held = {}
+    free = []
+    for index in range(count):
+        pin = pins.get(str(index))
+        if pin:
+            continue
+        keeper = previous.get(index)
+        if keeper and keeper in by_id:
+            held[index] = keeper
+        else:
+            free.append(index)
+
+    # Pass 2: sessions with no slot fill the free indices, lowest first.
+    assigned = set(held.values())
+    pending = [s["session_id"] for s in live if s["session_id"] not in assigned]
+    for index in free:
+        if not pending:
+            break
+        held[index] = pending.pop(0)
+
+    # Pass 3: render.
+    slots = []
+    for index in range(count):
+        pin = pins.get(str(index))
+        if pin:
+            slots.append(pinned_slot(index, pin))
+        elif index in held:
+            slots.append(session_slot(index, by_id[held[index]], max_chars, prefixes))
+        else:
+            slots.append(empty_slot(index))
+
+    fleetlib.write_json_atomic(fleetlib.slots_path(), {
+        "ts": int(time.time()), "overflow": len(pending), "slots": slots,
+    })
+    if pending:
+        fleetlib.log("reconcile: {} session(s) unslotted (overflow)".format(len(pending)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("reconcile: unhandled {!r}".format(err))
+    sys.exit(0)
