@@ -162,6 +162,26 @@ MD
   [[ "$output" == *"Return to what you were doing"* ]] || return 1
 }
 
+@test "FORK branches first when on the default branch" {
+  # The plan file is a side effect of parking work, not a commit the
+  # operator asked for -- so landing it on main is worse here than it
+  # would be for COMMIT, which at least says "commit" on the key.
+  run "$BIN/fleet-verbs" show fork
+  [[ "$output" == *"default branch"* ]]
+  [[ "$output" == *"branch first"* ]]
+}
+
+@test "FORK's branch-first rule sits with the commit step, not at the end" {
+  # A rule stated after step 4 is a rule the agent reads after it has
+  # already committed.
+  run "$BIN/fleet-verbs" show fork
+  before=$(printf '%s' "$output" | grep -n "branch first" | head -1 | cut -d: -f1)
+  after=$(printf '%s' "$output" | grep -n "fleet-spawn" | head -1 | cut -d: -f1)
+  [ -n "$before" ]
+  [ -n "$after" ]
+  [ "$before" -lt "$after" ]
+}
+
 # --- keystroke verbs ------------------------------------------------------
 #
 # STOP and CONFIRM are not instructions. A blocked agent cannot read a prompt

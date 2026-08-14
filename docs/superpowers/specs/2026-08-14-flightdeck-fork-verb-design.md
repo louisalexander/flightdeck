@@ -373,11 +373,29 @@ reality: the plan commit, `gh issue create`, the spawn chaining off it, and the
 
 ### Found during verification
 
-- **FORK has no branch-first rule, and PR does.** The parent spec gives the PR
+- **FORK has no branch-first rule, and PR does.** ~~The parent spec gives the PR
   verb "branches first when on the default branch". FORK inherits nothing of the
   sort, so pressing it while on `main` commits the plan straight to `main`. This
   is a real gap, found by watching seeded agents land there. It should either
-  adopt PR's rule or refuse on the default branch.
+  adopt PR's rule or refuse on the default branch.~~ **Resolved:** FORK's step 2
+  now adopts PR's rule, worded as COMMIT and PUSH word it.
+
+  Enforcement is **prompt-level, and `bin/fleet-spawn` was deliberately left
+  alone.** The obvious alternative — have the sink refuse when the branch it is
+  forking from is the default branch — cannot work, because `fleet-spawn` runs
+  at step 4, *after* the plan is committed at step 2 and the issue is filed at
+  step 3. A refusal there cannot undo the commit; it would leave a plan commit
+  on `main`, a filed issue, and no agent working it — precisely the half-forked
+  state `fork.md` names as worse than a fork that plainly did not happen.
+  Enforcement has to precede the commit, and the only thing running before the
+  commit is the prompt. That is also why COMMIT, PUSH and PR carry the rule in
+  their prompts rather than in `fleet-press` or `fleet-send`.
+
+  Branching the worktree *from* the default branch remains allowed: the fork
+  point was never the problem, the commit was. Once the agent has branched, the
+  plan lands on the new branch and `fleet-spawn` branches the worktree from
+  there. The finding is kept rather than deleted because the reasoning above is
+  the record of why the sink was not touched.
 - **A spawned worktree's Row 1 label reads `issue-<n>`, not the repo name.** The
   label derives from the directory name and `fleet-spawn` names the directory
   after the issue, so a forked agent does not show which repo it belongs to.

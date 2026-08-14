@@ -24,9 +24,12 @@ If there is, then:
    code, the constraints that apply, and what "done" looks like. This
    document is the entire handover — a thin plan produces a lost agent.
 
-2. Commit the plan to the branch you are on. It must be committed before
-   step 4: the new worktree is branched from this branch and will contain
-   only what is committed here.
+2. Commit the plan to the branch you are on. If you are on the default
+   branch, create a branch first and say so — the plan file is a side
+   effect of parking work, not a commit that was asked for, and it must
+   not land on the default branch. It must be committed before step 4:
+   the new worktree is branched from this branch and will contain only
+   what is committed here.
 
 3. File the issue with `gh issue create`. The body must name the plan's
    path, the branch it was committed on, and the commit SHA. Keep the body
