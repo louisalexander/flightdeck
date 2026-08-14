@@ -347,19 +347,64 @@ This is a convention, not a requirement:
 
 ## Risks
 
-- **A verb queued against a session that never stops again** sits in the queue
-  indefinitely — the operator walks away mid-turn, or the agent blocks on a
-  permission prompt and is never answered. The queue needs an age, and a stale
-  entry needs a visible fate rather than silent eviction.
-- **State can change between staging and delivery.** `fleet-send` decides
-  working-or-idle, and the session may finish in the interval — the verb is
-  staged, the `Stop` fires, and the drain delivers it. That is the benign
-  ordering. The harmful one is the reverse: judged idle, woken by a pointer,
-  and the drain also fires. The queue entry must therefore be claimed exactly
-  once, by the same atomic-claim pattern `fleet-press` uses for arming.
-- **The `Stop` hook is now on every turn's latency path** for every session,
-  including sessions that never use Row 2. The empty case must cost effectively
-  nothing.
+### A verb queued against a session that never stops again
+
+The operator walks away mid-turn, or the agent blocks on a permission prompt
+nobody answers. The entry sits until the turn eventually ends — possibly the
+next morning — and then fires. Four layers, in order of how much they buy:
+
+1. **`confirm: true` verbs never queue.** COMMIT, PUSH and PR require an idle
+   session or refuse outright. An outward-facing action must fire while the
+   operator is watching, not twenty minutes later from a queue they have
+   forgotten. This removes the harmful half of the risk rather than managing it.
+2. **Pending is visible.** The Row 2 key and the target Row 1 slot both show
+   that a verb is waiting. Invisibility is what makes staleness dangerous, not
+   duration — a verb you can see waiting is a verb you can cancel.
+3. **Pressing a queued verb again cancels it.** The cheapest possible escape
+   hatch, and it composes with the queue-depth decision below.
+4. **A TTL, with visible expiry.** `queued_at` is already in the entry; the
+   drain discards anything older than a configurable window. The default should
+   be generous, because long agent turns are legitimate and a verb dropped for
+   being patient is worse than one delivered late. Expiry must surface on the
+   key — silent eviction is the failure this is meant to prevent, arriving by a
+   different route.
+
+`SessionEnd` clears any queue for that session, alongside the focus and marker
+clearing it already does.
+
+### The claim race between waking and draining
+
+`fleet-send` judges the session idle and wakes it with a pointer; the session
+was in fact just finishing, `Stop` fires, and the drain delivers the same verb.
+Or the reverse: the drain wins, and the pointer then names a file that no longer
+exists, leaving the agent to puzzle over a missing path.
+
+**Claim before acting, never act then claim.** Both paths take the entry with
+the same atomic `os.replace()` to a per-pid sibling that `fleet-press`'s
+`claim_arm()` already uses for arming — a successful rename is sole ownership,
+and the loser gets `FileNotFoundError` and must behave as though there were
+nothing to deliver. For the wake path this means claiming *first* and then
+typing a pointer to the claimed path, so a pointer is only ever typed for an
+entry that is already owned. Exactly one delivery, and no dangling pointer.
+
+Sink idempotency is the backstop underneath, not the mechanism.
+
+### `Stop` hook latency — smaller than it first appears
+
+This risk was overstated when first recorded. `fleet-emit Stop` **already runs
+on every turn end** — `Stop` maps to `done` in `EVENT_STATES`, so the
+interpreter is already being paid for on that path. The drain is a
+file-existence check inside a process that runs regardless. It needs no new hook
+entry and no `PreToolUse`-style shell guard.
+
+The real constraint is output discipline, not cost. The hook must print nothing
+at all on the ordinary path, and emit JSON only when it genuinely blocks —
+stray output on a hook that runs for every turn of every session is a much
+better way to break Claude Code than a few milliseconds of CPU. Blocking is
+expressed in stdout JSON with exit 0, which preserves `fleet-emit`'s existing
+"MUST ALWAYS EXIT 0" contract.
+### Smaller risks
+
 - **AppleScript automation permission** is already required by Row 1's focus
   verb, so no new consent surface — but a revoked permission breaks waking an
   idle session, and the failure must be legible on the key rather than silent.
