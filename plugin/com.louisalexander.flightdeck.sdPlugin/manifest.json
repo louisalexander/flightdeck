@@ -1,0 +1,25 @@
+{
+  "Name": "Flightdeck",
+  "Version": "1.0.0.0",
+  "Author": "louisalexander",
+  "Description": "Live annunciator row for running Claude Code agents.",
+  "Category": "Flightdeck",
+  "Icon": "imgs/plugin",
+  "URL": "https://github.com/louisalexander/flightdeck",
+  "SDKVersion": 2,
+  "CodePath": "bin/plugin.js",
+  "Nodejs": { "Version": "20", "Debug": "enabled" },
+  "Software": { "MinimumVersion": "6.5" },
+  "OS": [{ "Platform": "mac", "MinimumVersion": "12.0" }],
+  "Actions": [
+    {
+      "Name": "Fleet Slot",
+      "UUID": "com.louisalexander.flightdeck.slot",
+      "Icon": "imgs/action",
+      "Tooltip": "One agent in the fleet",
+      "PropertyInspectorPath": "ui/slot.html",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
+    }
+  ]
+}
