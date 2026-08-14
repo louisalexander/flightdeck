@@ -30,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 # is caught explicitly rather than folded into a broad `except Exception`.
 FOCUS_TIMEOUT_SECS = 10
 KILL_TIMEOUT_SECS = 30
+RECONCILE_TIMEOUT_SECS = 10
 
 
 def run_bounded(cmd, timeout_secs, label):
@@ -133,6 +134,21 @@ def main(argv):
     # showing a selection that was never actually made.
     if verb == "short" and slot.get("session_id"):
         fleetlib.write_focus(slot["session_id"])
+        # Repaint immediately. focus.json is not what the plugin watches --
+        # slots.json is -- and only fleet-reconcile carries the selection
+        # across into it. Without this the border does not move until
+        # something else happens to rebuild slots.json: the launchd reaper's
+        # 15s tick, or an unrelated hook event from some other session.
+        # Observed live: four Row 1 presses in ten seconds left the border
+        # sitting on whichever slot had been selected at the last tick, which
+        # reads as a stuck border rather than a slow one, and makes the
+        # operator unsure which agent a Row 2 press is about to command.
+        #
+        # Runs before the focus call rather than after, so the key repaints
+        # without waiting on osascript raising the terminal.
+        if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+            run_bounded([sys.executable, str(HERE / "fleet-reconcile")],
+                        RECONCILE_TIMEOUT_SECS, "fleet-reconcile")
 
     if verb == "long":
         if not slot.get("session_id") or slot.get("host") == "pinned-app":

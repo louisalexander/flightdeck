@@ -88,3 +88,36 @@ print(all('focused' in x for x in s), len(s))"
   "$BIN/fleet-reconcile"
   [ ! -e "$FLEET_HOME/focus.json" ]
 }
+
+# --- the deck must repaint on the press, not on the next reaper tick --------
+#
+# fleet-press writes focus.json, but slots.json is the only file the plugin
+# watches. Without a reconcile here the border does not move until something
+# else rebuilds slots.json -- the launchd reaper's 15s tick, or an unrelated
+# hook event. Observed live: pressing four Row 1 keys in ten seconds left the
+# border on whichever slot was selected at the last tick, which reads as a
+# stuck border rather than a slow one.
+
+@test "REPAINT: a short press rebuilds slots.json so the border moves at once" {
+  cat > "$FLEET_HOME/sessions/S1.json" <<'JSON'
+{"session_id":"S1","state":"working","repo":"repo","branch":"main","title":"",
+ "cwd":"/tmp","host":"iterm2","iterm_session":"U1","pid":0,"ts":1}
+JSON
+  # Deliberately NOT skipping reconcile: the repaint IS the behaviour here.
+  # slots.json must stay in place -- fleet-press reads it to resolve which
+  # slot was pressed -- and the fixture carries no `focused` key at all, so
+  # this can only pass if the press rebuilt the file.
+  unset FLEET_SKIP_RECONCILE
+  run python3 -c "
+import json
+print('focused' in json.load(open('$FLEET_HOME/slots.json'))['slots'][0])"
+  [ "$output" = "False" ]
+
+  "$BIN/fleet-press" 0 short
+
+  run python3 -c "
+import json
+s=json.load(open('$FLEET_HOME/slots.json'))['slots']
+print([x['focused'] for x in s if x['session_id']=='S1'][0])"
+  [ "$output" = "True" ]
+}
