@@ -32,11 +32,16 @@ fi
 #    actual merge (bin/fleet-merge-hooks) treats hooks.<Event> as an
 #    array that must be merged per-entry, never replaced wholesale --
 #    otherwise a pre-existing hook from a different plugin on the same
-#    event would be silently deleted. It re-reads the result and
-#    verifies every pre-existing top-level key AND every pre-existing
-#    non-flightdeck hook entry survived; on any failure it restores the
-#    backup itself before returning non-zero, so a damaged or clobbered
-#    file is never left behind.
+#    event would be silently deleted. Ownership of an entry is matched
+#    on a path-independent marker, so a relocated checkout replaces its
+#    own old entry instead of piling up a duplicate beside it. The
+#    entire read/merge/write/verify sequence in fleet-merge-hooks runs
+#    inside one try/except: ANY exception restores the backup itself
+#    before it exits non-zero. Belt and braces: if the child is killed
+#    outright rather than raising (a hard crash, SIGKILL), it cannot
+#    run its own restore, so this shell also restores explicitly on a
+#    non-zero exit -- a damaged or clobbered file is never left behind
+#    either way.
 S="$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude"
 [ -f "$S" ] || printf '{}' >"$S"
@@ -53,10 +58,11 @@ printf '  backup written and verified: %s\n' "$BACKUP"
 sed -e "s|__PYTHON__|$PY|g" -e "s|__REPO__|$REPO|g" \
   "$REPO/hooks/settings.snippet.json" >"$FLEET_HOME/.snippet.json"
 
-if "$PY" "$REPO/bin/fleet-merge-hooks" "$S" "$FLEET_HOME/.snippet.json" "$BACKUP" "$REPO"; then
+if "$PY" "$REPO/bin/fleet-merge-hooks" "$S" "$FLEET_HOME/.snippet.json" "$BACKUP"; then
   printf '  hooks merged into %s (backup at %s)\n' "$S" "$BACKUP"
 else
-  printf 'ERROR: settings merge failed verification -- restored from backup\n' >&2
+  printf 'ERROR: settings merge failed -- restoring backup at the shell level too\n' >&2
+  cp "$BACKUP" "$S"
   rm -f "$FLEET_HOME/.snippet.json"
   exit 1
 fi

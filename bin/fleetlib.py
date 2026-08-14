@@ -57,14 +57,23 @@ def read_json(path, default=None):
     except Exception:
         return default
 
-def write_json_atomic(path, obj):
-    """Writes via a temp file in the same directory, then os.replace()."""
+def write_json_atomic(path, obj, indent=None):
+    """Writes via a temp file in the same directory, then os.replace().
+
+    `indent` defaults to None (compact, machine-only files -- the
+    original, unchanged behaviour for every existing caller). Pass an
+    int for files a human is meant to read/edit, such as settings.json.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(obj, handle, separators=(",", ":"))
+            if indent is None:
+                json.dump(obj, handle, separators=(",", ":"))
+            else:
+                json.dump(obj, handle, indent=indent)
+                handle.write("\n")
         os.replace(tmp, str(path))
     except Exception:
         try:
