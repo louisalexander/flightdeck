@@ -26,6 +26,14 @@ else
   rc=1
 fi
 
+printf '\n== python unittest (fleetlib pure functions) ==\n'
+if /usr/bin/python3 "$ROOT/tests/test_fleetlib.py" -v; then
+  printf 'unittest: OK\n'
+else
+  printf 'unittest: FAILED\n'
+  rc=1
+fi
+
 printf '\n== bats ==\n'
 bats "$ROOT/tests" || rc=1
 
