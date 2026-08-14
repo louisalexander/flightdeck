@@ -327,7 +327,66 @@ permissions, which is close to what this repo is *about*.
   such, with a title deliberately full of shell metacharacters.
 - **Live, because no stub can prove it** — that `claude "<prompt>"` submits on
   arrival rather than leaving the prompt in the box, and that a real iTerm2 tab
-  opens in the worktree. Verified on a real session, the way the hook chain was.
+  opens in the worktree. See *Live verification* below.
+
+## Live verification
+
+Run on 2026-08-14 against real iTerm2, real `gh` and real agents. Recorded as
+observed, including what was not covered.
+
+| Check | Result |
+|---|---|
+| `claude '<prompt>'` submits on arrival | **Verified.** Answered `SUBMIT CHECK OK` with no Return pressed. |
+| Tab opens with no iTerm2 window present | **Not run** — see below. |
+| Ordinary path: new tab in an existing window | **Verified.** Agent running in the worktree, launch prompt submitted. |
+| Spawned session reaches Row 1 unaided | **Verified.** Registered in the state bus on its own, no integration code. |
+| Idempotent re-run focuses the existing tab | **Verified.** `spawn: issue 4 already spawned; focusing`, exactly one worktree, exit 0. |
+| FORK's refusal clause | **Verified.** See below. |
+| FORK's happy path — plan, issue, spawn, return | **NOT VERIFIED.** |
+
+**Decision 3 holds.** This was the assumption the whole design rested on, and
+the one the `claude-cli://` deep link fails. The CLI's positional prompt does
+submit.
+
+**The no-window case was not run** for a structural reason worth recording: the
+verifying session was itself running inside iTerm2, so quitting iTerm2 to reach
+the `count of windows is 0` branch would have killed the verifier. It needs an
+operator, or a session driven from a different terminal. The branch is
+implemented and reviewed but unexercised.
+
+**The refusal clause works, and it is the half that got proven.** FORK was fired
+at an idle agent whose conversation contained no genuinely separate work. It
+declined, unprompted, with the right reasoning: the only thing it had found was
+"the precondition of the task I was handed, already tracked by the issue
+itself", and forking it would have meant filing a duplicate. That is precisely
+the invented-issue failure the clause exists to prevent, and it was the part of
+the prompt most likely to be ignored.
+
+**The happy path was not reached.** Producing it needs an agent that is (a) in a
+repo with a GitHub remote, (b) not on the default branch, and (c) holding a
+conversation with a real forkable tangent. Repeated attempts to seed one failed
+on a mundane mechanical problem — a new iTerm2 tab inherits the *frontmost*
+session's directory, so every seeded agent landed in the primary checkout on
+`main` instead of in a worktree. So the following remain untested against
+reality: the plan commit, `gh issue create`, the spawn chaining off it, and the
+"return to what you were doing" instruction.
+
+### Found during verification
+
+- **FORK has no branch-first rule, and PR does.** The parent spec gives the PR
+  verb "branches first when on the default branch". FORK inherits nothing of the
+  sort, so pressing it while on `main` commits the plan straight to `main`. This
+  is a real gap, found by watching seeded agents land there. It should either
+  adopt PR's rule or refuse on the default branch.
+- **A spawned worktree's Row 1 label reads `issue-<n>`, not the repo name.** The
+  label derives from the directory name and `fleet-spawn` names the directory
+  after the issue, so a forked agent does not show which repo it belongs to.
+  Cosmetic, and it compounds the branch-label point already in *Open decisions*.
+- **The confirm arm's session key earned itself.** During testing the operator's
+  own Row 1 press changed the selection between arming FORK and confirming it.
+  Because Row 2 keys the arm by verb *and* target session, the confirm did not
+  fire at the newly-selected agent — it re-armed. Without that key, FORK would
+  have filed an issue from a session nobody had chosen.
 
 ## Risks
 
