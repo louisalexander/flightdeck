@@ -15,6 +15,12 @@ import fleetlib  # noqa: E402
 
 TRUE_WORDS = ("true", "yes", "1")
 
+# A keystroke verb sends a key instead of a prompt. Allow-listed rather than
+# passed through to AppleScript: the value ends up selecting what gets sent to
+# a live terminal, and an unrecognised name must fail loudly here rather than
+# become an unpredictable keystroke there.
+KEY_NAMES = ("escape", "enter")
+
 # A verb prompt runs in whatever repo the selected agent is working in, not
 # in flightdeck's own repo -- so a verb file that names one of flightdeck's
 # own sink scripts by a bare relative path (e.g. `bin/fleet-fail`) sends
@@ -75,7 +81,12 @@ def parse_verb(text):
             continue
         key, _, value = line.partition(":")
         meta[key.strip()] = value.strip()
+    key = meta.get("key", "").strip().lower()
+    if key and key not in KEY_NAMES:
+        return None
     return {
+        "key": key,
+        "requires": meta.get("requires", "").strip().lower(),
         "id": meta.get("id", ""),
         "label": meta.get("label", ""),
         "interrupt": meta.get("interrupt", "").lower() in TRUE_WORDS,
@@ -141,6 +152,9 @@ def main(argv):
         resolved = fleetlib.fleet_home() / "verbs-resolved" / "{}.md".format(verb_id)
         fleetlib.write_text_atomic(resolved, parsed["prompt"] + "\n")
         sys.stdout.write(str(resolved) + "\n")
+    elif command == "keyinfo":
+        sys.stdout.write("key={} requires={}\n".format(
+            parsed["key"], parsed["requires"]))
     elif command == "flags":
         sys.stdout.write("interrupt={} confirm={}\n".format(
             str(parsed["interrupt"]).lower(), str(parsed["confirm"]).lower()))

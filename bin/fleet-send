@@ -55,6 +55,35 @@ UUID_RE = re.compile(
 # Automation permission would return "not found"/"" into DEVNULL and
 # osascript would still exit 0, so the caller below can distinguish
 # "delivered" from "did not deliver" only if this script actually fails.
+# A keystroke verb sends a key, not a line. Same UUID tree-walk and same
+# error-on-not-found as WAKE_SCRIPT -- only the payload differs.
+#
+# `newline NO` matters for escape: iTerm2's `write text` appends a return by
+# default, and an escape followed by a return would interrupt and then submit
+# whatever was in the prompt box. Enter is the opposite case -- it IS the bare
+# return, which is why it writes an empty string and keeps the default newline.
+KEY_SCRIPTS = {
+    "escape": 'tell s to write text (ASCII character 27) newline NO',
+    "enter": 'tell s to write text ""',
+}
+
+KEY_SCRIPT = '''
+tell application "iTerm2"
+  set found to false
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{uuid}" then
+          {payload}
+          set found to true
+        end if
+      end repeat
+    end repeat
+  end repeat
+  if not found then error "no such session" number 1
+end tell
+'''
+
 WAKE_SCRIPT = '''
 tell application "iTerm2"
   set found to false
@@ -115,6 +144,53 @@ def resolve_verb(verb_id):
         return None, None
 
 
+def resolve_keyinfo(verb_id):
+    """(key, requires) for a verb, or (None, None) if it is not a keystroke verb.
+
+    A parse failure yields (None, None), which makes the verb fall through to
+    the ordinary prompt path. That is the safe direction: the worst case is a
+    keystroke verb being treated as a prompt and refusing because its body is
+    not an instruction, rather than an unrecognised declaration reaching a
+    live terminal as some arbitrary key.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "fleet-verbs"), "keyinfo", verb_id],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=VERBS_TIMEOUT_SECS)
+        if proc.returncode != 0:
+            return None, None
+        out = proc.stdout.decode("utf-8", "replace").strip()
+        parts = dict(p.split("=", 1) for p in out.split() if "=" in p)
+        key = parts.get("key", "").strip()
+        requires = [x for x in parts.get("requires", "").split(",") if x]
+        return (key or None), requires
+    except Exception as err:
+        fleetlib.log("send: could not resolve keyinfo for {}: {}".format(verb_id, err))
+        return None, None
+
+
+def send_key(session, key, verb_id):
+    """Sends a single key to the target terminal. 0 on success, 1 otherwise."""
+    uuid = session.get("iterm_session", "")
+    if not UUID_RE.match(uuid or ""):
+        fleetlib.log("send: refusing malformed iterm target {!r}".format(uuid))
+        return 1
+    script = KEY_SCRIPT.format(uuid=uuid, payload=KEY_SCRIPTS[key])
+    osa = os.environ.get("FLEET_OSASCRIPT") or "osascript"
+    try:
+        proc = subprocess.run([osa, "-e", script],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=OSASCRIPT_TIMEOUT_SECS)
+    except Exception as err:
+        fleetlib.log("send: {} failed for {}: {}".format(verb_id, key, err))
+        return 1
+    if proc.returncode != 0:
+        fleetlib.log("send: {} could not reach the terminal".format(verb_id))
+        return 1
+    return 0
+
+
 def resolve_flags(verb_id):
     """{'interrupt': bool, 'confirm': bool} for a verb id, {} on any failure.
 
@@ -162,6 +238,18 @@ def main(argv):
     if not isinstance(session, dict):
         fleetlib.log("send: selected session {} is gone".format(session_id))
         return 1
+
+    # A keystroke verb short-circuits everything below: no prompt is resolved,
+    # nothing is staged, nothing is armed. It is sent now or refused now,
+    # because both of these verbs are meaningless the moment they are late.
+    key, requires = resolve_keyinfo(verb_id)
+    if key:
+        state = session.get("state")
+        if requires and state not in requires:
+            fleetlib.log("send: refusing {} -- target is {}, needs one of {}"
+                         .format(verb_id, state, ",".join(requires)))
+            return 1
+        return send_key(session, key, verb_id)
 
     prompt, verb_path = resolve_verb(verb_id)
     if not prompt:

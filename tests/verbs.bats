@@ -89,3 +89,43 @@ MD
   run "$BIN/fleet-verbs" show /etc/passwd
   [ "$status" -eq 1 ]
 }
+
+# --- keystroke verbs ------------------------------------------------------
+#
+# STOP and CONFIRM are not instructions. A blocked agent cannot read a prompt
+# until its dialog is answered, and an interrupt delivered at the end of a turn
+# is not an interrupt. Both send a key, immediately, or not at all -- so a verb
+# file can declare the key it sends and the target states in which sending it
+# means anything.
+
+@test "KEYSTROKE: a verb can declare the key it sends" {
+  cat > "$FLEET_HOME/verbs/zap.md" <<'MD'
+---
+id: zap
+label: ZAP
+key: escape
+requires: working,blocked
+---
+irrelevant, a keystroke verb sends no prompt
+MD
+  run "$BIN/fleet-verbs" keyinfo zap
+  [ "$output" = "key=escape requires=working,blocked" ]
+}
+
+@test "KEYSTROKE: a prompt verb reports no key, so the two never blur" {
+  run "$BIN/fleet-verbs" keyinfo test
+  [ "$output" = "key= requires=" ]
+}
+
+@test "KEYSTROKE: an unrecognised key name is rejected, not passed through" {
+  cat > "$FLEET_HOME/verbs/bad.md" <<'MD'
+---
+id: bad
+label: BAD
+key: rm-rf-slash
+---
+body
+MD
+  run "$BIN/fleet-verbs" keyinfo bad
+  [ "$status" -eq 1 ]
+}
