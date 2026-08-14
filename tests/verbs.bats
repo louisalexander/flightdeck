@@ -15,6 +15,40 @@ setup() {
   [[ "$output" == *"fleet-fail"* ]]
 }
 
+@test "note is on the panel and never blocks on a confirm" {
+  run "$BIN/fleet-verbs" flags note
+  [ "$status" -eq 0 ]
+  [ "$output" = "interrupt=false confirm=false" ]
+}
+
+@test "the shipped note verb names no vault and no MCP tool" {
+  # The shipped verb must stay dependency-free: it ships to checkouts with
+  # no Obsidian server, no vault, and no journal at all. The Obsidian
+  # flavour is a local override, and the failure this guards against is
+  # someone folding that override back into the shipped file -- which
+  # reads fine on the machine it was written on and is broken everywhere
+  # else. Both halves matter: a vault path is machine-specific, and an
+  # `obsidian_*` tool name is server-specific.
+  run "$BIN/fleet-verbs" show note
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"obsidian_"* ]]
+  [[ "$output" != *"Obsidian Vaults"* ]]
+  [[ "$output" != *"/Users/"* ]]
+}
+
+@test "the shipped Obsidian override parses and wins once installed" {
+  # config/verb-overrides/ is documentation you copy, not code anything
+  # loads -- so nothing else would notice it rotting into a file the
+  # resolver rejects. Installing it exactly as the README says to is the
+  # only thing that catches that.
+  cp "$ROOT/config/verb-overrides/note-obsidian.md" "$FLEET_HOME/verbs/note.md"
+  run "$BIN/fleet-verbs" show note
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"obsidian_"* ]]
+  run "$BIN/fleet-verbs" path note
+  [ "$output" = "$FLEET_HOME/verbs/note.md" ]
+}
+
 @test "an unknown verb fails loudly rather than printing nothing" {
   # --separate-stderr: this bats keeps stdout+stderr merged in $output by
   # default, which would make the stderr message look like stdout output.
