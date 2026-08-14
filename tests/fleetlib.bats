@@ -210,3 +210,38 @@ print('OK')
   [ "$status" -eq 0 ]
   [ "$output" = "OK" ]
 }
+
+@test "git() is bounded by a timeout and reads as failure, not success, when git hangs" {
+  # A wedged git (e.g. blocked on .git/index.lock, or a stuck filesystem)
+  # must not hang fleet-kill forever, and must not be mistaken for success.
+  # Shadow the real `git` with a fake binary that never returns, then
+  # confirm fleetlib.git() comes back quickly with the SAME failure shape
+  # (non-zero code, empty output) it already uses for every other error --
+  # which is what makes a timed-out safety check read as "could not
+  # determine" and therefore REFUSE in bin/fleet-kill.
+  fakebin="$BATS_TEST_TMPDIR/fakebin"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$fakebin/git"
+  dir="$BATS_TEST_TMPDIR/timeoutrepo"
+  mkdir -p "$dir"
+
+  start=$(date +%s)
+  run env PATH="$fakebin:$PATH" python3 -c "
+import sys
+sys.path.insert(0, '$BIN')
+import fleetlib
+rc, out = fleetlib.git(['status', '--porcelain'], '$dir', timeout=1)
+assert rc != 0, (rc, out)
+assert out == '', (rc, out)
+print('OK')
+"
+  end=$(date +%s)
+  [ "$status" -eq 0 ]
+  [ "$output" = "OK" ]
+  elapsed=$((end - start))
+  [ "$elapsed" -lt 10 ]
+}

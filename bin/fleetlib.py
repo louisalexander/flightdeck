@@ -155,15 +155,25 @@ def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
 
 # --- process ---------------------------------------------------------------
 
-def git(args, cwd):
+def git(args, cwd, timeout=15):
     """Runs git with an argument LIST -- never a shell string.
 
     This is what makes a repo path containing a space safe.
+
+    Bounded by `timeout` seconds: git can genuinely block (an index.lock
+    held by another process, a wedged filesystem). subprocess.TimeoutExpired
+    is a SubprocessError, not an OSError, so it needs its own catch -- a
+    bare `except OSError` would let it propagate. On timeout this returns
+    the same shape as any other failure: non-zero code, empty output. That
+    is deliberate: callers that treat "could not determine" as "refuse"
+    (see bin/fleet-kill) stay safe when git hangs instead of misreading a
+    timeout as success.
     """
     try:
         proc = subprocess.run(
             ["git", "-C", str(cwd)] + list(args),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout,
         )
         return proc.returncode, proc.stdout.decode("utf-8", "replace").strip()
     except Exception:
