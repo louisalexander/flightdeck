@@ -183,16 +183,16 @@ json.dump(d, open(p,'w'))"
   cp "$BIN/fleet-send" "$FAKEBIN/fleet-send"
   chmod +x "$FAKEBIN/fleet-send"
   ln -s "$BIN/fleetlib.py" "$FAKEBIN/fleetlib.py"
-  # Simulates fleet-verbs's `path` subcommand exiting 0 with empty
-  # output -- e.g. the verb file vanishing in the gap between
-  # resolve_verb()'s separate `show` and `path` subprocess calls.
-  # resolve_verb() does not check `path`'s exit status, so this must be
-  # caught by fleet-send's own validation instead.
+  # Simulates fleet-verbs's `resolved-path` subcommand exiting 0 with
+  # empty output -- e.g. the verb file vanishing in the gap between
+  # resolve_verb()'s separate `show` and `resolved-path` subprocess
+  # calls. resolve_verb() does not check `resolved-path`'s exit status,
+  # so this must be caught by fleet-send's own validation instead.
   cat > "$FAKEBIN/fleet-verbs" <<'SH'
 #!/usr/bin/env bash
 case "$1" in
   show) echo "a real prompt"; exit 0 ;;
-  path) exit 0 ;;
+  resolved-path) exit 0 ;;
   flags) echo "interrupt=false confirm=false"; exit 0 ;;
   *) exit 1 ;;
 esac
@@ -204,6 +204,46 @@ SH
   run "$FAKEBIN/fleet-send" test
   [ "$status" -eq 1 ]
   [ ! -e "$OSA_LOG" ]
+}
+
+@test "FIX 2: the file the wake pointer actually names contains no literal FLIGHTDECK_REPO token" {
+  stub_osascript
+  idle_session idle
+  "$BIN/fleet-send" test
+  # Ask fleet-verbs for the exact same file fleet-send just resolved and
+  # pointed at -- `resolved-path`, not `path` (which reports the SOURCE
+  # markdown and legitimately still contains the token). This is a
+  # regression test for a real gap: the original FIX 2 substituted the
+  # token only for `fleet-verbs show`, which feeds the Stop-drain path.
+  # The wake path never reads that string -- it types "Read <path> and
+  # follow it." and an idle agent opens whatever file `path` named, which
+  # was the untouched source containing the literal "{{FLIGHTDECK_REPO}}"
+  # token until this fix.
+  run "$BIN/fleet-verbs" resolved-path test
+  [ "$status" -eq 0 ]
+  target="$output"
+  [ -f "$target" ]
+  run grep -c 'FLIGHTDECK_REPO' "$target"
+  [ "$output" = "0" ]
+  # And confirm the pointer fleet-send actually typed names this exact
+  # file, not some other path -- otherwise the check above would be
+  # testing the wrong file.
+  run cat "$OSA_LOG"
+  [[ "$output" == *"$target"* ]]
+}
+
+@test "FIX 2: issue.md and commit.md resolve with no literal FLIGHTDECK_REPO token either" {
+  run "$BIN/fleet-verbs" resolved-path issue
+  [ "$status" -eq 0 ]
+  issue_target="$output"
+  run grep -c 'FLIGHTDECK_REPO' "$issue_target"
+  [ "$output" = "0" ]
+
+  run "$BIN/fleet-verbs" resolved-path commit
+  [ "$status" -eq 0 ]
+  commit_target="$output"
+  run grep -c 'FLIGHTDECK_REPO' "$commit_target"
+  [ "$output" = "0" ]
 }
 
 @test "WAKE: an osascript failure refuses loudly rather than losing the verb silently" {

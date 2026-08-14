@@ -81,7 +81,17 @@ end tell
 
 
 def resolve_verb(verb_id):
-    """(prompt, verb_path) for a verb id, or (None, None)."""
+    """(prompt, verb_path) for a verb id, or (None, None).
+
+    verb_path comes from `fleet-verbs resolved-path`, NOT `fleet-verbs
+    path`. `path` reports the source markdown, which for a verb like
+    `test` still contains the literal "{{FLIGHTDECK_REPO}}" token --
+    `show` substitutes it into the returned STRING, but the wake path
+    below never reads that string, it points an idle agent at a file on
+    disk. `resolved-path` materialises a copy with the same substitution
+    already applied and reports that file instead, so the file this
+    verb_path names is always safe for an agent to open directly.
+    """
     try:
         proc = subprocess.run(
             [sys.executable, str(HERE / "fleet-verbs"), "show", verb_id],
@@ -91,7 +101,7 @@ def resolve_verb(verb_id):
             return None, None
         prompt = proc.stdout.decode("utf-8", "replace").strip()
         path = subprocess.run(
-            [sys.executable, str(HERE / "fleet-verbs"), "path", verb_id],
+            [sys.executable, str(HERE / "fleet-verbs"), "resolved-path", verb_id],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=VERBS_TIMEOUT_SECS).stdout.decode("utf-8", "replace").strip()
         return (prompt or None), (path or None)

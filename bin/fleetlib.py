@@ -156,6 +156,29 @@ def write_json_atomic(path, obj, indent=None):
             pass
         raise
 
+def write_text_atomic(path, text):
+    """Writes plain text via a temp file in the same directory, then
+    os.replace() -- the same pattern as write_json_atomic, extended to
+    non-JSON output. A reader can never observe a partially written file.
+
+    Used by fleet-verbs to materialise a token-substituted copy of a verb
+    prompt on disk (see REPO_TOKEN in bin/fleet-verbs): the file fleet-send
+    points an idle agent at must never be read mid-write.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
 def create_blocked_marker(session_id):
     """Creates ~/.fleet/blocked/<session_id> (and the directory).
 
