@@ -104,3 +104,40 @@ print(json.load(open('$FLEET_HOME/queue/OTHER.json'))['prompt'])"
   [ "$(state)" = "done" ]
   [ ! -e "$FLEET_HOME/queue/S1.json" ]
 }
+
+# --- an expired entry is discarded, never delivered ------------------------
+#
+# A confirm verb queued against a busy agent carries an expiry, so it cannot
+# fire long after the operator stopped watching -- the exact outcome the
+# never-queue rule originally existed to prevent. The drain is where that is
+# enforced, because it is the only place that runs at delivery time.
+
+expiring_queue() {
+  python3 -c "
+import json
+json.dump({'verb':'issue','prompt':'FILE THE ISSUE','verb_path':'/v/issue.md',
+           'queued_at':1,'expires_at':$1}, open('$FLEET_HOME/queue/S1.json','w'))"
+}
+
+@test "TTL: an expired entry is discarded without blocking the Stop" {
+  expiring_queue 1
+  run emit Stop
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                            # no block emitted
+  [ ! -e "$FLEET_HOME/queue/S1.json" ]        # and not left to fire later
+  [ "$(state)" = "done" ]
+}
+
+@test "TTL: an unexpired entry still delivers" {
+  expiring_queue 99999999999
+  run emit Stop
+  run python3 -c "
+import json;print(json.loads('''$output''')['reason'])"
+  [ "$output" = "FILE THE ISSUE" ]
+}
+
+@test "TTL: an entry with no expiry is unaffected and still delivers" {
+  queue
+  run emit Stop
+  [[ "$output" == *"RUN THE TESTS"* ]]
+}

@@ -171,27 +171,24 @@ def main(argv):
     # An outward-facing verb (ISSUE, PUSH, PR, COMMIT) gets two guards, both
     # from the spec's defence against one firing at an agent nobody is
     # watching.
-    if resolve_flags(verb_id).get("confirm"):
+    confirm_verb = bool(resolve_flags(verb_id).get("confirm"))
+    if confirm_verb:
         # Guard 1: it never queues. Staging a confirm verb against a working
         # or blocked agent means it fires whenever that turn happens to end
         # -- possibly long after the operator has stopped watching, which is
         # the precise outcome confirm:true exists to prevent. There is no
         # safe way to defer it, so an undeliverable target is a refusal.
-        if session.get("state") not in WAKEABLE_STATES:
-            # Note this runs BEFORE the arm is claimed, so a target that goes
-            # busy between the arming press and the confirming one refuses
-            # without consuming the arm -- and if it goes quiet again inside
-            # the window, the next press fires off that original arm. Three
-            # presses rather than two. Left as-is deliberately: every one of
-            # those presses is a deliberate operator action, the window is
-            # seconds, and consuming the arm here would instead mean an
-            # operator who armed correctly loses it to a momentary state
-            # flicker they never saw.
-            fleetlib.log("send: refusing {} -- target is {}, and a confirm verb "
-                         "must fire while the operator is watching"
-                         .format(verb_id, session.get("state")))
-            return 1
-
+        # Guard 1 used to refuse outright whenever the target was busy. In
+        # use that refused at the exact moment the verb was most wanted --
+        # while watching an agent hit the problem worth filing. The fear was
+        # never "at the end of this turn, while you are still sitting here";
+        # it was "twenty minutes later, forgotten". So a confirm verb may
+        # queue against a busy target, but carries an expiry the drain
+        # honours, which bounds that fear directly rather than by refusing.
+        #
+        # It is still never woken -- WAKEABLE_STATES governs that below -- so
+        # a `blocked` session on a permission prompt is staged and waits,
+        # never typed into.
         # Guard 2: arm, then fire. Claiming rather than reading means two
         # near-simultaneous confirming presses cannot both fire; the loser
         # sees no arm and re-arms, which is the safe direction.
@@ -218,12 +215,24 @@ def main(argv):
                          .format(verb_id, session_id))
             return ARMED_EXIT
 
-    fleetlib.write_json_atomic(fleetlib.queue_path(session_id), {
+    now = int(time.time())
+    entry = {
         "verb": verb_id,
         "prompt": prompt,
         "verb_path": verb_path or "",
-        "queued_at": int(time.time()),
-    })
+        "queued_at": now,
+    }
+    # Only confirm verbs expire. A plain verb (TEST, DIFF, DOUBT) is not
+    # outward-facing, so a late delivery costs nothing and waiting
+    # indefinitely is the friendlier behaviour; a general TTL for every verb
+    # is a separate decision that is still open.
+    if confirm_verb and session.get("state") not in WAKEABLE_STATES:
+        config = fleetlib.load_config()
+        ttl = config.get("timings", {}).get("confirmQueueSecs", 300)
+        entry["expires_at"] = now + max(1, int(ttl))
+        fleetlib.log("send: staged {} for {} with a {}s expiry -- target is {}"
+                     .format(verb_id, session_id, ttl, session.get("state")))
+    fleetlib.write_json_atomic(fleetlib.queue_path(session_id), entry)
 
     # Not wakeable (working, blocked, or anything unrecognised): staging is
     # the whole contract here. The Stop drain serves `working`, and for

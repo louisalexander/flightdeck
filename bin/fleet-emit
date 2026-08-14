@@ -254,7 +254,19 @@ def run(event):
             claimed = fleetlib.claim_queue(session_id)
             if isinstance(claimed, dict) and isinstance(claimed.get("prompt"), str) \
                     and claimed["prompt"].strip():
-                drained = claimed
+                # An expiry means an outward-facing verb queued against a busy
+                # agent. Honour it here because this is the only code that runs
+                # at delivery time -- and delivering a stale one is precisely
+                # the "fires twenty minutes later at an agent nobody is
+                # watching" outcome the expiry exists to prevent. Already
+                # claimed above, so an expired entry is discarded, not left to
+                # try again at the next turn end.
+                expires_at = claimed.get("expires_at")
+                if isinstance(expires_at, int) and now > expires_at:
+                    fleetlib.log("emit: discarding expired verb {} for {}".format(
+                        claimed.get("verb"), session_id))
+                else:
+                    drained = claimed
 
         fleetlib.write_json_atomic(target, {
             "session_id": session_id,

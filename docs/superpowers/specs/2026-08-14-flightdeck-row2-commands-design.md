@@ -191,10 +191,23 @@ the base-plus-local precedence `fleet.json`/`fleet.local.json` already uses.
   selected now — a different repository than the operator was looking at when
   they decided.
 
-  A confirm verb also **never queues**: if the target is not immediately
-  deliverable (`working` or `blocked`) the press is refused outright rather
-  than staged, because an outward-facing action deferred to an unknown later
-  moment is the exact outcome `confirm` exists to prevent.
+  A confirm verb **may queue against a busy target, but only briefly.** The
+  first form of this rule refused outright whenever the target was `working`
+  or `blocked`. In use that refused at exactly the moment the verb was most
+  wanted — while watching an agent hit the problem worth filing. The fear was
+  never "at the end of this turn, while you are still sitting here"; it was
+  "twenty minutes later, forgotten". So the entry is staged carrying an
+  `expires_at` (`timings.confirmQueueSecs`, default 300s) and the `Stop` drain
+  discards it if it has expired, which bounds that fear directly rather than
+  by refusing.
+
+  A busy target still does not skip the arm: the first press arms, and only
+  the second stages. And a `blocked` session is staged but never woken, so a
+  permission dialog is never typed into.
+
+  Plain verbs carry no expiry. They are not outward-facing, so a late delivery
+  costs nothing and waiting indefinitely is friendlier; a general TTL for every
+  verb remains an open decision.
 
   `fleet-send` therefore reports three outcomes, not two: `0` delivered, `1`
   refused, `2` armed. The deck needs the distinction — painting an armed key

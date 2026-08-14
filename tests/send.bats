@@ -165,9 +165,13 @@ json.dump(d, open(p,'w'))"
   [ "$(grep -c 'tell s to write text' "$OSA_LOG")" -eq 2 ]
 }
 
-@test "FIX 4: a confirm:true verb is refused outright, never queued" {
+# Was "refused outright, never queued". A confirm verb may now queue against a
+# busy target, bounded by an expiry -- but the half of that protection which
+# still holds unconditionally is that ONE press never stages anything. Pinned
+# here so a future change cannot quietly make a single press outward-facing.
+@test "FIX 4: one press of a confirm:true verb never stages anything" {
   run "$BIN/fleet-send" issue
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 2 ]                        # armed, not delivered
   [ ! -e "$FLEET_HOME/queue/S1.json" ]
 }
 
@@ -347,19 +351,17 @@ json.dump(d, open('$FLEET_HOME/armed-verb.json','w'))"
   [ "$status" -eq 2 ] && [ ! -e "$OSA_LOG" ]
 }
 
-@test "CONFIRM: a working target refuses outright -- confirm verbs never queue" {
+# These two previously asserted an outright refusal on a busy target. That rule
+# was deliberately relaxed -- see the TTL tests below, which now cover staging
+# against working and blocked targets. What remains worth pinning separately is
+# that a busy target does not skip the arm: the first press must still arm, so
+# no single press can queue an outward-facing verb at an agent mid-turn.
+@test "CONFIRM: a busy target still requires arming before it will stage" {
   stub_osascript
   idle_target working
   run "$BIN/fleet-send" issue
-  [ "$status" -eq 1 ]
-  [ ! -e "$(armfile)" ] && [ ! -e "$(queued)" ]
-}
-
-@test "CONFIRM: a blocked target refuses too, and is never typed into" {
-  stub_osascript
-  idle_target blocked
-  run "$BIN/fleet-send" issue
-  [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
+  [ "$status" -eq 2 ]
+  [ -e "$(armfile)" ] && [ ! -e "$(queued)" ] && [ ! -e "$OSA_LOG" ]
 }
 
 @test "CONFIRM: the verb arm never touches fleet-press's teardown arm" {
@@ -378,4 +380,57 @@ import json;print(json.load(open('$FLEET_HOME/armed.json'))['index'])"
   idle_target idle
   run "$BIN/fleet-send" test
   [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ] && [ ! -e "$(armfile)" ]
+}
+
+# --- confirm verbs may queue, but only briefly ----------------------------
+#
+# The original rule refused a confirm verb outright whenever the target was
+# busy, on the grounds that an outward-facing action must not fire at an agent
+# nobody is watching. In use that refused at exactly the moment the operator
+# most wanted it -- while watching an agent hit the problem worth filing.
+#
+# The fear was "twenty minutes later, forgotten", not "at the end of this
+# turn, while you are still sitting here". So a confirm verb may now queue
+# against a busy target, carrying an expiry the drain honours. The double
+# press still guards it; what changed is that the second press stages instead
+# of refusing.
+
+@test "TTL: a confirm verb staged against a working target carries an expiry" {
+  stub_osascript
+  idle_target working
+  "$BIN/fleet-send" issue || true            # arms
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 0 ]
+  [ -e "$(queued)" ]
+  [ ! -e "$OSA_LOG" ]                        # staged for the drain, never typed
+  run python3 -c "
+import json;d=json.load(open('$FLEET_HOME/queue/S1.json'))
+print(isinstance(d.get('expires_at'), int) and d['expires_at'] > d['queued_at'])"
+  [ "$output" = "True" ]
+}
+
+@test "TTL: a blocked target stages too, and is still never typed into" {
+  stub_osascript
+  idle_target blocked
+  "$BIN/fleet-send" issue || true
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 0 ] && [ -e "$(queued)" ] && [ ! -e "$OSA_LOG" ]
+}
+
+@test "TTL: a non-confirm verb carries no expiry, so it still waits indefinitely" {
+  stub_osascript
+  idle_target working
+  run "$BIN/fleet-send" test
+  [ "$status" -eq 0 ]
+  run python3 -c "
+import json;print('expires_at' in json.load(open('$FLEET_HOME/queue/S1.json')))"
+  [ "$output" = "False" ]
+}
+
+@test "TTL: an immediately deliverable confirm verb is still delivered, not staged" {
+  stub_osascript
+  idle_target idle
+  "$BIN/fleet-send" issue || true
+  run "$BIN/fleet-send" issue
+  [ "$status" -eq 0 ] && [ -e "$OSA_LOG" ] && [ ! -e "$(queued)" ]
 }
