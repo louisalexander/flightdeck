@@ -89,3 +89,41 @@ MD
   run "$BIN/fleet-verbs" show /etc/passwd
   [ "$status" -eq 1 ]
 }
+
+# --- the FORK verb ------------------------------------------------------
+
+@test "FORK resolves and names fleet-spawn by an absolute path" {
+  run "$BIN/fleet-verbs" show fork
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$ROOT/bin/fleet-spawn"* ]]
+}
+
+@test "FORK leaves no literal FLIGHTDECK_REPO token behind" {
+  run "$BIN/fleet-verbs" show fork
+  [[ "$output" != *"FLIGHTDECK_REPO"* ]]
+}
+
+@test "FORK is a confirm verb" {
+  # It files a public issue and starts an unsupervised agent. COMMIT,
+  # PUSH and PR carry confirm for less.
+  run "$BIN/fleet-verbs" flags fork
+  [ "$output" = "interrupt=false confirm=true" ]
+}
+
+@test "FORK tells the agent about --explain" {
+  run "$BIN/fleet-verbs" show fork
+  [[ "$output" == *"--explain"* ]]
+}
+
+@test "FORK permits doing nothing" {
+  # The most common bad fork is one where there was nothing to fork.
+  run "$BIN/fleet-verbs" show fork
+  [[ "$output" == *"do nothing"* ]]
+}
+
+@test "FORK tells the agent to return to what it was doing" {
+  # Without this it writes a plan and then starts executing it, which is
+  # the opposite of parking the work.
+  run "$BIN/fleet-verbs" show fork
+  [[ "$output" == *"Return to what you were doing"* ]]
+}
