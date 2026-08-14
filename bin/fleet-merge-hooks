@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Merges hooks/settings.snippet.json into a Claude settings.json in place.
+
+Usage: fleet-merge-hooks <target> <snippet> <backup> <repo>
+
+<target>  the live settings.json to update (already exists).
+<snippet> the hooks snippet with __PYTHON__/__REPO__ already substituted.
+<backup>  a copy of <target> taken and JSON-validated by the caller
+          BEFORE this script ran -- used both as the merge base and as
+          the restore source if verification fails.
+<repo>    this checkout's absolute path, used to recognise "our" hook
+          entries so re-running never duplicates them.
+
+Every top-level key OTHER than "hooks" is a plain recursive dict-merge
+(pre-existing values win unless the snippet supplies a nested dict to
+merge into them -- this snippet never touches non-hooks keys, so in
+practice every other key is untouched).
+
+"hooks" needs different treatment: hooks.<Event> is a JSON ARRAY, and a
+naive dict-merge replaces arrays wholesale. If any other plugin had
+already registered a hook on one of the five events flightdeck manages,
+a wholesale replace would silently delete it. So per event:
+  - every existing entry that is NOT ours survives untouched
+  - any existing entry that IS ours (a command referencing
+    <repo>/bin/fleet-emit) is dropped, so re-running replaces our own
+    entry instead of duplicating it
+  - our new entry is appended
+The array is never replaced wholesale.
+
+After writing, re-reads <target> and verifies:
+  1. it still parses as JSON,
+  2. every pre-existing top-level key other than "hooks" is byte-for-byte
+     unchanged,
+  3. every pre-existing NON-flightdeck hook entry, on every one of the
+     five events flightdeck manages, is still present,
+  4. flightdeck's own entry is present exactly once per event.
+On ANY failure, <target> is restored from <backup> before this script
+exits 1 -- a damaged or clobbered settings file is never left behind.
+"""
+import json
+import sys
+
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd")
+
+
+def is_ours(entry, marker):
+    if not isinstance(entry, dict):
+        return False
+    for h in entry.get("hooks", []) or []:
+        if isinstance(h, dict) and marker in (h.get("command") or ""):
+            return True
+    return False
+
+
+def merge_hooks(existing, incoming, marker):
+    """Per-event merge of hook arrays. Never replaces an array wholesale."""
+    out = dict(existing) if isinstance(existing, dict) else {}
+    for event, new_entries in incoming.items():
+        current = out.get(event, [])
+        if not isinstance(current, list):
+            current = []
+        kept = [e for e in current if not is_ours(e, marker)]
+        out[event] = kept + list(new_entries)
+    return out
+
+
+def merge_top(a, b, marker):
+    out = dict(a)
+    for k, v in b.items():
+        if k == "hooks" and isinstance(v, dict):
+            out[k] = merge_hooks(out.get(k, {}), v, marker)
+        elif k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = merge_top(out[k], v, marker)
+        else:
+            out[k] = v
+    return out
+
+
+def restore(target, backup_path):
+    with open(backup_path, encoding="utf-8") as bf:
+        content = bf.read()
+    with open(target, "w", encoding="utf-8") as tf:
+        tf.write(content)
+
+
+def main():
+    if len(sys.argv) != 5:
+        print("usage: fleet-merge-hooks <target> <snippet> <backup> <repo>", file=sys.stderr)
+        return 1
+
+    target, snippet_path, backup_path, repo = sys.argv[1:5]
+    marker = "{}/bin/fleet-emit".format(repo)
+
+    with open(backup_path, encoding="utf-8") as f:
+        original = json.load(f)
+    with open(snippet_path, encoding="utf-8") as f:
+        snippet = json.load(f)
+
+    original_hooks = original.get("hooks") if isinstance(original.get("hooks"), dict) else {}
+    third_party_before = {
+        event: [e for e in (original_hooks.get(event) or []) if not is_ours(e, marker)]
+        for event in HOOK_EVENTS
+    }
+
+    merged = merge_top(original, snippet, marker)
+
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)
+        f.write("\n")
+
+    def fail(msg):
+        print("ERROR: {}".format(msg), file=sys.stderr)
+        restore(target, backup_path)
+        print("restored {} from {}".format(target, backup_path), file=sys.stderr)
+        return 1
+
+    try:
+        with open(target, encoding="utf-8") as f:
+            written = json.load(f)
+    except Exception as err:
+        return fail("written settings.json failed to parse: {}".format(err))
+
+    for key, value in original.items():
+        if key == "hooks":
+            continue
+        if key not in written or written[key] != value:
+            return fail("pre-existing key {!r} changed or missing after merge".format(key))
+
+    written_hooks = written.get("hooks") if isinstance(written.get("hooks"), dict) else {}
+    for event, before in third_party_before.items():
+        after = [e for e in (written_hooks.get(event) or []) if not is_ours(e, marker)]
+        if after != before:
+            return fail("non-flightdeck hook entries on {!r} were disturbed".format(event))
+
+    for event in HOOK_EVENTS:
+        ours_after = [e for e in (written_hooks.get(event) or []) if is_ours(e, marker)]
+        if len(ours_after) != 1:
+            return fail("expected exactly one flightdeck entry on {!r}, found {}".format(
+                event, len(ours_after)))
+
+    kept_keys = len(original) - (1 if "hooks" in original else 0)
+    print("verified: {} pre-existing top-level key(s) intact; "
+          "third-party hook entries preserved on all 5 events; "
+          "flightdeck hook present exactly once per event".format(kept_keys))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -28,10 +28,15 @@ fi
 #
 #    This file governs every other Claude Code session running on this
 #    machine, so the merge is deliberately paranoid: back up first and
-#    verify the backup is readable JSON *before* writing anything, then
-#    after writing re-read the result and confirm every pre-existing
-#    top-level key survived byte-identical. Any failure at either gate
-#    restores the backup immediately rather than leaving a damaged file.
+#    verify the backup is readable JSON *before* writing anything. The
+#    actual merge (bin/fleet-merge-hooks) treats hooks.<Event> as an
+#    array that must be merged per-entry, never replaced wholesale --
+#    otherwise a pre-existing hook from a different plugin on the same
+#    event would be silently deleted. It re-reads the result and
+#    verifies every pre-existing top-level key AND every pre-existing
+#    non-flightdeck hook entry survived; on any failure it restores the
+#    backup itself before returning non-zero, so a damaged or clobbered
+#    file is never left behind.
 S="$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude"
 [ -f "$S" ] || printf '{}' >"$S"
@@ -48,56 +53,29 @@ printf '  backup written and verified: %s\n' "$BACKUP"
 sed -e "s|__PYTHON__|$PY|g" -e "s|__REPO__|$REPO|g" \
   "$REPO/hooks/settings.snippet.json" >"$FLEET_HOME/.snippet.json"
 
-if "$PY" - "$S" "$FLEET_HOME/.snippet.json" "$BACKUP" <<'PY'
-import json, sys
-
-target, snippet_path, backup_path = sys.argv[1], sys.argv[2], sys.argv[3]
-
-
-def merge(a, b):
-    out = dict(a)
-    for k, v in b.items():
-        out[k] = merge(out[k], v) if k in out and isinstance(out[k], dict) and isinstance(v, dict) else v
-    return out
-
-
-with open(backup_path, encoding="utf-8") as f:
-    original = json.load(f)
-with open(snippet_path, encoding="utf-8") as f:
-    snippet = json.load(f)
-
-merged = merge(original, snippet)
-
-with open(target, "w", encoding="utf-8") as f:
-    json.dump(merged, f, indent=2)
-    f.write("\n")
-
-# Verify before declaring success: re-read what was actually written, and
-# require every pre-existing top-level key to be present and unchanged.
-try:
-    with open(target, encoding="utf-8") as f:
-        written = json.load(f)
-except Exception as err:
-    print("ERROR: written settings.json failed to parse: {}".format(err), file=sys.stderr)
-    sys.exit(1)
-
-for key, value in original.items():
-    if key not in written or written[key] != value:
-        print("ERROR: pre-existing key {!r} changed or missing after merge".format(key),
-              file=sys.stderr)
-        sys.exit(1)
-
-print("  verified: {} pre-existing top-level key(s) intact".format(len(original)))
-PY
-then
+if "$PY" "$REPO/bin/fleet-merge-hooks" "$S" "$FLEET_HOME/.snippet.json" "$BACKUP" "$REPO"; then
   printf '  hooks merged into %s (backup at %s)\n' "$S" "$BACKUP"
 else
-  printf 'ERROR: settings merge failed verification -- restoring backup\n' >&2
-  cp "$BACKUP" "$S"
+  printf 'ERROR: settings merge failed verification -- restored from backup\n' >&2
   rm -f "$FLEET_HOME/.snippet.json"
   exit 1
 fi
 rm -f "$FLEET_HOME/.snippet.json"
+
+# Prune old backups, keeping the 5 most recent, so repeated debugging
+# runs on either machine don't litter ~/.claude with backups forever.
+"$PY" - "$HOME/.claude" <<'PY'
+import glob, os, sys
+
+keep = 5
+directory = sys.argv[1]
+pattern = os.path.join(directory, "settings.json.flightdeck-backup.*")
+backups = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+for old in backups[keep:]:
+    os.remove(old)
+if len(backups) > keep:
+    print("  pruned {} old backup(s), kept {} most recent".format(len(backups) - keep, keep))
+PY
 
 # 3. launchd reaper.
 LA="$HOME/Library/LaunchAgents"
