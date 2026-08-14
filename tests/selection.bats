@@ -59,3 +59,32 @@ focus() { printf '%s' "$FLEET_HOME/focus.json"; }
   "$BIN/fleet-press" 7 short
   [ ! -e "$(focus)" ]
 }
+
+@test "reconcile marks the selected session's slot as focused" {
+  cat > "$FLEET_HOME/sessions/S1.json" <<'JSON'
+{"session_id":"S1","state":"working","repo":"repo","branch":"main","title":"",
+ "cwd":"/tmp","host":"iterm2","iterm_session":"U1","pid":0,"ts":1}
+JSON
+  printf '{"session_id":"S1"}' > "$FLEET_HOME/focus.json"
+  "$BIN/fleet-reconcile"
+  run python3 -c "
+import json
+s=json.load(open('$FLEET_HOME/slots.json'))['slots']
+print([x['focused'] for x in s if x['session_id']=='S1'][0])"
+  [ "$output" = "True" ]
+}
+
+@test "every slot carries a focused field, so the plugin never sees undefined" {
+  "$BIN/fleet-reconcile"
+  run python3 -c "
+import json
+s=json.load(open('$FLEET_HOME/slots.json'))['slots']
+print(all('focused' in x for x in s), len(s))"
+  [ "$output" = "True 8" ]
+}
+
+@test "a selection naming a dead session is cleared, not left stale" {
+  printf '{"session_id":"GONE"}' > "$FLEET_HOME/focus.json"
+  "$BIN/fleet-reconcile"
+  [ ! -e "$FLEET_HOME/focus.json" ]
+}
