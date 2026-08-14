@@ -161,6 +161,27 @@ def run(event):
         notification_type = raw if isinstance(raw, str) else ""
         ignored_notification = notification_type in IGNORED_NOTIFICATION_TYPES
 
+    # Stop fires when the assistant turn ends, which is not the same thing as
+    # the agent awaiting the operator. A turn that ends with a backgrounded
+    # subagent, shell, workflow or monitor still in flight wakes itself back up
+    # with no operator action at all, so the session is still working. Painting
+    # it green would claim a completion that has not happened and invite the
+    # operator to hand an instruction to a busy agent -- the same failure the
+    # idle_prompt fix above exists to prevent, arriving by a different route.
+    #
+    # Claude Code hands us the distinction directly: background_tasks is
+    # documented as letting hooks "distinguish 'session is done' from 'session
+    # is paused waiting for background work to wake it'".
+    #
+    # Absence is read as "no information", not as "nothing in flight" -- the
+    # field is optional and older Claude Code omits it entirely, and there the
+    # historical done mapping is the best guess available. Only a non-empty
+    # list holds the key blue; anything else falls through to done.
+    background_tasks = payload.get("background_tasks")
+    in_flight = len(background_tasks) if isinstance(background_tasks, list) else 0
+    if event == "Stop" and in_flight:
+        state = "working"
+
     # Journal spine first, so removals are recorded too.
     record = {
         "event": event, "session_id": session_id, "repo": repo,
@@ -168,6 +189,8 @@ def run(event):
     }
     if notification_type:
         record["notification_type"] = notification_type
+    if in_flight:
+        record["background_tasks"] = in_flight
     try:
         fleetlib.append_jsonl(fleetlib.events_path(), record)
     except Exception as err:
