@@ -4,6 +4,7 @@
   "Author": "louisalexander",
   "Description": "Live annunciator row for running Claude Code agents.",
   "Category": "Flightdeck",
+  "CategoryIcon": "imgs/plugin",
   "Icon": "imgs/plugin",
   "URL": "https://github.com/louisalexander/flightdeck",
   "SDKVersion": 2,
