@@ -17,18 +17,31 @@ setup() {
   git -C "$REPO" commit -qm seed
   git -C "$REPO" checkout -q -b feat/origin-branch
 
-  # Never let a test reach the network or open a terminal.
+  # Never let a test reach the network or open a terminal. The osascript
+  # stub must RETURN A SESSION ID rather than merely succeeding: an empty
+  # stdout is how a real failed launch looks, so /usr/bin/true here would
+  # make every success-path test exercise the failure path instead.
   stub_gh "Show the splash on screen lock"
-  export FLEET_OSASCRIPT=/usr/bin/true
+  stub_osascript
 }
 
 # A stub `gh` that returns a fixed issue title as JSON.
+#
+# The title reaches the stub through a FILE, never through the stub's own
+# source. An earlier version interpolated it into an unquoted heredoc, so a
+# title containing $(...) was executed by bash when the stub ran -- the
+# fixture attacked itself, and the "no title reaches the launch command"
+# test could not have told a real leak from its own setup. It also emitted
+# invalid JSON for any title containing a double quote, which would have
+# made that test pass for the wrong reason.
 stub_gh() {
-  cat > "$BATS_TEST_TMPDIR/gh" <<SH
+  printf '%s' "$1" > "$BATS_TEST_TMPDIR/gh_title"
+  cat > "$BATS_TEST_TMPDIR/gh" <<'SH'
 #!/usr/bin/env bash
-printf '{"title":"%s"}' "$1"
+exec python3 -c 'import json,os,sys; sys.stdout.write(json.dumps({"title": open(os.environ["GH_TITLE_FILE"], encoding="utf-8").read()}))'
 SH
   chmod +x "$BATS_TEST_TMPDIR/gh"
+  export GH_TITLE_FILE="$BATS_TEST_TMPDIR/gh_title"
   export FLEET_GH="$BATS_TEST_TMPDIR/gh"
 }
 
@@ -156,4 +169,80 @@ wt() { printf '%s' "$REPO/.claude/worktrees/issue-7"; }
   run spawn 7
   [ "$status" -eq 1 ]
   [ ! -d "$REPO/.claude/worktrees" ]
+}
+
+# --- the iTerm2 tab -----------------------------------------------------
+
+# A recording stub for osascript. It logs the script it was handed and
+# prints a plausible session id, which is what the real one returns.
+stub_osascript() {
+  cat > "$BATS_TEST_TMPDIR/osa" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OSA_LOG"
+printf '11111111-2222-3333-4444-555555555555\n'
+SH
+  chmod +x "$BATS_TEST_TMPDIR/osa"
+  export FLEET_OSASCRIPT="$BATS_TEST_TMPDIR/osa"
+  export OSA_LOG="$BATS_TEST_TMPDIR/osa.log"
+}
+
+@test "TAB: a tab is opened for a successful spawn" {
+  stub_osascript
+  spawn 7
+  [ -e "$OSA_LOG" ]
+}
+
+@test "TAB: the launch command cds to the worktree and starts claude" {
+  stub_osascript
+  spawn 7
+  run cat "$OSA_LOG"
+  [[ "$output" == *"$REPO/.claude/worktrees/issue-7"* ]]
+  [[ "$output" == *"claude"* ]]
+}
+
+@test "TAB: the launch command names the issue number" {
+  stub_osascript
+  spawn 7
+  run cat "$OSA_LOG"
+  [[ "$output" == *"gh issue view 7"* ]]
+}
+
+@test "TAB: NO text from the issue title reaches the launch command" {
+  # This is spec decision 4 as an assertion rather than a principle. The
+  # title is chosen to be catastrophic if it were ever interpolated.
+  stub_osascript
+  stub_gh 'pwned $(touch /tmp/fleet-pwned) `id` "quoted"'
+  spawn 7
+  run cat "$OSA_LOG"
+  [[ "$output" != *"pwned"* ]]
+  [[ "$output" != *"touch"* ]]
+  [ ! -e /tmp/fleet-pwned ]
+}
+
+@test "TAB: the spawned session id is recorded" {
+  stub_osascript
+  spawn 7
+  run bash -c "cat '$FLEET_HOME'/spawns/*.json"
+  [[ "$output" == *"11111111-2222-3333-4444-555555555555"* ]]
+}
+
+@test "TAB: a second call focuses the recorded session instead of spawning" {
+  stub_osascript
+  spawn 7
+  : > "$OSA_LOG"
+  export FLEET_FOCUS_CMD="$BATS_TEST_TMPDIR/osa"
+  run spawn 7
+  [ "$status" -eq 0 ]
+  # No second tab was created.
+  run grep -c 'create tab' "$OSA_LOG"
+  [ "$output" = "0" ]
+}
+
+@test "TAB: no tab is opened when the worktree could not be created" {
+  stub_osascript
+  # An existing branch of the same name makes `git worktree add -b` fail.
+  git -C "$REPO" branch issue-7-show-the-splash-on-screen-lock
+  run spawn 7
+  [ "$status" -eq 1 ]
+  [ ! -e "$OSA_LOG" ]
 }
