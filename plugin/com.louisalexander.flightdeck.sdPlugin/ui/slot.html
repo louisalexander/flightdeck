@@ -2,16 +2,63 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+  <style>
+    body {
+      font: 13px -apple-system, "Helvetica Neue", Arial, sans-serif;
+      color: #d8d8d8; background: #2d2d2d; margin: 0; padding: 14px;
+    }
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    label { width: 74px; text-align: right; color: #9a9a9a; }
+    select { flex: 1; padding: 4px; background: #3d3d3d; color: #d8d8d8;
+             border: 1px solid #4a4a4a; border-radius: 4px; }
+    .note { color: #8a8a8a; line-height: 1.45; }
+    .note b { color: #b8b8b8; font-weight: 600; }
+  </style>
 </head>
 <body>
-  <sdpi-item label="Slot">
-    <sdpi-select setting="slotIndex" default="0">
+  <div class="row">
+    <label for="slot">Slot</label>
+    <select id="slot">
+      <option value="">Auto (use key position)</option>
       <option value="0">0</option><option value="1">1</option>
       <option value="2">2</option><option value="3">3</option>
       <option value="4">4</option><option value="5">5</option>
       <option value="6">6</option><option value="7">7</option>
-    </sdpi-select>
-  </sdpi-item>
+    </select>
+  </div>
+  <p class="note">
+    <b>Auto</b> uses the key's column, so dropping Fleet Slot across a row just
+    works. Pick a number only to override.
+  </p>
+
+<script>
+// Self-contained: no CDN. A property inspector that needs the network is a
+// property inspector that can silently render blank.
+let websocket = null, uuid = null, actionInfo = null;
+
+function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
+  uuid = inUUID;
+  actionInfo = JSON.parse(inActionInfo);
+  websocket = new WebSocket("ws://127.0.0.1:" + inPort);
+
+  websocket.onopen = function () {
+    websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+    const saved = (actionInfo.payload && actionInfo.payload.settings) || {};
+    const el = document.getElementById("slot");
+    el.value = (saved.slotIndex === undefined || saved.slotIndex === null)
+      ? "" : String(saved.slotIndex);
+  };
+}
+
+document.getElementById("slot").addEventListener("change", function (e) {
+  if (!websocket || websocket.readyState !== 1) return;
+  const raw = e.target.value;
+  // "" clears the override so the plugin falls back to key position.
+  const settings = raw === "" ? {} : { slotIndex: Number(raw) };
+  websocket.send(JSON.stringify({
+    event: "setSettings", context: uuid, payload: settings
+  }));
+});
+</script>
 </body>
 </html>

@@ -51,7 +51,7 @@ const EMPTY = (index: number): Slot => ({
 
 @action({ UUID: "com.louisalexander.flightdeck.slot" })
 export class FleetSlot extends SingletonAction<Settings> {
-  private visible = new Map<string, { ev: WillAppearEvent<Settings>; index: number }>();
+  private visible = new Map<string, { ev: WillAppearEvent<Settings>; index: number; autoIndex: number }>();
   private downAt = new Map<string, number>();
   private config: Config = loadConfig();
   private longPressMs = 800;
@@ -71,9 +71,36 @@ export class FleetSlot extends SingletonAction<Settings> {
     setInterval(() => this.repaintAll(), 1000);
   }
 
+  /**
+   * Which fleet slot a key shows.
+   *
+   * Defaults to the key's COLUMN, so dropping Fleet Slot across row 1 just
+   * works with no configuration. An explicit slotIndex setting overrides it.
+   *
+   * This matters because a Stream Deck property inspector does not persist a
+   * value until the user actively changes it — so every key left at its
+   * default saved `{}` and fell back to slot 0, making all eight keys show
+   * the same agent. Position is information we already have; asking the
+   * operator to retype it was the bug.
+   */
+  private autoIndexFor(ev: WillAppearEvent<Settings>): number {
+    const coords = (ev.payload as { coordinates?: { column?: number } }).coordinates;
+    const column = coords?.column;
+    return Number.isFinite(Number(column)) ? Number(column) : 0;
+  }
+
+  private resolveIndex(settings: Settings | undefined, autoIndex: number): number {
+    const explicit = settings?.slotIndex;
+    if (explicit !== undefined && explicit !== null && Number.isFinite(Number(explicit))) {
+      return Number(explicit);
+    }
+    return autoIndex;
+  }
+
   override onWillAppear(ev: WillAppearEvent<Settings>): void {
-    const index = Number(ev.payload.settings?.slotIndex ?? 0);
-    this.visible.set(ev.action.id, { ev, index });
+    const autoIndex = this.autoIndexFor(ev);
+    const index = this.resolveIndex(ev.payload.settings, autoIndex);
+    this.visible.set(ev.action.id, { ev, index, autoIndex });
     this.paint(ev, index);
   }
 
@@ -85,7 +112,14 @@ export class FleetSlot extends SingletonAction<Settings> {
   override onDidReceiveSettings(ev: DidReceiveSettingsEvent<Settings>): void {
     const entry = this.visible.get(ev.action.id);
     if (entry) {
-      entry.index = Number(ev.payload.settings?.slotIndex ?? 0);
+      // The key's position never changes, so reuse the index resolved at
+      // willAppear as the fallback rather than re-deriving coordinates here.
+      const explicit = ev.payload.settings?.slotIndex;
+      if (explicit !== undefined && explicit !== null && Number.isFinite(Number(explicit))) {
+        entry.index = Number(explicit);
+      } else {
+        entry.index = entry.autoIndex;
+      }
       this.paint(entry.ev, entry.index);
     }
   }
