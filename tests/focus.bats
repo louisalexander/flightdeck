@@ -30,3 +30,50 @@ setup() {
   run "$BIN/fleet-focus" pinned-app "NoSuchApp_flightdeck_test"
   [ "$status" -ne 0 ]
 }
+
+# --- UUID shape guard on the iterm2 branch ----------------------------------
+#
+# Stubs osascript on PATH so we can prove, by the absence/presence of a
+# marker file, whether fleet-focus ever invoked it.
+
+stub_osascript() {
+  STUB_DIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUB_DIR"
+  MARKER="$BATS_TEST_TMPDIR/osascript-invoked"
+  rm -f "$MARKER"
+  cat > "$STUB_DIR/osascript" <<STUB
+#!/usr/bin/env bash
+touch "$MARKER"
+exit 1
+STUB
+  chmod +x "$STUB_DIR/osascript"
+  export PATH="$STUB_DIR:$PATH"
+}
+
+@test "a target with an embedded quote and AppleScript fragment is rejected without invoking osascript" {
+  stub_osascript
+  run "$BIN/fleet-focus" iterm2 'x" then activate
+end tell
+tell application "System Events" to keystroke "pwned'
+  [ "$status" -eq 1 ]
+  [ ! -e "$MARKER" ]
+}
+
+@test "a plausible but malformed UUID is rejected without invoking osascript" {
+  stub_osascript
+  run "$BIN/fleet-focus" iterm2 "1234567-1234-1234-1234-123456789012"
+  [ "$status" -eq 1 ]
+  [ ! -e "$MARKER" ]
+
+  rm -f "$MARKER"
+  run "$BIN/fleet-focus" iterm2 "1234567g-1234-1234-1234-123456789012"
+  [ "$status" -eq 1 ]
+  [ ! -e "$MARKER" ]
+}
+
+@test "a well-formed but nonexistent UUID reaches osascript and returns 1" {
+  stub_osascript
+  run "$BIN/fleet-focus" iterm2 "00000000-0000-0000-0000-000000000000"
+  [ "$status" -eq 1 ]
+  [ -e "$MARKER" ]
+}

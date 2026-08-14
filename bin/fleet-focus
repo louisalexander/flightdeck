@@ -4,12 +4,20 @@
 iterm2 targets are session UUIDs; pinned-app targets are application names.
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleetlib  # noqa: E402
+
+# iTerm2 session ids are UUIDs: 8-4-4-4-12 hex, case-insensitive. The target
+# is interpolated into an AppleScript string literal below, so anything not
+# matching this shape is rejected before osascript is ever invoked.
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
 
 # Top-level `session id "..."` addressing errors with -1728, so walk the tree.
 ITERM_SCRIPT = '''
@@ -45,6 +53,9 @@ def main(argv):
 
     if host == "iterm2":
         if not target:
+            return 1
+        if not UUID_RE.match(target):
+            fleetlib.log("focus: rejected malformed iterm target {!r}".format(target))
             return 1
         proc = subprocess.run(["osascript", "-e", ITERM_SCRIPT.format(uuid=target)],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
