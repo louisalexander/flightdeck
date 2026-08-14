@@ -22,6 +22,16 @@ EVENT_STATES = {
     "SessionEnd": "__end__",
 }
 
+# These already prove the agent is no longer waiting on the operator (a
+# fresh prompt, a completed turn, or the session tearing down entirely),
+# so each one also clears any blocked-marker left by a prior Notification
+# -- belt and braces alongside the Resumed guard hook itself, so a marker
+# can never be orphaned even if that hook never fires for some reason. A
+# stale marker would make the PreToolUse guard pay for a python process
+# on every single tool call forever, which is the one way this fix could
+# become the problem it was meant to solve.
+MARKER_CLEARING_EVENTS = ("UserPromptSubmit", "Stop", "SessionEnd")
+
 
 PS_TIMEOUT_SECS = 2
 RECONCILE_TIMEOUT_SECS = 10
@@ -79,8 +89,9 @@ def find_agent_pid():
 
 
 def run(event):
+    is_resumed = event == "Resumed"
     state = EVENT_STATES.get(event)
-    if state is None:
+    if state is None and not is_resumed:
         fleetlib.log("emit: ignoring unknown event {!r}".format(event))
         return
 
@@ -122,17 +133,33 @@ def run(event):
         fleetlib.log("emit: could not append event: {}".format(err))
 
     target = fleetlib.sessions_dir() / "{}.json".format(session_id)
-    if state == "__end__":
+    if is_resumed:
+        # Only a genuine blocked -> working transition is real. A missing
+        # session (already reaped or ended) or one that is no longer
+        # blocked (a Stop or UserPromptSubmit already cleared it first)
+        # must never be resurrected or overwritten -- this is a no-op.
+        existing = fleetlib.read_json(target)
+        if isinstance(existing, dict) and existing.get("state") == "blocked":
+            existing["state"] = "working"
+            existing["ts"] = now
+            fleetlib.write_json_atomic(target, existing)
+        fleetlib.clear_blocked_marker(session_id)
+    elif state == "__end__":
         try:
             target.unlink()
         except Exception:
             pass
+        fleetlib.clear_blocked_marker(session_id)
     else:
         fleetlib.write_json_atomic(target, {
             "session_id": session_id, "state": state, "repo": repo,
             "branch": branch, "title": "", "cwd": cwd, "host": host,
             "iterm_session": iterm_uuid, "pid": find_agent_pid(), "ts": now,
         })
+        if state == "blocked":
+            fleetlib.create_blocked_marker(session_id)
+        elif event in MARKER_CLEARING_EVENTS:
+            fleetlib.clear_blocked_marker(session_id)
 
     if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
         try:

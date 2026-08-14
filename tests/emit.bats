@@ -18,6 +18,67 @@ field() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.arg
 @test "Notification maps to blocked" { emit Notification; [ "$(field state)" = "blocked" ]; }
 @test "Stop maps to done" { emit Stop; [ "$(field state)" = "done" ]; }
 
+# --- blocked-marker lifecycle (the PreToolUse Resumed guard) ---------------
+#
+# Notification creates a marker at $FLEET_HOME/blocked/<session_id> so the
+# guarded PreToolUse shell hook knows to pay for a python process and emit
+# Resumed. Every event that proves the agent is no longer waiting on the
+# operator -- UserPromptSubmit, Stop, SessionEnd, and Resumed itself -- must
+# clear that marker, so it can never be left orphaned (an orphaned marker
+# would make every future tool call in that session pay the python cost
+# forever).
+
+marker() { printf '%s' "$FLEET_HOME/blocked/S1"; }
+
+@test "Notification creates the blocked marker" {
+  emit Notification
+  [ -e "$(marker)" ]
+}
+
+@test "Resumed clears a blocked session to working and removes the marker" {
+  emit Notification
+  [ "$(field state)" = "blocked" ]
+  [ -e "$(marker)" ]
+
+  emit Resumed
+  [ "$(field state)" = "working" ]
+  [ ! -e "$(marker)" ]
+}
+
+@test "UserPromptSubmit removes a stale marker" {
+  emit Notification
+  [ -e "$(marker)" ]
+  emit UserPromptSubmit
+  [ ! -e "$(marker)" ]
+}
+
+@test "Stop removes a stale marker" {
+  emit Notification
+  [ -e "$(marker)" ]
+  emit Stop
+  [ ! -e "$(marker)" ]
+}
+
+@test "SessionEnd removes a stale marker" {
+  emit Notification
+  [ -e "$(marker)" ]
+  emit SessionEnd
+  [ ! -e "$(marker)" ]
+}
+
+@test "Resumed on a session that is NOT blocked changes nothing" {
+  emit SessionStart
+  [ "$(field state)" = "idle" ]
+  emit Resumed
+  [ "$(field state)" = "idle" ]
+}
+
+@test "Resumed for an unknown session is a silent no-op" {
+  run bash -c "printf '%s' '$PAYLOAD' | '$BIN/fleet-emit' Resumed"
+  [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$FLEET_HOME/sessions")" ]
+}
+
 @test "SessionEnd removes the session file" {
   emit SessionStart
   [ -f "$FLEET_HOME/sessions/S1.json" ]

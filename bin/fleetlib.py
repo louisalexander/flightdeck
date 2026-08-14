@@ -16,6 +16,12 @@ def fleet_home():
 def sessions_dir():
     return fleet_home() / "sessions"
 
+def blocked_dir():
+    return fleet_home() / "blocked"
+
+def blocked_marker_path(session_id):
+    return blocked_dir() / str(session_id)
+
 def slots_path():
     return fleet_home() / "slots.json"
 
@@ -81,6 +87,36 @@ def write_json_atomic(path, obj, indent=None):
         except Exception:
             pass
         raise
+
+def create_blocked_marker(session_id):
+    """Creates ~/.fleet/blocked/<session_id> (and the directory).
+
+    Best-effort, like `log`: this runs inside a live hook, so a failure
+    here (e.g. an unwritable FLEET_HOME) must never raise. The marker is
+    a pure existence check for the PreToolUse guard shell command -- its
+    content is irrelevant, an empty file is enough.
+    """
+    try:
+        path = blocked_marker_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+    except Exception:
+        pass
+
+def clear_blocked_marker(session_id):
+    """Removes the marker for `session_id`. A no-op if it is already gone.
+
+    Best-effort and idempotent: called from every event that can prove a
+    session is no longer waiting on the operator (UserPromptSubmit, Stop,
+    SessionEnd, Resumed), so a marker can never be orphaned even if one of
+    those callers races another or the marker was never created.
+    """
+    try:
+        blocked_marker_path(session_id).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 def append_jsonl(path, obj):
     """Appends one JSON line, safe under concurrent writers.

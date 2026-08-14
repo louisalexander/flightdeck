@@ -16,7 +16,7 @@ practice every other key is untouched).
 
 "hooks" needs different treatment: hooks.<Event> is a JSON ARRAY, and a
 naive dict-merge replaces arrays wholesale. If any other plugin had
-already registered a hook on one of the five events flightdeck manages,
+already registered a hook on one of the six events flightdeck manages,
 a wholesale replace would silently delete it. So per event:
   - every existing entry that is NOT ours survives untouched
   - any existing entry that IS ours is dropped, so re-running replaces
@@ -65,7 +65,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleetlib  # noqa: E402
 
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd")
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd",
+               "PreToolUse")
 MARKER = "/bin/fleet-emit"
 
 
@@ -191,7 +192,7 @@ def main():
 
     kept_keys = len(original) - (1 if "hooks" in original else 0)
     print("verified: {} pre-existing top-level key(s) intact; "
-          "third-party hook entries preserved on all 5 events; "
+          "third-party hook entries preserved on all 6 events; "
           "flightdeck hook present exactly once per event".format(kept_keys))
     return 0
 

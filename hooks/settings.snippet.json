@@ -4,6 +4,7 @@
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit UserPromptSubmit" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Notification" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Stop" }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionEnd" }] }]
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionEnd" }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "[ -n \"${CLAUDE_CODE_SESSION_ID:-}\" ] && test -e \"${FLEET_HOME:-$HOME/.fleet}/blocked/$CLAUDE_CODE_SESSION_ID\" && exec __PYTHON__ __REPO__/bin/fleet-emit Resumed; cat >/dev/null 2>&1" }] }]
   }
 }

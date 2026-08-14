@@ -64,7 +64,8 @@ def main():
     except Exception as err:
         bad("{} not writable: {}".format(home, err))
 
-    HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd")
+    HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd",
+                   "PreToolUse")
     settings = Path.home() / ".claude" / "settings.json"
     if settings.is_file():
         data = fleetlib.read_json(settings, {}) or {}
@@ -78,14 +79,14 @@ def main():
                 matching += 1
             elif "fleet-emit" in blob:
                 stale += 1
-        if matching == 5:
-            ok("all 5 hooks registered")
+        if matching == 6:
+            ok("all 6 hooks registered")
         elif stale:
             bad("{} hook(s) reference fleet-emit but not this checkout ({})".format(
                     stale, repo),
                 "stale install pointing at a different checkout; re-run ./install.sh from this repo")
         else:
-            bad("expected 5 fleet-emit hooks pointing at {}, found {}".format(repo, matching),
+            bad("expected 6 fleet-emit hooks pointing at {}, found {}".format(repo, matching),
                 "re-run ./install.sh")
     else:
         bad("{} not found".format(settings), "run claude once, then ./install.sh")
