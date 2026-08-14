@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Marks a slot's session failed (sticky red), or clears it back to idle.
+
+  fleet-fail <slot>
+  fleet-fail --clear <slot>
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+
+
+def main(argv):
+    args = argv[1:]
+    new_state = "failed"
+    if args and args[0] == "--clear":
+        new_state = "idle"
+        args = args[1:]
+    if not args:
+        return 0
+    try:
+        index = int(args[0])
+    except ValueError:
+        return 0
+
+    data = fleetlib.read_json(fleetlib.slots_path(), {}) or {}
+    matches = [s for s in data.get("slots", []) if s.get("index") == index]
+    if not matches or not matches[0].get("session_id"):
+        return 0
+
+    path = fleetlib.sessions_dir() / "{}.json".format(matches[0]["session_id"])
+    session = fleetlib.read_json(path)
+    if not isinstance(session, dict):
+        return 0
+    session["state"] = new_state
+    fleetlib.write_json_atomic(path, session)
+
+    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
+        try:
+            subprocess.run([sys.executable, str(HERE / "fleet-reconcile")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+        except subprocess.TimeoutExpired:
+            fleetlib.log("fleet-fail: fleet-reconcile timed out after 10s")
+        except OSError as err:
+            fleetlib.log("fleet-fail: fleet-reconcile failed: {!r}".format(err))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
