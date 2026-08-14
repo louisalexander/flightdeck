@@ -10,7 +10,23 @@ command path, and amber operator-attention node on a near-black console field.
 - `flightdeck-avatar.svg` / `.png` — square GitHub avatar
 - `flightdeck-lockup.svg` — horizontal mark and wordmark
 - `flightdeck-splash-800x480.svg` / `.png` — Stream Deck Silent Boot splash
+- `flightdeck-wallpaper-768x384.svg` / `.png` — Stream Deck XL sleep wallpaper
 - `flightdeck-social-preview-1280x640.svg` / `.png` — GitHub social preview
+
+## The wallpaper and the splash are one image
+
+`flightdeck-wallpaper-768x384` is the splash letterboxed to the XL panel: the
+800×480 source scaled 0.8 to 640×384 and centred, leaving a 64px Night bar on
+each side. That is exactly the geometry `plugin/src/splash.ts` applies per key,
+so the boot splash and the sleep wallpaper show the same artwork in the same
+place and the deck does not shift it when it falls asleep.
+
+Edit one and you must edit the other. `tools/check-wallpaper.mjs` composites
+the real per-key tiles and diffs them against the wallpaper to catch drift; it
+needs Google Chrome, so it is not part of the bats suite.
+
+The PNG is 1:1 with the XL panel's 768×384 physical pixels — there is nothing
+to gain from a 2× render, as the app would only scale it back down.
 
 ## Palette
 

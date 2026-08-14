@@ -237,7 +237,7 @@ and teach the convention it depends on:
 
 > If the tests fail, run `bin/fleet-fail`.
 > If you are unsure what that does or how flightdeck expects it to be called,
-> run `bin/fleet-verbs --explain` and follow what it tells you.
+> run `bin/fleet-fail --explain` and follow what it tells you.
 
 This matters more than it first appears. A prompt that assumes the agent already
 knows a local convention is brittle across repos and across model versions; one
