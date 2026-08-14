@@ -28,6 +28,28 @@ def slots_path():
 def armed_path():
     return fleet_home() / "armed.json"
 
+def focus_path():
+    return fleet_home() / "focus.json"
+
+
+def read_focus():
+    """The session id the operator last selected, or "" if none."""
+    data = read_json(focus_path())
+    if isinstance(data, dict) and isinstance(data.get("session_id"), str):
+        return data["session_id"]
+    return ""
+
+
+def write_focus(session_id):
+    write_json_atomic(focus_path(), {"session_id": session_id})
+
+
+def clear_focus():
+    try:
+        focus_path().unlink()
+    except Exception:
+        pass
+
 def events_path():
     return fleet_home() / "events.jsonl"
 
