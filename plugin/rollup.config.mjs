@@ -15,5 +15,10 @@ export default [
     input: "src/render.ts",
     output: { file: `${OUT}/render.js`, format: "es" },
     plugins: [typescript()]
+  },
+  {
+    input: "src/splash.ts",
+    output: { file: `${OUT}/splash.js`, format: "es" },
+    plugins: [typescript()]
   }
 ];

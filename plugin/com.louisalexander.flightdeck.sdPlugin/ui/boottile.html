@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {
+      font: 13px -apple-system, "Helvetica Neue", Arial, sans-serif;
+      color: #d8d8d8; background: #2d2d2d; margin: 0; padding: 14px;
+    }
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    label { width: 74px; text-align: right; color: #9a9a9a; }
+    select { flex: 1; padding: 4px; background: #3d3d3d; color: #d8d8d8;
+             border: 1px solid #4a4a4a; border-radius: 4px; }
+    .note { color: #8a8a8a; line-height: 1.45; }
+    .note b { color: #b8b8b8; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <label for="row">Row</label>
+    <select id="row">
+      <option value="">Auto (use key position)</option>
+      <option value="0">0</option><option value="1">1</option>
+      <option value="2">2</option><option value="3">3</option>
+    </select>
+  </div>
+  <div class="row">
+    <label for="col">Column</label>
+    <select id="col">
+      <option value="">Auto (use key position)</option>
+      <option value="0">0</option><option value="1">1</option>
+      <option value="2">2</option><option value="3">3</option>
+      <option value="4">4</option><option value="5">5</option>
+      <option value="6">6</option><option value="7">7</option>
+    </select>
+  </div>
+  <p class="note">
+    <b>Auto</b> uses the key's own position, so dropping Boot Tile across
+    the panel just works. Pick a value only to override. During Silent
+    Boot this key shows its slice of the startup splash, then settles to
+    solid black.
+  </p>
+
+<script>
+// Self-contained: no CDN. A property inspector that needs the network is a
+// property inspector that can silently render blank.
+let websocket = null, uuid = null, actionInfo = null;
+
+function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
+  uuid = inUUID;
+  actionInfo = JSON.parse(inActionInfo);
+  websocket = new WebSocket("ws://127.0.0.1:" + inPort);
+
+  websocket.onopen = function () {
+    websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+    const saved = (actionInfo.payload && actionInfo.payload.settings) || {};
+    const rowEl = document.getElementById("row");
+    const colEl = document.getElementById("col");
+    rowEl.value = (saved.row === undefined || saved.row === null) ? "" : String(saved.row);
+    colEl.value = (saved.col === undefined || saved.col === null) ? "" : String(saved.col);
+  };
+}
+
+function sendSettings() {
+  if (!websocket || websocket.readyState !== 1) return;
+  const rawRow = document.getElementById("row").value;
+  const rawCol = document.getElementById("col").value;
+  const settings = {};
+  // "" clears the override so the plugin falls back to key position.
+  if (rawRow !== "") settings.row = Number(rawRow);
+  if (rawCol !== "") settings.col = Number(rawCol);
+  websocket.send(JSON.stringify({
+    event: "setSettings", context: uuid, payload: settings
+  }));
+}
+
+document.getElementById("row").addEventListener("change", sendSettings);
+document.getElementById("col").addEventListener("change", sendSettings);
+</script>
+</body>
+</html>

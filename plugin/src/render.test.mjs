@@ -1,5 +1,9 @@
 import assert from "node:assert";
 import { renderSvg, toDataUri } from "../com.louisalexander.flightdeck.sdPlugin/bin/render.js";
+import {
+  tileViewBox, splashTileSvg, nightTileSvg, bootConfig, isBooting,
+  shouldShowSplash, renderBootTile, SPLASH_INNER, NIGHT
+} from "../com.louisalexander.flightdeck.sdPlugin/bin/splash.js";
 
 const cfg = {
   states: {
@@ -89,5 +93,126 @@ assert.doesNotThrow(() => renderSvg(slot, { states: null }, false), "config with
 assert.ok(renderSvg(slot, { states: null }, false).includes("<svg"), "config with states: null still renders a key");
 
 assert.ok(toDataUri("<svg/>").startsWith("data:image/svg+xml;base64,"), "data uri prefix");
+
+// --- Silent Boot splash -----------------------------------------------
+
+/**
+ * Minimal well-formedness check: every opening tag is matched by a closing
+ * tag (or is self-closing), properly nested, with no bare `<` or `>` inside
+ * attribute-free text. No XML parser dependency needed -- this only has to
+ * catch a broken tile, not validate arbitrary XML.
+ */
+function assertWellFormedXml(svg, msg) {
+  assert.ok(svg.startsWith("<svg") && svg.trimEnd().endsWith("</svg>"), `${msg}: has svg root`);
+  const tagRe = /<\/?[a-zA-Z][\w-]*(?:\s[^<>]*)?\/?>/g;
+  const stack = [];
+  let m;
+  let sawTag = false;
+  while ((m = tagRe.exec(svg))) {
+    sawTag = true;
+    const tag = m[0];
+    if (tag.endsWith("/>")) continue;                 // self-closing
+    if (tag.startsWith("</")) {
+      const name = tag.slice(2, -1).trim();
+      const top = stack.pop();
+      assert.strictEqual(top, name, `${msg}: mismatched close tag ${tag}`);
+    } else {
+      const name = tag.slice(1).split(/[\s>]/)[0];
+      stack.push(name);
+    }
+  }
+  assert.ok(sawTag, `${msg}: contains at least one element`);
+  assert.strictEqual(stack.length, 0, `${msg}: all tags closed (unclosed: ${stack.join(",")})`);
+  // No unescaped bare "<" or "&" outside of tags/entities -- would indicate
+  // the artwork or a coordinate leaked unescaped text into the document.
+  const withoutTags = svg.replace(tagRe, "");
+  assert.ok(!/[<>]/.test(withoutTags), `${msg}: no stray angle brackets outside tags`);
+}
+
+// Splash artwork embedded once, stripped of <svg>/<title>/<desc>.
+assert.ok(!SPLASH_INNER.includes("<svg"), "SPLASH_INNER has no outer svg wrapper");
+assert.ok(!SPLASH_INNER.includes("<title"), "SPLASH_INNER strips <title>");
+assert.ok(!SPLASH_INNER.includes("<desc"), "SPLASH_INNER strips <desc>");
+assert.ok(SPLASH_INNER.includes("FLIGHTDECK"), "SPLASH_INNER carries the wordmark");
+
+// viewBox math for all 32 keys (4 rows x 8 cols) on the Stream Deck XL.
+for (let row = 0; row < 4; row++) {
+  for (let col = 0; col < 8; col++) {
+    const vb = tileViewBox(row, col);
+    assert.strictEqual(vb.x, 120 * col - 80, `row ${row} col ${col}: x`);
+    assert.strictEqual(vb.y, 120 * row, `row ${row} col ${col}: y`);
+    assert.strictEqual(vb.w, 120, `row ${row} col ${col}: w`);
+    assert.strictEqual(vb.h, 120, `row ${row} col ${col}: h`);
+
+    const svg = splashTileSvg(row, col);
+    assert.ok(
+      svg.includes(`viewBox="${vb.x} ${vb.y} 120 120"`),
+      `row ${row} col ${col}: viewBox rendered into the tile SVG`
+    );
+    assertWellFormedXml(svg, `tile (${row},${col})`);
+  }
+}
+
+// Corner tiles (col 0 and col 7) fall partly outside the source's 0..800
+// range -- that's the letterbox, and it must still be valid, parseable SVG
+// that paints Night rather than leaving pixels transparent.
+for (const row of [0, 3]) {
+  for (const col of [0, 7]) {
+    const svg = splashTileSvg(row, col);
+    assertWellFormedXml(svg, `corner tile (${row},${col})`);
+    assert.ok(svg.includes(NIGHT), `corner tile (${row},${col}) paints Night under the letterbox`);
+  }
+}
+
+// Boot config: defaults, and degrades instead of throwing on garbage.
+assert.deepStrictEqual(bootConfig(undefined), { enabled: true, durationMs: 2000 }, "boot defaults");
+assert.deepStrictEqual(bootConfig({ states: {} }), { enabled: true, durationMs: 2000 }, "missing boot block defaults");
+assert.deepStrictEqual(
+  bootConfig({ states: {}, boot: { enabled: false, durationMs: 500 } }),
+  { enabled: false, durationMs: 500 },
+  "boot config read through"
+);
+assert.doesNotThrow(() => bootConfig({ states: {}, boot: "nonsense" }), "malformed boot block does not throw");
+assert.deepStrictEqual(
+  bootConfig({ states: {}, boot: "nonsense" }),
+  { enabled: true, durationMs: 2000 },
+  "malformed boot block degrades to defaults"
+);
+
+// A boot tile after expiry renders Night with no artwork at all.
+const enabledCfg = { enabled: true, durationMs: 2000 };
+assert.ok(isBooting(enabledCfg, 0), "boot window open at t=0");
+assert.ok(isBooting(enabledCfg, 1999), "boot window open just before expiry");
+assert.ok(!isBooting(enabledCfg, 2000), "boot window closed exactly at duration");
+assert.ok(!isBooting(enabledCfg, 5000), "boot window closed well after duration");
+
+const expired = renderBootTile(1, 3, enabledCfg, 5000);
+assertWellFormedXml(expired, "expired boot tile");
+assert.strictEqual(expired, nightTileSvg(), "expired boot tile is exactly the Night tile");
+assert.ok(expired.includes(NIGHT), "expired boot tile paints Night");
+assert.ok(!expired.includes("FLIGHTDECK"), "expired boot tile carries no wordmark");
+assert.ok(!expired.includes("viewBox"), "expired boot tile has no splash viewBox at all");
+
+const active = renderBootTile(1, 3, enabledCfg, 500);
+assert.ok(active.includes("FLIGHTDECK"), "active boot tile shows the splash");
+
+// Boot disabled in config produces no splash at all, even at t=0.
+const disabledCfg = { enabled: false, durationMs: 2000 };
+assert.ok(!isBooting(disabledCfg, 0), "disabled boot config never boots");
+const disabled = renderBootTile(0, 0, disabledCfg, 0);
+assert.strictEqual(disabled, nightTileSvg(), "disabled boot renders straight to Night");
+assert.ok(!disabled.includes("FLIGHTDECK"), "disabled boot never shows the wordmark");
+
+// The rule that outranks the splash: amber means operator attention, and a
+// boot tile must NEVER hide an agent that needs it. A `blocked` Fleet Slot
+// wins immediately, boot window or not.
+assert.ok(shouldShowSplash(enabledCfg, 0, "working"), "non-blocked state shows splash during boot");
+assert.ok(shouldShowSplash(enabledCfg, 0, "idle"), "idle also shows splash during boot");
+assert.ok(!shouldShowSplash(enabledCfg, 0, "blocked"), "blocked is NEVER overpainted by boot, even at t=0");
+assert.ok(!shouldShowSplash(enabledCfg, 1999, "blocked"), "blocked is NEVER overpainted, even just before expiry");
+assert.ok(!shouldShowSplash(disabledCfg, 0, "blocked"), "blocked stays live even when boot is disabled");
+assert.ok(!shouldShowSplash(enabledCfg, 5000, "working"), "no splash once the boot window has closed");
+
+assert.ok(toDataUri(splashTileSvg(0, 0)).startsWith("data:image/svg+xml;base64,"), "splash tile encodes as a data uri");
 
 console.log("render tests passed");

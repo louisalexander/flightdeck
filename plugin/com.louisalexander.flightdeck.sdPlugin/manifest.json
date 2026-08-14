@@ -21,6 +21,15 @@
       "PropertyInspectorPath": "ui/slot.html",
       "Controllers": ["Keypad"],
       "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
+    },
+    {
+      "Name": "Boot Tile",
+      "UUID": "com.louisalexander.flightdeck.boottile",
+      "Icon": "imgs/action",
+      "Tooltip": "Silent Boot splash filler for keys with no Fleet Slot",
+      "PropertyInspectorPath": "ui/boottile.html",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
     }
   ]
 }

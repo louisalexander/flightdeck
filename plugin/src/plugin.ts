@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { renderSvg, toDataUri } from "./render.js";
+import { bootConfig, shouldShowSplash, splashTileSvg, renderBootTile } from "./splash.js";
 import type { Slot, SlotsFile, Config } from "./types.js";
 
 const FLEET_HOME = join(homedir(), ".fleet");
@@ -15,7 +16,12 @@ const REPO = process.env.FLIGHTDECK_REPO ?? join(homedir(), "code", "flightdeck"
 const SLOTS_PATH = join(FLEET_HOME, "slots.json");
 const ARMED_PATH = join(FLEET_HOME, "armed.json");
 
+// One epoch shared by every key: the moment this plugin process started.
+// Silent Boot is a single panel-wide window, not a per-key timer.
+const BOOT_STARTED_AT = Date.now();
+
 type Settings = { slotIndex?: number };
+type BootTileSettings = { row?: number; col?: number };
 
 function readJson<T>(path: string): T | null {
   try {
@@ -41,7 +47,10 @@ function interpreter(): string {
 function loadConfig(): Config {
   const base = readJson<Config>(join(REPO, "config", "fleet.json"));
   const local = readJson<Partial<Config>>(join(REPO, "config", "fleet.local.json"));
-  return { states: { ...(base?.states ?? {}), ...(local?.states ?? {}) } };
+  return {
+    states: { ...(base?.states ?? {}), ...(local?.states ?? {}) },
+    boot: local?.boot ?? base?.boot
+  };
 }
 
 const EMPTY = (index: number): Slot => ({
@@ -152,10 +161,112 @@ export class FleetSlot extends SingletonAction<Settings> {
     const arm = readJson<{ index: number; expires: number }>(ARMED_PATH);
     const armed = !!arm && arm.index === index && Date.now() / 1000 < arm.expires;
 
+    // Silent Boot: during the boot window a Fleet Slot paints its own
+    // splash tile (row 0, its own physical column) instead of live state --
+    // UNLESS that live state is `blocked`. Amber means operator attention;
+    // chrome must never hide an agent that needs one. `entry.autoIndex` is
+    // the key's physical column (see autoIndexFor), independent of any
+    // slotIndex override, so the splash lines up with its Boot Tile
+    // neighbours regardless of which slot this key is configured to show.
+    const entry = this.visible.get(ev.action.id);
+    const column = entry?.autoIndex ?? index;
+    const boot = bootConfig(this.config);
+    const elapsed = Date.now() - BOOT_STARTED_AT;
+    const showSplash = shouldShowSplash(boot, elapsed, slot.state);
+
     ev.action.setTitle("");            // the SVG carries all text
-    ev.action.setImage(toDataUri(renderSvg(slot, this.config, armed)));
+    const svg = showSplash ? splashTileSvg(0, column) : renderSvg(slot, this.config, armed);
+    ev.action.setImage(toDataUri(svg));
+  }
+}
+
+type BootTileEntry = { ev: WillAppearEvent<BootTileSettings>; row: number; col: number };
+
+/**
+ * Silent Boot filler: a key with no Fleet Slot assigned still shows the
+ * brand artwork at startup, then settles to solid Night once the boot
+ * window closes -- so absence still looks like absence, not a stuck splash.
+ */
+@action({ UUID: "com.louisalexander.flightdeck.boottile" })
+export class BootTile extends SingletonAction<BootTileSettings> {
+  private visible = new Map<string, BootTileEntry>();
+  private config: Config = loadConfig();
+
+  constructor() {
+    super();
+    try {
+      watch(join(REPO, "config"), () => {
+        this.config = loadConfig();
+      });
+    } catch (err) {
+      streamDeck.logger.error(`cannot watch ${join(REPO, "config")}: ${String(err)}`);
+    }
+    // Safety net so the tile transitions off the splash once the boot
+    // window closes, even without a settings change or a config edit.
+    setInterval(() => this.repaintAll(), 1000);
+  }
+
+  /**
+   * Row/col default from the key's own physical position -- exactly like
+   * Fleet Slot's `slotIndex` -- because a property inspector never
+   * persists a value until actively changed, so leaving every key at its
+   * saved-empty default must not collapse all 32 tiles onto one window.
+   */
+  private autoRowColFor(ev: WillAppearEvent<BootTileSettings>): { row: number; col: number } {
+    const coords = (ev.payload as { coordinates?: { row?: number; column?: number } }).coordinates;
+    const row = Number.isFinite(Number(coords?.row)) ? Number(coords?.row) : 0;
+    const col = Number.isFinite(Number(coords?.column)) ? Number(coords?.column) : 0;
+    return { row, col };
+  }
+
+  private resolveRowCol(
+    settings: BootTileSettings | undefined,
+    auto: { row: number; col: number }
+  ): { row: number; col: number } {
+    const row =
+      settings?.row !== undefined && settings?.row !== null && Number.isFinite(Number(settings.row))
+        ? Number(settings.row)
+        : auto.row;
+    const col =
+      settings?.col !== undefined && settings?.col !== null && Number.isFinite(Number(settings.col))
+        ? Number(settings.col)
+        : auto.col;
+    return { row, col };
+  }
+
+  override onWillAppear(ev: WillAppearEvent<BootTileSettings>): void {
+    const auto = this.autoRowColFor(ev);
+    const { row, col } = this.resolveRowCol(ev.payload.settings, auto);
+    this.visible.set(ev.action.id, { ev, row, col });
+    this.paint(ev, row, col);
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<BootTileSettings>): void {
+    this.visible.delete(ev.action.id);
+  }
+
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<BootTileSettings>): void {
+    const entry = this.visible.get(ev.action.id);
+    if (!entry) return;
+    const auto = { row: entry.row, col: entry.col };
+    const { row, col } = this.resolveRowCol(ev.payload.settings, auto);
+    entry.row = row;
+    entry.col = col;
+    this.paint(entry.ev, row, col);
+  }
+
+  private repaintAll(): void {
+    for (const { ev, row, col } of this.visible.values()) this.paint(ev, row, col);
+  }
+
+  private paint(ev: WillAppearEvent<BootTileSettings>, row: number, col: number): void {
+    const boot = bootConfig(this.config);
+    const elapsed = Date.now() - BOOT_STARTED_AT;
+    ev.action.setTitle("");
+    ev.action.setImage(toDataUri(renderBootTile(row, col, boot, elapsed)));
   }
 }
 
 streamDeck.actions.registerAction(new FleetSlot());
+streamDeck.actions.registerAction(new BootTile());
 streamDeck.connect();

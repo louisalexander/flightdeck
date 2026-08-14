@@ -19,4 +19,6 @@ export type StateStyle = {
   textColor: string;
 };
 
-export type Config = { states: Record<string, StateStyle> };
+export type BootConfig = { enabled: boolean; durationMs: number };
+
+export type Config = { states: Record<string, StateStyle>; boot?: BootConfig };
