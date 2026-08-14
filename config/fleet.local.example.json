@@ -1,6 +1,11 @@
 {
-  "pins": {
-    "7": { "host": "pinned-app", "app": "ChatGPT", "label_top": "ask", "label_bottom": "ChatGPT" }
-  },
-  "journal": { "vault": "/Users/pk/Documents/Obsidian Vaults/Vault 101" }
+  "pins": {},
+  "journal": { "vault": "" },
+  "renderers": [],
+
+  "_docs": {
+    "pins": "Reserve a key for a non-agent destination. A pinned slot is NEVER auto-assigned, so each pin reduces agent capacity by one. Shape: {\"7\": {\"host\": \"pinned-app\", \"app\": \"ChatGPT\", \"label_top\": \"ask\", \"label_bottom\": \"ChatGPT\"}}",
+    "journal.vault": "Absolute path to an Obsidian vault. Reserved for the journal exporter; unused in v1.",
+    "renderers": "Absolute paths to executables that receive the fleet snapshot on stdin. Each is bounded at 3s and may not break reconcile."
+  }
 }
