@@ -77,3 +77,35 @@ tell application "System Events" to keystroke "pwned'
   [ "$status" -eq 1 ]
   [ -e "$MARKER" ]
 }
+
+@test "a well-formed UUID with a trailing newline is rejected without invoking osascript" {
+  stub_osascript
+  run "$BIN/fleet-focus" iterm2 $'00000000-0000-0000-0000-000000000000\n'
+  [ "$status" -eq 1 ]
+  [ ! -e "$MARKER" ]
+}
+
+# --- bounded subprocess timeout on the iterm2 osascript call ----------------
+#
+# Genuinely exercises the timeout branch (a stub that sleeps well past the
+# 5s bound) and times the whole invocation, the same approach used for the
+# wedged-ps test in tests/emit.bats, rather than asserting the timeout
+# value by inspection.
+
+@test "a wedged osascript does not hang fleet-focus; it returns promptly with non-zero exit" {
+  STUB_DIR="$BATS_TEST_TMPDIR/wedged-stub"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/osascript" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$STUB_DIR/osascript"
+
+  start=$(date +%s)
+  run env PATH="$STUB_DIR:$PATH" "$BIN/fleet-focus" iterm2 "00000000-0000-0000-0000-000000000000"
+  end=$(date +%s)
+  elapsed=$((end - start))
+
+  [ "$status" -ne 0 ]
+  [ "$elapsed" -lt 10 ]
+}
