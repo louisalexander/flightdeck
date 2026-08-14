@@ -40,3 +40,38 @@ PY
   run "$BIN/fleet-reap"; [ "$status" -eq 0 ]
   run "$BIN/fleet-reap"; [ "$status" -eq 0 ]
 }
+
+# --- bounded subprocess timeout on the fleet-reconcile call -----------------
+#
+# fleet-reap is the launchd job firing every 15s (timings.reaperSeconds), so
+# an unbounded fleet-reconcile call is worse than most: invocations would
+# pile up indefinitely rather than just stalling one press. fleet-reconcile
+# is resolved relative to fleet-reap's own directory, so (mirroring the
+# equivalent test in tests/emit.bats) a full copy of fleet-reap plus a
+# symlink to the real fleetlib.py is staged in a scratch bin alongside a
+# stub fleet-reconcile that sleeps well past the 10s timeout. This
+# genuinely exercises the timeout branch rather than asserting the timeout
+# value by inspection.
+
+@test "a wedged fleet-reconcile does not hang fleet-reap; it still exits 0 promptly" {
+  FAKEBIN="$BATS_TEST_TMPDIR/fakereapbin"
+  mkdir -p "$FAKEBIN"
+  cp "$BIN/fleet-reap" "$FAKEBIN/fleet-reap"
+  chmod +x "$FAKEBIN/fleet-reap"
+  ln -s "$BIN/fleetlib.py" "$FAKEBIN/fleetlib.py"
+  cat > "$FAKEBIN/fleet-reconcile" <<'PY'
+#!/usr/bin/env python3
+import time
+time.sleep(30)
+PY
+  chmod +x "$FAKEBIN/fleet-reconcile"
+
+  unset FLEET_SKIP_RECONCILE
+  start=$(date +%s)
+  run "$FAKEBIN/fleet-reap"
+  end=$(date +%s)
+  elapsed=$((end - start))
+
+  [ "$status" -eq 0 ]
+  [ "$elapsed" -lt 15 ]
+}

@@ -124,3 +124,53 @@ SH
   [ "$elapsed" -lt 15 ]
   ! armed_exists
 }
+
+# --- atomic claim of the arm marker -----------------------------------------
+#
+# The arm marker used to be cleared with a plain read-then-unlink, which is
+# racy: two near-simultaneous presses on the same slot could both read the
+# same live arm before either unlinked it, and both invoke the kill command.
+# claim_arm() now renames armed.json to a unique armed.claim.<pid>.json with
+# os.replace() -- an atomic operation -- and treats a successful rename as
+# sole ownership. Exactly one process can win that rename; the loser's
+# os.replace() finds the source already gone (FileNotFoundError) and must
+# behave as if no arm existed at all.
+
+@test "arm-then-confirm fires the kill exactly once; a repeat confirm attempt does not fire again" {
+  FLEET_NOW=1000 "$BIN/fleet-press" 0 long
+  FLEET_NOW=1002 "$BIN/fleet-press" 0 short
+  FLEET_NOW=1002 "$BIN/fleet-press" 0 short
+  [ "$(calls | grep -c '^kill ')" -eq 1 ]
+  ! armed_exists
+}
+
+@test "a stale armed.claim.*.json left behind by a crashed process does not cause a later press to fire" {
+  # Simulates a process that won a claim (renamed armed.json to its own
+  # claim file) and then crashed before firing or cleaning up, leaving
+  # only the claim file on disk -- no armed.json. A later press must never
+  # consult stray claim files; with no live armed.json it is simply unarmed.
+  cat >"$BATS_TEST_TMPDIR/armed.claim.99999.json" <<'JSON'
+{"index":0,"expires":9999999999}
+JSON
+  FLEET_NOW=1000 "$BIN/fleet-press" 0 short
+  [ "$(calls)" = "focus iterm2 U-1" ]
+  [ "$(calls | grep -c '^kill ')" -eq 0 ]
+  [ -e "$BATS_TEST_TMPDIR/armed.claim.99999.json" ]
+}
+
+@test "a losing claim (arm already taken by a concurrent presser) never fires" {
+  FLEET_NOW=1000 "$BIN/fleet-press" 0 long
+  armed_exists
+
+  # Simulate a second, concurrent presser winning the race first: it
+  # atomically renames armed.json to its own claim file exactly as
+  # claim_arm() does, before our press gets there. Our press's own
+  # os.replace() then finds the source already gone -- the same
+  # FileNotFoundError a true race loser would see -- and must fall back to
+  # ordinary short-press behaviour rather than firing the kill.
+  mv "$BATS_TEST_TMPDIR/armed.json" "$BATS_TEST_TMPDIR/armed.claim.424242.json"
+
+  FLEET_NOW=1002 "$BIN/fleet-press" 0 short
+  [ "$(calls)" = "focus iterm2 U-1" ]
+  [ "$(calls | grep -c '^kill ')" -eq 0 ]
+}

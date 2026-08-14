@@ -51,6 +51,38 @@ def now():
     return int(override) if override else int(time.time())
 
 
+def claim_arm():
+    """Atomically claims the arm marker, if any live one exists.
+
+    Two near-simultaneous presses on the same slot must not both fire the
+    kill command. A plain read-then-unlink is racy: both processes could
+    read the same live arm before either unlinks it. Instead, rename
+    armed.json to a unique per-pid sibling with os.replace() -- an atomic
+    operation -- and treat a successful rename as sole ownership of that
+    arm. Exactly one process can win; the loser's os.replace() finds the
+    source already gone and raises FileNotFoundError, and must behave as
+    if no arm existed at all (fall through to focus, never fire).
+
+    The claimed file is always removed before returning, on every path
+    (arm missing, expired, or for a different index), so a crash between
+    the rename and the delete is the only way a stray
+    armed.claim.<pid>.json can be left on disk -- and such a stray file is
+    never looked at by any later press, so it is inert.
+    """
+    claim_path = fleetlib.armed_path().parent / "armed.claim.{}.json".format(os.getpid())
+    try:
+        os.replace(str(fleetlib.armed_path()), str(claim_path))
+    except OSError:
+        return None                    # lost the race, or nothing to claim
+    try:
+        return fleetlib.read_json(claim_path)
+    finally:
+        try:
+            claim_path.unlink()
+        except Exception:
+            pass
+
+
 def main(argv):
     if len(argv) < 2:
         return 0
@@ -71,13 +103,13 @@ def main(argv):
     focus_cmd = os.environ.get("FLEET_FOCUS_CMD") or str(HERE / "fleet-focus")
     kill_cmd = os.environ.get("FLEET_KILL_CMD") or str(HERE / "fleet-kill")
 
-    # Read the arm marker, then clear it. Any press disarms; whether it
-    # FIRES is decided below.
-    arm = fleetlib.read_json(fleetlib.armed_path())
-    try:
-        fleetlib.armed_path().unlink()
-    except Exception:
-        pass
+    # Atomically claim (and thereby clear) the arm marker. Any press that
+    # reaches this point disarms; whether it then FIRES is decided below.
+    # (A press that fails slot resolution above -- unknown index or an
+    # empty slot -- returns before this point and leaves a live arm
+    # untouched; that's fine, because firing is still gated on the index
+    # matching, so a stale arm on a *different* slot can never fire here.)
+    arm = claim_arm()
 
     armed_live = (isinstance(arm, dict)
                   and isinstance(arm.get("expires"), int)
