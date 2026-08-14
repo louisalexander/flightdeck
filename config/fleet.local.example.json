@@ -6,7 +6,7 @@
   "renderers": [],
   "_docs": {
     "pins": "Reserve a key for a non-agent destination. A pinned slot is NEVER auto-assigned, so each pin reduces agent capacity by one. Shape: {\"7\": {\"host\": \"pinned-app\", \"app\": \"ChatGPT\", \"label_top\": \"ask\", \"label_bottom\": \"ChatGPT\"}}",
-    "journal.vault": "Absolute path to an Obsidian vault. Reserved for the journal exporter; unused in v1.",
+    "journal.vault": "Absolute path to the Obsidian vault the NOTE verb journals into. Read by nobody at runtime -- the Obsidian MCP server holds the path it actually writes to, and the verb prompt names only the vault id. This records which vault that is, so the two cannot drift apart unnoticed. See config/verb-overrides/note-obsidian.md.",
     "renderers": "Absolute paths to executables that receive the fleet snapshot as JSON on stdin. Each is bounded at RENDERER_TIMEOUT_SECS (see bin/fleet-reconcile; currently 1s, sized against the 1.5s SessionEnd hook budget) and none may break reconcile."
   }
 }

@@ -183,6 +183,48 @@ templated from issue titles, CI output, branch names, or model output.
 A pinned slot is declared in local config and is **never auto-assigned** —
 so each pin permanently reduces fleet capacity by one agent.
 
+### Verbs
+
+A Row 2 key stages a verb against the selected agent. A verb is a markdown
+file — frontmatter for the flags the dispatcher needs, body for the prompt
+the agent receives — resolved by [`bin/fleet-verbs`](bin/fleet-verbs).
+`$FLEET_HOME/verbs/<id>.md` wins over the shipped
+[`config/verbs/<id>.md`](config/verbs) **per verb**, so overriding one
+doesn't mean maintaining copies of the rest.
+
+Everything shipped in `config/verbs` is dependency-free: it assumes a shell,
+a git checkout, and nothing else. Prompts that depend on a particular
+machine's setup live in [`config/verb-overrides`](config/verb-overrides) —
+git-tracked so they don't rot, but installed by hand because they can't be
+right by default.
+
+### NOTE and Obsidian
+
+NOTE summarises the session and journals it. The shipped verb writes the
+summary wherever it can and says so plainly when it can't journal at all —
+losing the only copy is the one outcome worth designing against.
+
+The recommended setup is a **dedicated flightdeck vault** reached over an
+Obsidian MCP server. The reason is scoping, not taste: an MCP server pointed
+at a general-purpose vault hands every agent in the fleet write access to
+whatever else lives there. A vault that holds only flightdeck material makes
+broad access to it unremarkable.
+
+```sh
+claude mcp add --scope user obsidian -- \
+  npx -y obsidian-mcp serve --vault "flightdeck=/absolute/path/to/vault"
+cp config/verb-overrides/note-obsidian.md ~/.fleet/verbs/note.md
+```
+
+User scope, because fleet agents run in whatever repo they were started in,
+not in this one. The override names the vault by **id**, never by path — the
+server holds the path, and `journal.vault` in local config records which
+vault that is so the two can't drift apart unnoticed.
+
+With no Obsidian server configured, the override refuses rather than
+improvising a path on disk, and the shipped verb prints the summary to the
+terminal instead. Neither one guesses at a vault.
+
 ### Renderers
 
 `renderers` in local config lists absolute paths to executables. Each
