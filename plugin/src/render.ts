@@ -20,25 +20,37 @@ function esc(text: string): string {
  * lines anchored near the bottom. No chrome.
  */
 export function renderSvg(slot: Slot, cfg: Config, armed: boolean): string {
+  const states = (cfg && typeof cfg.states === "object" && cfg.states) || {};
   const style: StateStyle = armed
-    ? cfg.states["armed"] ?? FALLBACK
-    : cfg.states[slot.state] ?? FALLBACK;
+    ? (states as Record<string, StateStyle>)["armed"] ?? FALLBACK
+    : (states as Record<string, StateStyle>)[slot.state] ?? FALLBACK;
+
+  const color = esc(style.color);
+  const glyphColor = esc(style.glyphColor);
+  const textColor = esc(style.textColor);
 
   const drawGlyph = GLYPHS[style.glyph] ?? GLYPHS["none"];
-  const glyph = `<g transform="translate(8,8)">${drawGlyph(style.glyphColor)}</g>`;
+  const glyph = `<g transform="translate(8,8)">${drawGlyph(glyphColor)}</g>`;
 
   const top = armed ? "" : esc((slot.label_top ?? "").toUpperCase());
   const bottom = armed ? "CONFIRM?" : esc(slot.label_bottom ?? "");
 
+  const topText = top
+    ? `<text x="72" y="103" text-anchor="middle" font-family="Helvetica,Arial" ` +
+      `font-size="17" font-weight="600" letter-spacing="0.6" ` +
+      `fill="${textColor}" fill-opacity="0.72">${top}</text>`
+    : "";
+  const bottomText = bottom
+    ? `<text x="72" y="128" text-anchor="middle" font-family="Helvetica,Arial" ` +
+      `font-size="23" font-weight="700" fill="${textColor}">${bottom}</text>`
+    : "";
+
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">',
-    `<rect width="144" height="144" fill="${style.color}"/>`,
+    `<rect width="144" height="144" fill="${color}"/>`,
     glyph,
-    `<text x="72" y="103" text-anchor="middle" font-family="Helvetica,Arial" `,
-    `font-size="17" font-weight="600" letter-spacing="0.6" `,
-    `fill="${style.textColor}" fill-opacity="0.72">${top}</text>`,
-    `<text x="72" y="128" text-anchor="middle" font-family="Helvetica,Arial" `,
-    `font-size="23" font-weight="700" fill="${style.textColor}">${bottom}</text>`,
+    topText,
+    bottomText,
     "</svg>"
   ].join("");
 }
