@@ -144,3 +144,19 @@ json.dump(d, open(p,'w'))"
   run "$BIN/fleet-send" test
   [ "$status" -eq 1 ] && [ ! -e "$OSA_LOG" ]
 }
+
+@test "WAKE: an osascript failure refuses loudly rather than losing the verb silently" {
+  cat > "$BATS_TEST_TMPDIR/osa_fail" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$BATS_TEST_TMPDIR/osa_fail"
+  export FLEET_OSASCRIPT="$BATS_TEST_TMPDIR/osa_fail"
+  idle_session idle
+  run "$BIN/fleet-send" test
+  # Non-zero exit (so the key flashes refused, not queued) and not
+  # restaged (so a later drain cannot double-deliver a verb that
+  # osascript may have already typed before failing for some other
+  # reason).
+  [ "$status" -eq 1 ] && [ ! -e "$(queued)" ]
+}

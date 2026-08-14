@@ -44,20 +44,26 @@ UUID_RE = re.compile(
 # Addressed by UUID across every window and tab, never by window index.
 # `window 1` is whichever window is frontmost, which during design was
 # observed delivering a message into the wrong session entirely. Mirrors
-# bin/fleet-focus's tree-walk for the same reason.
+# bin/fleet-focus's tree-walk for the same reason -- including the `error`
+# clause on not-found, which fleet-focus's ITERM_SCRIPT already has and
+# this originally lacked: without it, a closed window or a denied
+# Automation permission would return "not found"/"" into DEVNULL and
+# osascript would still exit 0, so the caller below can distinguish
+# "delivered" from "did not deliver" only if this script actually fails.
 WAKE_SCRIPT = '''
 tell application "iTerm2"
+  set found to false
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
         if (id of s) is "{uuid}" then
           tell s to write text "{line}"
-          return "sent"
+          set found to true
         end if
       end repeat
     end repeat
   end repeat
-  return "not found"
+  if not found then error "no such session" number 1
 end tell
 '''
 
@@ -124,11 +130,27 @@ def main(argv):
     # already took would send the agent to a file no longer queued.
     claimed = fleetlib.claim_queue(session_id)
     if not isinstance(claimed, dict):
+        # The Stop drain won the race between the staging write above and
+        # this claim -- not a failure, but worth a log line, since this is
+        # exactly the quiet path a lost-wake bug would otherwise hide in.
+        fleetlib.log("send: {} already claimed (likely the Stop drain); "
+                      "nothing to wake".format(session_id))
         return 0
 
     uuid = session.get("iterm_session", "")
     if not UUID_RE.match(uuid or ""):
         fleetlib.log("send: refusing malformed iterm target {!r}".format(uuid))
+        return 1
+
+    verb_path = claimed.get("verb_path", "")
+    # A newline or carriage return would break out of the AppleScript
+    # string literal below and produce a syntax error inside osascript --
+    # not a shell (no shell is involved, so this is not RCE), but still
+    # cheaper to reject explicitly here than to reason about it once it's
+    # embedded in a script string. fleet-verbs's verb_file() already blocks
+    # "/", "\\", "." and ".." in a verb id, but not embedded whitespace.
+    if "\n" in verb_path or "\r" in verb_path:
+        fleetlib.log("send: refusing verb_path with embedded newline: {!r}".format(verb_path))
         return 1
 
     # The pointer, never the prompt. The verb's instruction can run to
@@ -137,15 +159,38 @@ def main(argv):
     # failure mode benign -- a pointer colliding with a half-typed draft
     # in the operator's prompt box yields something the agent queries,
     # rather than a mangled multi-paragraph instruction it half-obeys.
-    line = "Read {} and follow it.".format(claimed.get("verb_path", ""))
-    script = WAKE_SCRIPT.format(uuid=uuid, line=line.replace('"', '\\"'))
+    line = "Read {} and follow it.".format(verb_path)
+    # Backslash first, then quote -- the standard order. Quoting first
+    # would double-escape the backslashes just inserted by the quote step.
+    # Correctness here does not depend on verb_path being backslash-free;
+    # it holds even though it also happens to be true today (verb_file()
+    # rejects "\\" in a verb id).
+    escaped = line.replace("\\", "\\\\").replace('"', '\\"')
+    script = WAKE_SCRIPT.format(uuid=uuid, line=escaped)
     osa = os.environ.get("FLEET_OSASCRIPT") or "osascript"
     try:
-        subprocess.run([osa, "-e", script],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=OSASCRIPT_TIMEOUT_SECS)
+        proc = subprocess.run([osa, "-e", script],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=OSASCRIPT_TIMEOUT_SECS)
     except Exception as err:
         fleetlib.log("send: wake failed for {}: {}".format(session_id, err))
+        return 1
+
+    if proc.returncode != 0:
+        # The claim already fired, so the entry is gone from the queue
+        # either way -- the only question is whether to restage it here.
+        # Deliberately NOT restaged: osascript can fail (window closed,
+        # Automation permission denied, target vanished mid-script) either
+        # before or after the `write text` line actually lands, and there
+        # is no way to tell which from here. Restaging on a failure that
+        # was actually a post-write failure would risk the Stop drain
+        # delivering the same verb again later -- harmless for TEST or
+        # DOUBT, but a duplicate issue/push/PR for ISSUE, PUSH or PR. A
+        # visible refusal the operator can retry is strictly better than a
+        # silent double-delivery, so the verb is lost here -- but lost
+        # loudly: the key flashes refused and this is logged.
+        fleetlib.log("send: wake did not reach session {} (osascript exited {})"
+                      .format(session_id, proc.returncode))
         return 1
     return 0
 
