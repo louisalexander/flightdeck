@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionStart" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit UserPromptSubmit" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Notification" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Stop" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionEnd" }] }]
+  }
+}

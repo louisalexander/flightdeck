@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Verifies every moving part. Exits 0 only if all checks pass."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
+failed = False
+
+
+def ok(message):
+    print("  {}ok{}    {}".format(GREEN, RESET, message))
+
+
+def bad(message, hint=""):
+    global failed
+    failed = True
+    print("  {}FAIL{}  {}".format(RED, RESET, message))
+    if hint:
+        print("        {}".format(hint))
+
+
+def have(name):
+    """`command -v` is a shell builtin and is not executable via subprocess."""
+    return subprocess.run(["/usr/bin/which", name], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def main():
+    print("flightdeck doctor\n")
+
+    print("  python: {} ({})".format(sys.executable, sys.version.split()[0]))
+    if sys.version_info < (3, 9):
+        bad("python is older than 3.9")
+    else:
+        ok("python version supported")
+
+    pinned = fleetlib.fleet_home() / "interpreter"
+    if pinned.is_file():
+        path = pinned.read_text().strip()
+        if Path(path).exists():
+            ok("interpreter pinned to {}".format(path))
+        else:
+            bad("pinned interpreter {} does not exist".format(path), "re-run ./install.sh")
+    else:
+        bad("no pinned interpreter", "re-run ./install.sh")
+
+    for tool in ("git", "osascript", "node"):
+        ok("{} present".format(tool)) if have(tool) else bad("{} missing".format(tool))
+
+    home = fleetlib.fleet_home()
+    try:
+        fleetlib.sessions_dir().mkdir(parents=True, exist_ok=True)
+        probe = home / ".probe"
+        probe.write_text("x")
+        probe.unlink()
+        ok("{} writable".format(home))
+    except Exception as err:
+        bad("{} not writable: {}".format(home, err))
+
+    settings = Path.home() / ".claude" / "settings.json"
+    if settings.is_file():
+        data = fleetlib.read_json(settings, {}) or {}
+        count = sum(1 for v in (data.get("hooks") or {}).values()
+                    if "fleet-emit" in json.dumps(v))
+        if count == 5:
+            ok("all 5 hooks registered")
+        else:
+            bad("expected 5 fleet-emit hooks, found {}".format(count), "re-run ./install.sh")
+    else:
+        bad("{} not found".format(settings), "run claude once, then ./install.sh")
+
+    listing = subprocess.run(["launchctl", "list"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL)
+    if b"flightdeck.reaper" in listing.stdout:
+        ok("launchd reaper loaded")
+    else:
+        bad("launchd reaper not loaded", "re-run ./install.sh")
+
+    plugin = (Path.home() / "Library" / "Application Support" / "com.elgato.StreamDeck"
+              / "Plugins" / "com.louisalexander.flightdeck.sdPlugin")
+    if plugin.exists():
+        ok("plugin installed")
+    else:
+        bad("plugin not installed", "re-run ./install.sh")
+    if (plugin / "bin" / "plugin.js").is_file():
+        ok("plugin is built")
+    else:
+        bad("plugin not built", "cd plugin && npm run build")
+
+    running = subprocess.run(["pgrep", "-f", "Elgato Stream Deck"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if running.returncode == 0:
+        ok("Stream Deck app running")
+    else:
+        bad("Stream Deck app not running")
+
+    # The classic silent killer: automation permission denied with no dialog.
+    probe = subprocess.run(
+        ["osascript", "-e", 'tell application "iTerm2" to count of windows'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if probe.returncode == 0:
+        ok("iTerm2 automation permitted")
+    else:
+        bad("iTerm2 automation DENIED or iTerm2 not running",
+            "System Settings > Privacy & Security > Automation, then re-run")
+
+    print("\n" + ("all checks passed" if not failed else "some checks failed"))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
