@@ -28,6 +28,74 @@ def slots_path():
 def armed_path():
     return fleet_home() / "armed.json"
 
+def focus_path():
+    return fleet_home() / "focus.json"
+
+
+def read_focus():
+    """The session id the operator last selected, or "" if none."""
+    data = read_json(focus_path())
+    if isinstance(data, dict) and isinstance(data.get("session_id"), str):
+        return data["session_id"]
+    return ""
+
+
+def write_focus(session_id):
+    write_json_atomic(focus_path(), {"session_id": session_id})
+
+
+def clear_focus():
+    try:
+        focus_path().unlink()
+    except Exception:
+        pass
+
+
+def queue_dir():
+    return fleet_home() / "queue"
+
+
+def queue_path(session_id):
+    return queue_dir() / "{}.json".format(session_id)
+
+
+def claim_queue(session_id):
+    """Takes sole ownership of a queued verb, or returns None.
+
+    Two deliverers can race for the same entry: the Stop drain when a turn
+    ends, and fleet-send's wake path when it judged the session idle. A
+    read-then-delete is racy -- both could read the same entry before
+    either removed it, and the verb would run twice. Rename to a unique
+    per-pid sibling with os.replace() instead, which is atomic: exactly one
+    caller can win, and the loser's rename finds the source already gone.
+
+    This is the same ownership trick fleet-press's claim_arm() uses for
+    arming, for the same reason -- but the failure mode on the far side is
+    not the same. If this process dies between the successful os.replace()
+    and the `finally: claim.unlink()` below (including a crash inside
+    read_json), the renamed file <session>.claim.<pid>.json is orphaned on
+    disk and nothing ever revisits it. Ownership is still exactly-once --
+    no other caller will ever see or claim that file -- but the operator's
+    staged verb is then silently and permanently lost, not merely
+    delayed. claim_arm()'s "a stray file is inert" justification does NOT
+    transfer here: an inert confirmation window is cheap to lose, a queued
+    verb is not. Recovery of orphaned claim files is not implemented; this
+    is a known gap, tracked separately, not something this function papers
+    over.
+    """
+    claim = queue_dir() / "{}.claim.{}.json".format(session_id, os.getpid())
+    try:
+        os.replace(str(queue_path(session_id)), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
 def events_path():
     return fleet_home() / "events.jsonl"
 
@@ -80,6 +148,29 @@ def write_json_atomic(path, obj, indent=None):
             else:
                 json.dump(obj, handle, indent=indent)
                 handle.write("\n")
+        os.replace(tmp, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
+def write_text_atomic(path, text):
+    """Writes plain text via a temp file in the same directory, then
+    os.replace() -- the same pattern as write_json_atomic, extended to
+    non-JSON output. A reader can never observe a partially written file.
+
+    Used by fleet-verbs to materialise a token-substituted copy of a verb
+    prompt on disk (see REPO_TOKEN in bin/fleet-verbs): the file fleet-send
+    points an idle agent at must never be read mid-write.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
         os.replace(tmp, str(path))
     except Exception:
         try:

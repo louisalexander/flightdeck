@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 BIN = str(Path(__file__).resolve().parent.parent / "bin")
@@ -290,6 +291,53 @@ class GitTests(unittest.TestCase):
             self.assertNotEqual(rc, 0)
             self.assertEqual(out, "")
             self.assertLess(elapsed, 10)
+
+
+class ClaimQueueTests(unittest.TestCase):
+    """Direct coverage for fleetlib.claim_queue's ownership guarantee.
+
+    tests/send.bats has a "CLAIM: exactly one claimant wins" test, but it
+    calls claim_queue() twice sequentially in one process -- that proves
+    the already-claimed case (a second call finds the source gone), not an
+    actual race between simultaneous claimants. The real guarantee rests
+    on os.replace() being atomic at the OS level, which is exactly the
+    kind of thing that "works" under a sequential test and still has a
+    race in it. Use a ThreadPoolExecutor so multiple threads genuinely
+    call os.replace() against the same source path at once (the GIL does
+    not serialize the underlying syscall), repeated across several rounds
+    to make a false pass from lucky scheduling unlikely, while staying
+    fast enough not to slow the suite.
+    """
+
+    def test_concurrent_claimants_exactly_one_wins_across_many_rounds(self):
+        workers, rounds = 8, 25
+        with tempfile.TemporaryDirectory() as d:
+            old_home = os.environ.get("FLEET_HOME")
+            os.environ["FLEET_HOME"] = d
+            try:
+                for round_num in range(rounds):
+                    session_id = "S{}".format(round_num)
+                    fleetlib.write_json_atomic(
+                        fleetlib.queue_path(session_id),
+                        {"verb": "test", "prompt": "p", "verb_path": "",
+                         "queued_at": 1})
+
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        results = list(pool.map(
+                            lambda _: fleetlib.claim_queue(session_id),
+                            range(workers)))
+
+                    winners = [r for r in results if r is not None]
+                    self.assertEqual(
+                        len(winners), 1,
+                        "round {}: expected exactly one winner, got {}".format(
+                            round_num, len(winners)))
+                    self.assertFalse(fleetlib.queue_path(session_id).exists())
+            finally:
+                if old_home is None:
+                    os.environ.pop("FLEET_HOME", None)
+                else:
+                    os.environ["FLEET_HOME"] = old_home
 
 
 if __name__ == "__main__":

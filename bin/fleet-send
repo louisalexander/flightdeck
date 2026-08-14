@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Stages a Row 2 verb for the selected session.
+
+A press never types a prompt. It writes the verb to
+$FLEET_HOME/queue/<session_id>.json and lets delivery happen on whichever
+path suits the session's state -- the Stop drain for a working session, a
+wake for an idle one. Staging is the whole contract; delivery is separate
+and can fail without losing the operator's intent.
+
+Not a hook: unlike fleet-emit this may exit non-zero, because a press that
+could not be staged must be visible rather than silently dropped.
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import fleetlib  # noqa: E402
+
+VERBS_TIMEOUT_SECS = 5
+OSASCRIPT_TIMEOUT_SECS = 10
+
+# Written as an allow-list on purpose: only these states get woken by a
+# keystroke. `working` and `blocked` -- and any state added later -- fall
+# through to staging only and wait for the Stop drain. This matters most
+# for `blocked`: that session is sitting on a permission prompt, and
+# typing into it would answer the dialog with junk text instead of
+# delivering a verb. An unfamiliar state must default to not-woken, which
+# an allow-list gives for free and a deny-list would not.
+WAKEABLE_STATES = ("idle", "done")
+
+# iTerm2 session ids are UUIDs: 8-4-4-4-12 hex, case-insensitive. The target
+# is interpolated into an AppleScript string literal below, so anything not
+# matching this shape is rejected before osascript is ever invoked.
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\Z"
+)
+
+# Addressed by UUID across every window and tab, never by window index.
+# `window 1` is whichever window is frontmost, which during design was
+# observed delivering a message into the wrong session entirely. Mirrors
+# bin/fleet-focus's tree-walk for the same reason -- including the `error`
+# clause on not-found, which fleet-focus's ITERM_SCRIPT already has and
+# this originally lacked: without it, a closed window or a denied
+# Automation permission would return "not found"/"" into DEVNULL and
+# osascript would still exit 0, so the caller below can distinguish
+# "delivered" from "did not deliver" only if this script actually fails.
+WAKE_SCRIPT = '''
+tell application "iTerm2"
+  set found to false
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{uuid}" then
+          tell s to write text "{line}"
+          -- `write text` leaves the pointer sitting UNSENT in Claude
+          -- Code's prompt box -- it does not self-submit. Verified live:
+          -- the pointer appeared in the terminal and just sat there while
+          -- fleet-send happily returned 0. A second `write text` of an
+          -- empty line to the SAME session, addressed by the same UUID,
+          -- submits it -- also verified live. Do not "simplify" this away
+          -- by deleting it as redundant: it looks redundant only until you
+          -- watch the first write fail to submit. It stays addressed by
+          -- session UUID rather than switching to a `System Events`
+          -- keystroke for the Return, so it cannot land in the wrong
+          -- window -- a real failure observed earlier in this project.
+          tell s to write text ""
+          set found to true
+        end if
+      end repeat
+    end repeat
+  end repeat
+  if not found then error "no such session" number 1
+end tell
+'''
+
+
+def resolve_verb(verb_id):
+    """(prompt, verb_path) for a verb id, or (None, None).
+
+    verb_path comes from `fleet-verbs resolved-path`, NOT `fleet-verbs
+    path`. `path` reports the source markdown, which for a verb like
+    `test` still contains the literal "{{FLIGHTDECK_REPO}}" token --
+    `show` substitutes it into the returned STRING, but the wake path
+    below never reads that string, it points an idle agent at a file on
+    disk. `resolved-path` materialises a copy with the same substitution
+    already applied and reports that file instead, so the file this
+    verb_path names is always safe for an agent to open directly.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "fleet-verbs"), "show", verb_id],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=VERBS_TIMEOUT_SECS)
+        if proc.returncode != 0:
+            return None, None
+        prompt = proc.stdout.decode("utf-8", "replace").strip()
+        path = subprocess.run(
+            [sys.executable, str(HERE / "fleet-verbs"), "resolved-path", verb_id],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=VERBS_TIMEOUT_SECS).stdout.decode("utf-8", "replace").strip()
+        return (prompt or None), (path or None)
+    except Exception as err:
+        fleetlib.log("send: could not resolve verb {}: {}".format(verb_id, err))
+        return None, None
+
+
+def resolve_flags(verb_id):
+    """{'interrupt': bool, 'confirm': bool} for a verb id, {} on any failure.
+
+    Failure yields an empty dict rather than raising, matching
+    resolve_verb()'s style -- the caller below treats a missing 'confirm'
+    key as False, i.e. fails OPEN. That is deliberate: `fleet-verbs flags`
+    reads the exact same file resolve_verb() just read successfully
+    moments earlier, so a failure here on a verb that already resolved a
+    prompt is a freak race (the file vanishing mid-press) rather than the
+    normal case, and refusing every verb whenever this one subprocess call
+    hiccups would be a worse failure mode than the rare miss it's meant to
+    catch.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "fleet-verbs"), "flags", verb_id],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=VERBS_TIMEOUT_SECS)
+        if proc.returncode != 0:
+            return {}
+        text = proc.stdout.decode("utf-8", "replace").strip()
+        flags = {}
+        for part in text.split():
+            key, sep, value = part.partition("=")
+            if sep:
+                flags[key] = value.strip().lower() == "true"
+        return flags
+    except Exception as err:
+        fleetlib.log("send: could not resolve flags for {}: {}".format(verb_id, err))
+        return {}
+
+
+def main(argv):
+    if len(argv) < 2:
+        fleetlib.log("send: no verb given; usage: fleet-send <verb>")
+        return 1
+    verb_id = argv[1]
+
+    session_id = fleetlib.read_focus()
+    if not session_id:
+        fleetlib.log("send: no selection; press a Row 1 key first")
+        return 1
+
+    session = fleetlib.read_json(fleetlib.sessions_dir() / "{}.json".format(session_id))
+    if not isinstance(session, dict):
+        fleetlib.log("send: selected session {} is gone".format(session_id))
+        return 1
+
+    prompt, verb_path = resolve_verb(verb_id)
+    if not prompt:
+        fleetlib.log("send: no such verb: {}".format(verb_id))
+        return 1
+
+    # PLACEHOLDER until real arm/confirm enforcement lands (see the design
+    # doc's four-layer defence against a stale queued verb firing at an
+    # agent nobody is watching -- layer 1, "confirm: true verbs never
+    # queue", is the only layer this slice actually implements; TTL,
+    # queued-visibility and press-to-cancel are all deferred). Until
+    # arm/confirm is real, refusing outright is the only safe behaviour:
+    # queueing a confirm verb and delivering it later -- via the Stop
+    # drain, or worse, a wake minutes after the press -- lets an
+    # outward-facing action (ISSUE, PUSH, PR, COMMIT) fire unsupervised,
+    # which is exactly what confirm:true exists to prevent.
+    if resolve_flags(verb_id).get("confirm"):
+        fleetlib.log("send: refusing {} -- confirm:true has no enforcement yet"
+                      .format(verb_id))
+        return 1
+
+    fleetlib.write_json_atomic(fleetlib.queue_path(session_id), {
+        "verb": verb_id,
+        "prompt": prompt,
+        "verb_path": verb_path or "",
+        "queued_at": int(time.time()),
+    })
+
+    # Not wakeable (working, blocked, or anything unrecognised): staging is
+    # the whole contract here. The Stop drain serves `working`, and for
+    # `blocked` a keystroke now would answer a live permission prompt with
+    # junk -- it must wait for the operator and the Stop that follows.
+    if session.get("state") not in WAKEABLE_STATES:
+        return 0
+
+    # Validate BEFORE claiming, never after. claim_queue() takes
+    # destructive ownership of the staged entry -- a successful claim with
+    # no way to un-claim. Every session not launched under iTerm2 has
+    # iterm_session=="" (fleet-emit sets it that way when ITERM_SESSION_ID
+    # is unset), so if these checks ran after the claim, every retry
+    # against such a session would destroy the freshly staged entry: the
+    # verb itself, and also the Stop-drain fallback that would otherwise
+    # have delivered it once the session next stopped. Refusing here,
+    # before the claim, leaves the entry intact for a later Stop to drain
+    # normally.
+    uuid = session.get("iterm_session", "")
+    if not UUID_RE.match(uuid or ""):
+        fleetlib.log("send: refusing malformed iterm target {!r}".format(uuid))
+        return 1
+
+    # A newline or carriage return would break out of the AppleScript
+    # string literal below and produce a syntax error inside osascript --
+    # not a shell (no shell is involved, so this is not RCE), but still
+    # cheaper to reject explicitly here than to reason about it once it's
+    # embedded in a script string. fleet-verbs's verb_file() already blocks
+    # "/", "\\", "." and ".." in a verb id, but not embedded whitespace.
+    #
+    # Emptiness is checked here too: resolve_verb() does not check
+    # `fleet-verbs path`'s exit status, so a verb whose `show` succeeded
+    # but whose `path` subprocess call failed or printed nothing (e.g. the
+    # verb file vanishing in the gap between those two separate calls)
+    # yields verb_path=None here. Typing that would produce the bare,
+    # nonsensical "Read  and follow it." -- reject it the same way as a
+    # malformed path rather than typing it.
+    if not verb_path or "\n" in verb_path or "\r" in verb_path:
+        fleetlib.log("send: refusing unusable verb_path: {!r}".format(verb_path))
+        return 1
+
+    # An idle/done session will never fire a Stop, so a keystroke is the
+    # only wake. Claim first: if the Stop drain won the race between the
+    # write above and here, claim_queue() returns None and there is
+    # nothing left to deliver -- typing a pointer for an entry the drain
+    # already took would send the agent to a file no longer queued.
+    claimed = fleetlib.claim_queue(session_id)
+    if not isinstance(claimed, dict):
+        # The Stop drain won the race between the staging write above and
+        # this claim -- not a failure, but worth a log line, since this is
+        # exactly the quiet path a lost-wake bug would otherwise hide in.
+        fleetlib.log("send: {} already claimed (likely the Stop drain); "
+                      "nothing to wake".format(session_id))
+        return 0
+
+    verb_path = claimed.get("verb_path", "")
+
+    # The pointer, never the prompt. The verb's instruction can run to
+    # several paragraphs; it stays in the file. Typing only a short line
+    # naming the file keeps this fragile channel small, and makes the
+    # failure mode benign -- a pointer colliding with a half-typed draft
+    # in the operator's prompt box yields something the agent queries,
+    # rather than a mangled multi-paragraph instruction it half-obeys.
+    line = "Read {} and follow it.".format(verb_path)
+    # Backslash first, then quote -- the standard order. Quoting first
+    # would double-escape the backslashes just inserted by the quote step.
+    # Correctness here does not depend on verb_path being backslash-free;
+    # it holds even though it also happens to be true today (verb_file()
+    # rejects "\\" in a verb id).
+    escaped = line.replace("\\", "\\\\").replace('"', '\\"')
+    script = WAKE_SCRIPT.format(uuid=uuid, line=escaped)
+    osa = os.environ.get("FLEET_OSASCRIPT") or "osascript"
+    try:
+        proc = subprocess.run([osa, "-e", script],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=OSASCRIPT_TIMEOUT_SECS)
+    except Exception as err:
+        fleetlib.log("send: wake failed for {}: {}".format(session_id, err))
+        return 1
+
+    if proc.returncode != 0:
+        # The claim already fired, so the entry is gone from the queue
+        # either way -- the only question is whether to restage it here.
+        # Deliberately NOT restaged: osascript can fail (window closed,
+        # Automation permission denied, target vanished mid-script) either
+        # before or after the `write text` line actually lands, and there
+        # is no way to tell which from here. Restaging on a failure that
+        # was actually a post-write failure would risk the Stop drain
+        # delivering the same verb again later -- harmless for TEST or
+        # DOUBT, but a duplicate issue/push/PR for ISSUE, PUSH or PR. A
+        # visible refusal the operator can retry is strictly better than a
+        # silent double-delivery, so the verb is lost here -- but lost
+        # loudly: the key flashes refused and this is logged.
+        fleetlib.log("send: wake did not reach session {} (osascript exited {})"
+                      .format(session_id, proc.returncode))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as err:
+        fleetlib.log("send: unhandled error: {}".format(err))
+        sys.exit(1)

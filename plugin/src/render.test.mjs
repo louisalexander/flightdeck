@@ -215,4 +215,57 @@ assert.ok(!shouldShowSplash(enabledCfg, 5000, "working"), "no splash once the bo
 
 assert.ok(toDataUri(splashTileSvg(0, 0)).startsWith("data:image/svg+xml;base64,"), "splash tile encodes as a data uri");
 
+// --- focus border -------------------------------------------------------
+const focusedSlot = {
+  index: 0, state: "working", label_top: "REPO", label_bottom: "main",
+  session_id: "S1", host: "iterm2", iterm_session: "U1", cwd: "/tmp", app: "",
+  focused: true
+};
+const unfocusedSlot = { ...focusedSlot, focused: false };
+
+assert.ok(
+  renderSvg(focusedSlot, cfg, false).includes('stroke="#FFFFFF"'),
+  "a focused slot draws a white border"
+);
+assert.ok(
+  !renderSvg(unfocusedSlot, cfg, false).includes('stroke="#FFFFFF"'),
+  "an unfocused slot draws no border"
+);
+// The lifecycle fill must still dominate: a thin stroke, not a thick frame.
+{
+  const m = renderSvg(focusedSlot, cfg, false).match(/stroke-width="(\d+)"/);
+  assert.ok(m && Number(m[1]) <= 6, "focus border stays thin (<=6 at 144px)");
+}
+// Selection is not a state. The background must be the lifecycle colour.
+assert.ok(
+  renderSvg(focusedSlot, cfg, false).includes('fill="#1256A3"'),
+  "focus does not replace the lifecycle background"
+);
+// Arming owns the whole key; a stale selection must not draw over it.
+assert.ok(
+  !renderSvg(focusedSlot, cfg, true).includes('stroke="#FFFFFF"'),
+  "an armed key shows no focus border"
+);
+
+// --- Row 2 command keys -------------------------------------------------
+import { renderCommandSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/command.js";
+
+const plain = renderCommandSvg("TEST", "");
+assert.ok(plain.includes("TEST"), "the verb label is drawn");
+// Row 1 owns saturation because state is the information. Row 2 must not
+// compete, and must never borrow the one colour that means "come look".
+assert.ok(!plain.includes("#F5A623"), "a command key is never amber");
+assert.ok(!plain.includes("#1256A3"), "a command key is never lifecycle blue");
+assert.ok(!plain.includes("#238636"), "a command key is never lifecycle green");
+
+// Queued and delivered are different moments; the key must not claim success
+// at press time, so queued gets its own restrained treatment.
+const queued = renderCommandSvg("TEST", "queued");
+assert.notStrictEqual(queued, plain, "queued looks different from idle");
+assert.ok(!queued.includes("#F5A623"), "queued is not amber either");
+
+const refused = renderCommandSvg("TEST", "refused");
+assert.notStrictEqual(refused, plain, "refused looks different from idle");
+assert.notStrictEqual(refused, queued, "refused is distinguishable from queued");
+
 console.log("render tests passed");

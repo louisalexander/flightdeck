@@ -61,6 +61,12 @@ IGNORED_NOTIFICATION_TYPES = frozenset((
 PS_TIMEOUT_SECS = 2
 RECONCILE_TIMEOUT_SECS = 10
 
+# A Stop that carries a queued verb is not the end of the turn: blocking it
+# hands the verb to the agent, which then continues. The slot must therefore
+# read `working`, not `done` -- painting it green for the instant before the
+# agent picks up would be a lie the operator could actually catch.
+DRAIN_STATE = "working"
+
 
 def _ps_field(pid, field):
     """Runs `ps -o <field>= -p <pid>` and returns the stripped single-field value.
@@ -195,17 +201,56 @@ def run(event):
             target.unlink()
         except Exception:
             pass
+        # A resumed Claude Code session keeps its session id, so a queue
+        # entry staged before SessionEnd would otherwise survive to be
+        # delivered by the first Stop after resume -- a verb pressed
+        # against a session that has since ended firing into whatever
+        # session comes back under the same id. The spec requires this.
+        try:
+            fleetlib.queue_path(session_id).unlink()
+        except Exception:
+            pass
         fleetlib.clear_blocked_marker(session_id)
     else:
+        drained = None
+        # Deliberately NOT gated on stop_hook_active. The old gate skipped
+        # the drain whenever a Stop was itself the result of a previous
+        # block continuing -- which strands a verb queued during that
+        # continuation forever: press TEST while working, Stop blocks,
+        # the agent continues into TEST, a second verb gets pressed during
+        # that continuation, and the Stop ending IT carries
+        # stop_hook_active -- so the gate skipped it, the session went
+        # idle, and no further Stop was ever coming to retry it. The
+        # no-re-fire guarantee this gate was defending does not need it:
+        # drain-before-block (claim, THEN emit the block) is what actually
+        # prevents a loop, because the entry is gone before the block is
+        # returned -- an empty queue on the very next Stop, re-fired or
+        # not, yields claim_queue() is None and no block. stop_hook_active
+        # buys nothing here and costs a permanent silent stranding.
+        if event == "Stop":
+            claimed = fleetlib.claim_queue(session_id)
+            if isinstance(claimed, dict) and isinstance(claimed.get("prompt"), str) \
+                    and claimed["prompt"].strip():
+                drained = claimed
+
         fleetlib.write_json_atomic(target, {
-            "session_id": session_id, "state": state, "repo": repo,
-            "branch": branch, "title": "", "cwd": cwd, "host": host,
+            "session_id": session_id,
+            "state": DRAIN_STATE if drained else state,
+            "repo": repo, "branch": branch, "title": "", "cwd": cwd, "host": host,
             "iterm_session": iterm_uuid, "pid": find_agent_pid(), "ts": now,
         })
         if state == "blocked":
             fleetlib.create_blocked_marker(session_id)
         elif event in MARKER_CLEARING_EVENTS:
             fleetlib.clear_blocked_marker(session_id)
+
+        if drained:
+            # The only path on which this hook prints anything. Claimed and
+            # removed above, so a crash between here and the write costs one
+            # verb rather than looping forever.
+            sys.stdout.write(json.dumps({
+                "decision": "block", "reason": drained["prompt"],
+            }))
 
     if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
         try:

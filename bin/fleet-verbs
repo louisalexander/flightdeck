@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Resolves a Row 2 verb id to its prompt.
+
+A verb is a markdown file: frontmatter for the flags the dispatcher needs,
+body for the prompt the agent receives. Local files in $FLEET_HOME/verbs
+win over the shipped ones in config/verbs, per verb rather than wholesale,
+so overriding one verb does not mean maintaining copies of the rest.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+TRUE_WORDS = ("true", "yes", "1")
+
+# A verb prompt runs in whatever repo the selected agent is working in, not
+# in flightdeck's own repo -- so a verb file that names one of flightdeck's
+# own sink scripts by a bare relative path (e.g. `bin/fleet-fail`) sends
+# the agent hunting for a path that does not exist there. Verified live.
+# `fleetlib.repo_root()` already knows exactly where flightdeck lives, so
+# rather than baking that machine-specific absolute path into the shipped,
+# git-tracked markdown (which install.sh's __REPO__/__PYTHON__ templating
+# never does to a tracked source file -- only to generated output like the
+# hooks snippet and the launchd plist), a verb file spells the token below
+# and this resolver substitutes it at every `show`, using the interpreter's
+# own idea of where it is running from. Correct wherever the checkout
+# lives, and never goes stale the way a baked-in path would after a move.
+REPO_TOKEN = "{{FLIGHTDECK_REPO}}"
+
+
+def verb_file(verb_id):
+    """The file that wins for this id, or None. Local beats shipped.
+
+    Verb ids ultimately choose a filename under a directory we control, so
+    a `/`, a `\\`, or a `..` segment must never be allowed to walk the
+    lookup outside `verbs/` -- pathlib silently discards `base` for an
+    absolute id (e.g. one starting with `/`) and `..` climbs out of either
+    verbs directory entirely. Ids are local, per-key config today, but
+    reject the shape anyway rather than depend on that staying true.
+    """
+    if not verb_id or verb_id in (".", "..") or "/" in verb_id or "\\" in verb_id:
+        return None
+    for base in (fleetlib.fleet_home() / "verbs",
+                 fleetlib.repo_root() / "config" / "verbs"):
+        candidate = base / "{}.md".format(verb_id)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def parse_verb(text):
+    """Splits frontmatter from body. Returns None if the shape is wrong.
+
+    Rejecting rather than guessing matters: a file without frontmatter is
+    far more likely to be a half-written verb than a deliberate one, and
+    sending a half-written prompt to an agent is worse than sending none.
+    A body that is present but all whitespace is the same class of
+    half-written file, so it is rejected the same way rather than being
+    allowed through as a silently empty prompt.
+    """
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    prompt = parts[2].strip()
+    if not prompt:
+        return None
+    prompt = prompt.replace(REPO_TOKEN, str(fleetlib.repo_root()))
+    meta = {}
+    for line in parts[1].strip().splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        meta[key.strip()] = value.strip()
+    return {
+        "id": meta.get("id", ""),
+        "label": meta.get("label", ""),
+        "interrupt": meta.get("interrupt", "").lower() in TRUE_WORDS,
+        "confirm": meta.get("confirm", "").lower() in TRUE_WORDS,
+        "prompt": prompt,
+    }
+
+
+def load_verb(verb_id):
+    path = verb_file(verb_id)
+    if path is None:
+        return None, None
+    try:
+        parsed = parse_verb(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    return parsed, path
+
+
+def main(argv):
+    if len(argv) < 3:
+        return 1
+    command, verb_id = argv[1], argv[2]
+    parsed, path = load_verb(verb_id)
+    if parsed is None:
+        sys.stderr.write("fleet-verbs: no such verb: {}\n".format(verb_id))
+        return 1
+    if command == "show":
+        sys.stdout.write(parsed["prompt"] + "\n")
+    elif command == "path":
+        sys.stdout.write(str(path) + "\n")
+    elif command == "resolved-path":
+        # `path` above reports the SOURCE file -- config/verbs/<id>.md or
+        # its ~/.fleet/verbs override -- which is what "which file won"
+        # callers and tests want, and it's fine for that: it is still
+        # git-tracked markdown and still contains the literal REPO_TOKEN
+        # unsubstituted. `show` handles substitution correctly because it
+        # returns the prompt STRING, already run through parse_verb()'s
+        # replace(). But fleet-send's wake path (the one delivery path
+        # that reaches a real terminal) never sees that string -- it
+        # points an idle agent at a file on disk with "Read <path> and
+        # follow it.", and the agent opens whatever `path` names. If that
+        # were the source file, the agent would read the literal
+        # "{{FLIGHTDECK_REPO}}" token instead of an absolute path.
+        #
+        # So this materialises a resolved copy -- parsed["prompt"], token
+        # already substituted, i.e. exactly what `show` would print -- to
+        # $FLEET_HOME/verbs-resolved/<id>.md and reports THAT path instead.
+        # Regenerated on every call via write_text_atomic (temp file +
+        # os.replace, so a concurrent reader never sees a half-written
+        # file), which also means it always reflects the verb file's
+        # content at the moment fleet-send resolves it -- consistent with
+        # "a verb's prompt is fixed at press time": the copy is pinned to
+        # what was true at that press, not to whatever the source says by
+        # the time an idle agent gets around to reading it.
+        #
+        # Keyed by verb id alone, shared across sessions, deliberately: two
+        # sessions staging the same verb concurrently are reading the same
+        # source file, so they produce identical content, and the atomic
+        # write means neither can observe the other's write in progress.
+        # verb_id is already restricted to a safe filename shape by
+        # verb_file() above (no "/", "\\", "..", ".").
+        resolved = fleetlib.fleet_home() / "verbs-resolved" / "{}.md".format(verb_id)
+        fleetlib.write_text_atomic(resolved, parsed["prompt"] + "\n")
+        sys.stdout.write(str(resolved) + "\n")
+    elif command == "flags":
+        sys.stdout.write("interrupt={} confirm={}\n".format(
+            str(parsed["interrupt"]).lower(), str(parsed["confirm"]).lower()))
+    else:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

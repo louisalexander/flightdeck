@@ -8,6 +8,7 @@ export type Slot = {
   iterm_session: string;
   cwd: string;
   app: string;
+  focused: boolean;
 };
 
 export type SlotsFile = { ts: number; overflow: number; slots: Slot[] };

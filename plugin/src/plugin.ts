@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { renderSvg, toDataUri } from "./render.js";
 import { bootConfig, shouldShowSplash, splashTileSvg, renderBootTile } from "./splash.js";
+import { renderCommandSvg } from "./command.js";
 import type { Slot, SlotsFile, Config } from "./types.js";
 
 const FLEET_HOME = join(homedir(), ".fleet");
@@ -55,7 +56,8 @@ function loadConfig(): Config {
 
 const EMPTY = (index: number): Slot => ({
   index, state: "empty", label_top: "", label_bottom: "",
-  session_id: "", host: "", iterm_session: "", cwd: "", app: ""
+  session_id: "", host: "", iterm_session: "", cwd: "", app: "",
+  focused: false
 });
 
 @action({ UUID: "com.louisalexander.flightdeck.slot" })
@@ -267,6 +269,115 @@ export class BootTile extends SingletonAction<BootTileSettings> {
   }
 }
 
+/**
+ * Stages a Row 2 verb against whichever agent is currently selected.
+ * Mirrors the fleet-press invocation above, but unlike fleet-press this
+ * script is deliberately allowed to exit non-zero (no selection, dead
+ * session, unknown verb) -- that refusal is the boolean the key needs in
+ * order to show "queued" vs. "refused" rather than claiming success blind.
+ */
+function runFleetSend(verb: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(interpreter(), [join(REPO, "bin", "fleet-send"), verb], (err) => {
+      if (err) streamDeck.logger.error(`fleet-send ${verb} refused: ${err.message}`);
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Row 2: one key, one verb, sent to whichever agent Row 1 has selected.
+ * A press only stages the verb -- delivery happens on the agent's own
+ * schedule -- so the feedback here can only say "queued" or "refused",
+ * never "done".
+ */
+@action({ UUID: "com.louisalexander.flightdeck.command" })
+export class Command extends SingletonAction<{ verb?: string }> {
+  // House pattern from FleetSlot's downAt/visible maps: per-action-id state
+  // keyed by action.id. Here it tracks the pending feedback-restore timer,
+  // so a second press inside the 1200ms window cancels the first press's
+  // restore instead of racing it -- without this, the first timer fires
+  // during the second press's feedback and blanks it early, even though the
+  // verb genuinely was staged.
+  private pending = new Map<string, ReturnType<typeof setTimeout>>();
+
+  override onWillAppear(ev: WillAppearEvent<{ verb?: string }>): void {
+    ev.action.setTitle("");           // the SVG carries the label
+    this.paintIdle(ev.action, ev.payload.settings?.verb ?? "");
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<{ verb?: string }>): void {
+    // A pending restore firing against a torn-down action context is
+    // probably a harmless no-op in the SDK, but both sibling actions clean
+    // up on disappear and there is no reason for this one not to.
+    this.clearPending(ev.action.id);
+  }
+
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<{ verb?: string }>): void {
+    // A settings change makes any in-flight feedback stale by definition --
+    // it refers to a verb this key may no longer send -- so a pending
+    // restore is cancelled here on its own terms, not just to dodge a
+    // stale closure over the old verb.
+    this.clearPending(ev.action.id);
+    // The operator just picked a different verb in the property inspector;
+    // the key face must catch up now, not wait for the next profile switch.
+    this.paintIdle(ev.action, ev.payload.settings?.verb ?? "");
+  }
+
+  override async onKeyUp(ev: KeyUpEvent<{ verb?: string }>): Promise<void> {
+    const id = ev.action.id;
+    this.clearPending(id);
+
+    const verb = ev.payload.settings?.verb ?? "";
+    if (!verb) {
+      // Unconfigured is a refusal too: without this the operator can't
+      // tell "nothing to send" from "the press was missed".
+      ev.action.setImage(toDataUri(renderCommandSvg("", "refused")));
+      this.scheduleRestore(id, ev.action, "");
+      return;
+    }
+
+    const ok = await runFleetSend(verb);
+    ev.action.setImage(toDataUri(
+      renderCommandSvg(verb.toUpperCase(), ok ? "queued" : "refused")));
+    this.scheduleRestore(id, ev.action, verb);
+  }
+
+  private paintIdle(action: { setImage(image?: string): Promise<void> }, verb: string): void {
+    action.setImage(toDataUri(renderCommandSvg(verb.toUpperCase(), "")));
+  }
+
+  // Feedback is a brief change of ink, not a lasting one -- the key returns
+  // to idle so it always reads as ready for the next press. What is painted
+  // here never changes; only when the restore fires is now tracked.
+  private scheduleRestore(
+    id: string, action: { setImage(image?: string): Promise<void> }, verb: string
+  ): void {
+    // Clear-before-set, unconditionally: `pending` must never hold a timer
+    // that has been superseded. Without this, two presses whose fleet-send
+    // round-trips overlap can both reach here with clearPending already
+    // behind them (called at the top of onKeyUp, before either awaited) --
+    // the first press's timer would then be silently overwritten in the
+    // map without being cancelled, so it still fires later and reverts the
+    // second press's feedback early.
+    this.clearPending(id);
+    const timer = setTimeout(() => {
+      this.pending.delete(id);
+      this.paintIdle(action, verb);
+    }, 1200);
+    this.pending.set(id, timer);
+  }
+
+  private clearPending(id: string): void {
+    const timer = this.pending.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.pending.delete(id);
+    }
+  }
+}
+
 streamDeck.actions.registerAction(new FleetSlot());
 streamDeck.actions.registerAction(new BootTile());
+streamDeck.actions.registerAction(new Command());
 streamDeck.connect();

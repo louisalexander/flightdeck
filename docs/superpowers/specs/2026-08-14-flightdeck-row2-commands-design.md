@@ -274,16 +274,35 @@ Two properties follow from the prompt-to-agent model and must be designed for:
 |---|---|---|---|
 | TEST | `test` | Run the suite; report what fails. Ends by calling `bin/fleet-fail` on failure. | |
 | DIFF | `diff` | Summarise what changed and why — not a raw diff dump, which the terminal already shows. | |
-| LOG | `log` | Summarise the session so far and journal it. See *Obsidian*. | |
-| COMMIT | `commit` | Commit. | `confirm` |
+| NOTE | `note` | Summarise the session so far and journal it. See *Obsidian*. | |
+| ISSUE | `issue` | File the live problem, open question, or noticed-and-not-chased tangent as a GitHub issue, so it survives the session. | `confirm` |
 | PUSH | `push` | Commit and push. | `confirm` |
 | PR | `pr` | Commit, push, open the PR. Branches first when on the default branch. | `confirm` |
 | DOUBT | `doubt` | Challenge the current approach before continuing. | |
 | STOP | `stop` | Interrupt the agent. | `interrupt` |
 
-COMMIT / PUSH / PR are a deliberate ladder of increasing commitment, each a
-superset of the last. The PR verb branches first when on the default branch,
-matching the repo's own convention.
+PUSH / PR are a ladder of increasing commitment, each a superset of the last.
+The PR verb branches first when on the default branch, matching the repo's own
+convention.
+
+**COMMIT exists but is not on the panel.** It ships as `config/verbs/commit.md`
+so it can be swapped in without writing anything new. Its slot went to ISSUE,
+which earns the key better: PUSH already commits before pushing, so the deck
+does not lose the ability to commit — only the ability to commit *without*
+pushing. That is a real loss and a deliberate one, and swapping COMMIT back in
+is editing one setting, not shipping a change.
+
+**ISSUE is `confirm: true`** for the same reason PUSH and PR are: it writes to a
+shared repository where other people will see it. Filing a stray issue is
+cheaper to undo than a stray push, but it is still an outward-facing action and
+should fire while the operator is watching.
+
+ISSUE pairs with DOUBT rather than duplicating it. DOUBT questions the approach
+in the session; ISSUE takes the thing that came out of it — the tangent nobody
+is going to chase today, the design question with no answer yet — and puts it
+somewhere that outlives the session. A fleet of agents generates exactly this
+kind of debris, and the operator's usual choice is between derailing to chase it
+and losing it entirely.
 
 ## The failed signal
 
@@ -309,9 +328,15 @@ use it rather than embedding assumptions about what the agent knows.
 
 ## Obsidian: recommended, not required
 
-LOG journals the session. The prior spec's LOG almost certainly meant `git log`,
-paired with DIFF; under the prompt-to-agent model that is a weak key, because
-the terminal already shows it and it tells the operator nothing new.
+NOTE journals the session. The prior spec called this key LOG, which almost
+certainly meant `git log`, paired with DIFF; under the prompt-to-agent model
+that is a weak key, because the terminal already shows it and it tells the
+operator nothing new.
+
+**Renamed LOG to NOTE deliberately.** Keeping the old label while changing the
+meaning would have left the panel with a key that reads as `git log` and does
+something else entirely — the worst of both, and a mistake an operator makes
+once per press. The name now says what the key does.
 
 **Recommended practice: a dedicated flightdeck vault, reached over MCP.**
 
@@ -323,9 +348,9 @@ A separate vault makes broad access to it unremarkable.
 
 This is a convention, not a requirement:
 
-- Shipped `config/verbs/log.md` stays dependency-free.
-- The MCP flavour is a documented **override** at `~/.fleet/verbs/log.md`.
-- With no Obsidian MCP server configured, LOG degrades to saying it cannot
+- Shipped `config/verbs/note.md` stays dependency-free.
+- The MCP flavour is a documented **override** at `~/.fleet/verbs/note.md`.
+- With no Obsidian MCP server configured, NOTE degrades to saying it cannot
   journal, rather than failing obscurely.
 
 ## Open decisions

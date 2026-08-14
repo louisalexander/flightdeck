@@ -45,12 +45,22 @@ export function renderSvg(slot: Slot, cfg: Config, armed: boolean): string {
       `font-size="23" font-weight="700" fill="${textColor}">${bottom}</text>`
     : "";
 
+  // Selection, not state. Inset and thin so the lifecycle fill still reads as
+  // the key's colour -- a heavy frame would compete with the one channel that
+  // carries the actual information. Suppressed while armed, which owns the
+  // whole key.
+  const focusBorder = slot.focused && !armed
+    ? `<rect x="2" y="2" width="140" height="140" rx="3" fill="none" ` +
+      `stroke="#FFFFFF" stroke-width="4" stroke-opacity="0.92"/>`
+    : "";
+
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">',
     `<rect width="144" height="144" fill="${color}"/>`,
     glyph,
     topText,
     bottomText,
+    focusBorder,
     "</svg>"
   ].join("");
 }

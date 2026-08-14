@@ -20,5 +20,10 @@ export default [
     input: "src/splash.ts",
     output: { file: `${OUT}/splash.js`, format: "es" },
     plugins: [typescript()]
+  },
+  {
+    input: "src/command.ts",
+    output: { file: `${OUT}/command.js`, format: "es" },
+    plugins: [typescript()]
   }
 ];
