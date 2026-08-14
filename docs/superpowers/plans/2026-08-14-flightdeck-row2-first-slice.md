@@ -1310,7 +1310,8 @@ git commit -m "feat: wake an idle session with a pointer to the verb file"
 
 Recorded so they are not mistaken for oversights. Each is in the spec.
 
-- **The other seven verbs** (DIFF, LOG, COMMIT, PUSH, PR, DOUBT, STOP). Once Task 4 lands they are markdown files, not code — except STOP, which needs the `interrupt` path, and COMMIT/PUSH/PR, which need `confirm`.
+- **The other seven panel verbs** (DIFF, LOG, ISSUE, PUSH, PR, DOUBT, STOP). Once Task 4 lands they are markdown files, not code — except STOP, which needs the `interrupt` path, and ISSUE/PUSH/PR, which need `confirm`. `config/verbs/issue.md` and `config/verbs/commit.md` already exist; the rest do not.
+- **COMMIT is written but off-panel** (`config/verbs/commit.md`). It needs no work — it exists so the eighth slot can be swapped without writing anything new.
 - **`confirm: true` enforcement**, including the rule that confirm verbs never queue.
 - **Queued-state visibility on Row 1**, so a waiting verb is visible on the target slot rather than only on the Row 2 key.
 - **The TTL and stale-entry policy.** `queued_at` is written by Task 5 but nothing reads it yet.
