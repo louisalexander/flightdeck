@@ -3,3 +3,4 @@ plugin/node_modules/
 plugin/*.sdPlugin/bin/
 bin/__pycache__/
 .DS_Store
+.superpowers/

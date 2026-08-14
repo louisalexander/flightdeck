@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" role="img" aria-labelledby="title desc">
+  <title id="title">Flightdeck Silent Boot splash</title>
+  <desc id="desc">Centered Beacon mark, Flightdeck wordmark, and a restrained startup trace.</desc>
+  <rect width="800" height="480" fill="#020304"/>
+  <g transform="translate(310 76) scale(.7)">
+    <path d="M130 20 212 186 130 152 48 186Z" fill="#0C131D" stroke="#EEF5FF" stroke-width="15" stroke-linejoin="round"/>
+    <path d="M130 20V152" fill="none" stroke="#1256A3" stroke-width="15"/>
+    <circle cx="130" cy="152" r="15" fill="#F5A623"/>
+    <circle cx="130" cy="152" r="32" fill="none" stroke="#F5A623" stroke-width="3" opacity=".22"/>
+  </g>
+  <text x="400" y="305" text-anchor="middle" fill="#EEF5FF" font-family="Inter, Helvetica Neue, Arial, sans-serif" font-size="39" font-weight="600" letter-spacing="12">FLIGHTDECK</text>
+  <text x="400" y="346" text-anchor="middle" fill="#617083" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="12" letter-spacing="5">FLEET CONTROL</text>
+  <rect x="310" y="393" width="180" height="3" rx="1.5" fill="#18212D"/>
+  <rect x="310" y="393" width="118" height="3" rx="1.5" fill="#1256A3"/>
+  <circle cx="428" cy="394.5" r="5" fill="#F5A623"/>
+</svg>
