@@ -20,8 +20,8 @@ This is v1: Row 1 only. It is installed and running on real hardware.
 | State | Colour | Glyph | Meaning | Set by |
 |---|---|---|---|---|
 | `blocked` | `#F5A623` amber | ▲ | Waiting on the operator | `Notification` hook |
-| `working` | `#1256A3` dark blue | ▶ | Prompt submitted, tools or reasoning active | `UserPromptSubmit` hook |
-| `done` | `#238636` green | ✓ | Turn complete, awaiting next instruction | `Stop` hook |
+| `working` | `#1256A3` dark blue | ▶ | Prompt submitted, tools or reasoning active | `UserPromptSubmit` hook, or `Stop` with background work still in flight |
+| `done` | `#238636` green | ✓ | Turn complete, awaiting next instruction | `Stop` hook, with nothing in flight |
 | `idle` | `#25282D` near-black grey | · | Session alive, nothing in flight | `SessionStart` hook |
 | `failed` | `#B42318` red | ✕ | Observed failure, sticky until cleared | abnormal `SessionEnd`, or `fleet-fail` |
 | `empty` | `#000000` black | *(none)* | No session in this slot | `fleet-reconcile` |
@@ -34,6 +34,17 @@ investigation. `working` is a deliberately *dark* blue so an agent doing its
 job recedes rather than competing with one that needs you. Grey is
 ignorable. Black is absence — an empty slot renders fully black, with no
 content, because absence should look absent.
+
+**Green means finished, not merely stopped.** Claude Code's `Stop` hook fires
+when an assistant *turn* ends, which is not the same as the agent awaiting
+you. A turn that ends with a backgrounded subagent, shell or workflow still
+running wakes itself back up with no input from you, so those sessions stay
+blue — `Stop` carries a `background_tasks` array for exactly this purpose, and
+flightdeck paints green only when it is empty. A long-lived background task —
+a dev server, say — therefore holds a key blue while its agent sits idle. That
+is the deliberate direction to err: a false blue merely recedes, and amber
+still overrides it, whereas a false green hides a busy agent behind a colour
+that says *your turn*.
 
 Colour carries the message; the glyph is redundancy. Amber and red are
 adjacent hues, and red/green is the most common colourblind failure, so
