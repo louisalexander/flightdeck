@@ -174,9 +174,9 @@ know which agent is which.
 | 2 | APPROVE | allow — arms first when the tier is `high` |
 | 3 | REMEMBER | allow + Claude Code's own suggested rule — always arms |
 | 4 | DENY | deny, with a stock message |
-| 5 | STEER — JUSTIFY | deny: explain what this does and why, then wait |
+| 5 | STEER — `justify` | deny: explain what this does and why, then wait |
 | 6 | INTERRUPT | deny + `interrupt: true` — stop, don't retry |
-| 7 | STEER — OTHER WAY | deny: reach the goal without that command |
+| 7 | STEER — `otherway` | deny: reach the goal without that command |
 | 8 | *(unbound — `dryrun` ships in `config/verbs/`, bind it if wanted)* | |
 
 **Getting the row onto the deck is per-key, unlike Row 1.** Drag the
@@ -184,7 +184,10 @@ know which agent is which.
 its property inspector — it defaults to `(none)`, which does nothing when
 pressed. Keys 5 and 7 (STEER) also need their verb dropdown set to
 `justify` or `otherway`; key 8 is left unbound above but can take `dryrun`
-the same way.
+the same way. A steer key labels itself with its verb (`JUSTIFY`,
+`OTHERWAY`) rather than the word STEER, the way a Row 2 key labels itself
+with its verb — two steer keys that read the same send different denials
+with nothing on the panel to tell them apart.
 
 Risk tier comes from [`config/risk.json`](config/risk.json) — a rule table,
 not a model, so a `high` classification (`rm -rf`, `git push --force`,
@@ -272,8 +275,18 @@ The second half of HALT is that ESC: sent only to sessions Row 1 already
 knows are `working`, and only over a real iTerm2 host with a well-formed
 session id. It is never sent to a `blocked` session — there, ESC selects
 "No, and tell Claude what to do differently" and opens a text box, which
-is not an interrupt and not a state the operator asked for. The latch
-already covers those sessions by denying whatever they try next.
+is not an interrupt and not a state the operator asked for.
+
+A blocked session is *answered* instead. A permission request is
+downstream of `PreToolUse`: that call already passed the shell latch,
+before the latch existed, so the latch cannot reach the one call the
+operator is most likely staring at when they hit the brake. Halting
+therefore writes a deny + interrupt for every request currently pending,
+releasing those agents now rather than leaving them blocked until the
+deciding hook times out — and Row 3's two allow keys, APPROVE and
+REMEMBER, refuse outright while the latch is set. DENY, INTERRUPT and the
+steers keep working: they are the safe direction, and an operator who has
+just hit the brake may well want to send one.
 
 ### Deep links
 
