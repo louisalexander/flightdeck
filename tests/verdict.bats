@@ -280,6 +280,44 @@ PY
   [[ "$(decision S1)" == *'"behavior": "deny"'* ]] || return 1
 }
 
+# --- STEER --------------------------------------------------------------------
+#
+# Two of Row 3's eight keys, and the one cross-task seam in the design
+# (fleet-verdict -> fleet-verbs --steer -> a deny message). Proved untested by
+# sabotage: making _steer_message return "" left all 46 tests in this file and
+# verbs.bats passing.
+
+@test "steer writes a deny carrying the verb's own body" {
+  stage S1 normal
+  run "$BIN/fleet-verdict" steer justify
+  [ "$status" -eq 0 ]
+  local body
+  body="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['message'])" \
+            "$FLEET_HOME/decisions/S1.json")"
+  # A distinctive sentence from config/verbs/justify.md, not the generic
+  # DENY_MESSAGE -- the point is that the VERB's prose arrives, not merely
+  # that some deny did.
+  [[ "$body" == *"explain in a few lines"* ]] || return 1
+  [[ "$body" != *"Denied from flightdeck"* ]] || return 1
+}
+
+@test "steer with a non-steer verb refuses rather than denying with Row 2 prose" {
+  stage S1 normal
+  # `push` is a real, working Row 2 verb -- so this proves fleet-verbs' steer
+  # flag is consulted, not merely that an unknown id fails. A Row 2 body in a
+  # deny message would refuse a call with "Commit and push" as its reason.
+  run "$BIN/fleet-verdict" steer push
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "steer with no verb argument refuses" {
+  stage S1 normal
+  run "$BIN/fleet-verdict" steer
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
 # --- REACHABLE: ui/verdict.html mirrors what it must offer -----------------
 #
 # tests/verbs.bats gained its REACHABLE test because FORK shipped valid and
@@ -313,9 +351,14 @@ print(' '.join(re.findall(r'\"([a-z]+)\"', m.group(1))))
   local pi="$ROOT/plugin/com.louisalexander.flightdeck.sdPlugin/ui/verdict.html"
   local missing=""
   for f in "$ROOT"/config/verbs/*.md; do
-    grep -q "^steer: true$" "$f" || continue
     local id
     id="$(basename "$f" .md)"
+    # Ask fleet-verbs, rather than grepping `^steer: true$` here. It accepts
+    # true/yes/1 case-insensitively (TRUE_WORDS), so the old grep skipped a
+    # verb written `steer: yes` -- a fully functional steer verb that could
+    # then ship unbindable, which is the exact failure this guard exists to
+    # prevent. Delegating means the guard cannot drift from the rule.
+    "$BIN/fleet-verbs" --steer "$id" >/dev/null 2>&1 || continue
     grep -q "value=\"$id\"" "$pi" || missing="$missing $id"
   done
   [ -z "$missing" ] || { echo "not offered in the steer-verb picker:$missing"; false; }
