@@ -252,17 +252,12 @@ def run():
         # 10s if a renderer hangs -- produces a correctly request_id-stamped
         # decision before the wait loop below ever starts polling. Round-2
         # review (N1): discarding it unconditionally here threw away a real
-        # press with nothing but a log line to show for it. Only claim and
-        # drop it if it does NOT match -- the wait loop already rejects a
-        # mismatch on its own, so an unconditional purge bought nothing.
-        leftover = fleetlib.claim_decision(session_id)
-        if leftover is not None:
-            if _matches_request(leftover, request_id):
-                decision = leftover
-            else:
-                fleetlib.log(
-                    "decide: discarding stale decision for {} predating this request".format(
-                        session_id))
+        # press with nothing but a log line to show for it.
+        # fleetlib.claim_matching_decision claims it either way but only
+        # HANDS IT BACK on a match, discarding (and logging) anything else
+        # -- the same primitive the wait loop below polls with, so this
+        # site and that one cannot disagree about what counts as a match.
+        decision = fleetlib.claim_matching_decision(session_id, request_id)
 
         if decision is None:
             decision = _wait_for_decision(session_id, _timeout_secs(config), request_id)
@@ -283,32 +278,15 @@ def run():
     _emit(normalised)
 
 
-def _matches_request(decision, request_id):
-    """True if a claimed decision was actually written for THIS request.
-
-    A non-dict decision, or one with a missing or mismatched request_id,
-    is not ours -- it is either malformed or an answer meant for a
-    different request entirely, and must not be treated as a verdict on
-    the call currently blocked (C1, row-3-verdict-and-halt review).
-    """
-    return isinstance(decision, dict) and decision.get("request_id") == request_id
-
-
 def _wait_for_decision(session_id, timeout_secs, request_id):
     poll = _float_env("FLEET_DECIDE_POLL_SECS", DEFAULT_POLL_SECS)
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
-        claimed = fleetlib.claim_decision(session_id)
+        claimed = fleetlib.claim_matching_decision(session_id, request_id)
         if claimed is not None:
-            if _matches_request(claimed, request_id):
-                return claimed
-            fleetlib.log("decide: discarding decision for {} with mismatched request_id".format(
-                session_id))
+            return claimed
         time.sleep(poll)
-    claimed = fleetlib.claim_decision(session_id)
-    if claimed is not None and _matches_request(claimed, request_id):
-        return claimed
-    return None
+    return fleetlib.claim_matching_decision(session_id, request_id)
 
 
 def _touch_session_blocked(session_id, now):

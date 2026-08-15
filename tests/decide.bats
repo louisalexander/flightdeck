@@ -27,7 +27,7 @@ request_id() { pending request_id; }
 # Writes decisions/S1.json as <decision-json> merged with the request_id
 # fleet-decide actually minted for the pending record currently on disk --
 # the same round-trip fleet-verdict performs for real. Must be called after
-# fleet-decide has staged its pending record (poll or sleep for it first).
+# fleet-decide has staged its pending record (await it first, below).
 answer() {
   mkdir -p "$FLEET_HOME/decisions"
   python3 -c "
@@ -38,11 +38,26 @@ json.dump(d, open(sys.argv[3], 'w'))
 " "$1" "$FLEET_HOME/pending/S1.json" "$FLEET_HOME/decisions/S1.json"
 }
 
+# Bounded poll on an arbitrary shell condition, instead of a fixed sleep
+# (round-3 review, promoted #3): a fixed `sleep 0.2` before reading a file
+# fleet-decide is writing in the background is an intermittent failure
+# waiting to happen on a loaded box, not a guarantee. Polls every 20ms for
+# up to 1s; the condition itself still runs afterward as the real
+# assertion, so a genuine timeout still fails loud rather than silently.
+await() {  # await '<shell condition as a string>'
+  for _ in $(seq 1 50); do
+    eval "$1" && return 0
+    sleep 0.02
+  done
+  return 1
+}
+await_pending() { await '[ -f "$FLEET_HOME/pending/S1.json" ]'; }
+
 @test "a waiting decision is emitted as allow and the tool proceeds" {
   OUT="$BATS_TEST_TMPDIR/out.txt"
   decide > "$OUT" &
   pid=$!
-  sleep 0.2
+  await_pending
   answer '{"behavior":"allow"}'
   wait "$pid"
   output="$(cat "$OUT")"
@@ -58,7 +73,7 @@ json.dump(d, open(sys.argv[3], 'w'))
   OUT="$BATS_TEST_TMPDIR/out.txt"
   decide > "$OUT" &
   pid=$!
-  sleep 0.2
+  await_pending
   answer '{"behavior":"deny","message":"no","interrupt":true}'
   wait "$pid"
   output="$(cat "$OUT")"
@@ -71,7 +86,7 @@ json.dump(d, open(sys.argv[3], 'w'))
   OUT="$BATS_TEST_TMPDIR/out.txt"
   decide > "$OUT" &
   pid=$!
-  sleep 0.2
+  await_pending
   answer '{"behavior":"deny","message":123,"interrupt":"yes"}'
   wait "$pid"
   output="$(cat "$OUT")"
@@ -83,7 +98,7 @@ json.dump(d, open(sys.argv[3], 'w'))
 @test "the decision file is consumed, not left behind" {
   decide >/dev/null &
   pid=$!
-  sleep 0.2
+  await_pending
   answer '{"behavior":"allow"}'
   wait "$pid"
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
@@ -92,7 +107,7 @@ json.dump(d, open(sys.argv[3], 'w'))
 @test "the pending record is cleared once decided" {
   decide >/dev/null &
   pid=$!
-  sleep 0.2
+  await_pending
   answer '{"behavior":"allow"}'
   wait "$pid"
   [ ! -f "$FLEET_HOME/pending/S1.json" ]
@@ -117,24 +132,24 @@ json.dump(d, open(sys.argv[3], 'w'))
 @test "a second identical request increments repeats rather than duplicating" {
   export FLEET_DECIDE_TIMEOUT_SECS=1
   decide >/dev/null &
-  sleep 0.2
+  await_pending
   [ "$(pending repeats)" = "1" ]
   printf '%s' "$PAYLOAD" | "$BIN/fleet-decide" >/dev/null &
-  sleep 0.2
+  await '[ "$(pending repeats)" = "2" ]'
   [ "$(pending repeats)" = "2" ]
   wait
 }
 
 @test "a high-risk command scores high" {
   decide >/dev/null &
-  sleep 0.2
+  await_pending
   [ "$(pending tier)" = "high" ]
   wait
 }
 
 @test "the session is marked blocked immediately" {
   decide >/dev/null &
-  sleep 0.2
+  await '[ -f "$FLEET_HOME/blocked/S1" ]'
   [ -f "$FLEET_HOME/blocked/S1" ]
   wait
 }
@@ -144,7 +159,7 @@ json.dump(d, open(sys.argv[3], 'w'))
   # covered nowhere, since every other test's payload omits the suggestion
   # or never inspects it.
   decide >/dev/null &
-  sleep 0.2
+  await_pending
   python3 -c "
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -176,7 +191,7 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   OUT="$BATS_TEST_TMPDIR/out.txt"
   decide > "$OUT" &
   pid=$!
-  sleep 0.2
+  await_pending
   answer '{"behavior":"maybe"}'
   wait "$pid"
   [ -z "$(cat "$OUT")" ]
@@ -217,24 +232,32 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }
 
-@test "a decision already present when the purge runs is honoured if it matches, not discarded" {
-  # Round-2 review (N1): the pending record is on disk (and so
-  # resolve_target() already resolves to this session) before
-  # create_blocked_marker, _touch_session_blocked and _reconcile() run, so a
-  # Row 3 press landing anywhere in that window can produce a correctly
-  # request_id-stamped decision before the wait loop ever starts polling.
-  # The old unconditional purge threw that answer away with nothing but a
-  # log line to show for it. Races to answer as soon as the pending record
-  # exists, landing the decision as close to the staging window as this
-  # harness allows -- whether the pre-wait purge's honour branch or the wait
-  # loop's first poll actually claims it, the answer must not be dropped.
+@test "a decision landing during staging is still honoured end-to-end, not dropped" {
+  # Round-2 review (N1) reproduced this at the black-box level: the pending
+  # record is on disk (and so resolve_target() already resolves to this
+  # session) before create_blocked_marker, _touch_session_blocked and
+  # _reconcile() run, so a Row 3 press landing anywhere in that window can
+  # produce a correctly request_id-stamped decision before the wait loop
+  # ever starts polling -- and the old unconditional purge threw that
+  # answer away with nothing but a log line to show for it.
+  #
+  # This test races to answer as soon as the pending record exists, but it
+  # CANNOT tell -- and round-3 review confirmed it never actually does --
+  # which of fleet-decide's two internal call sites claims the decision:
+  # with FLEET_SKIP_RECONCILE=1 the staging-to-purge window collapses to
+  # microseconds, so in practice the wait loop's first poll always wins the
+  # race here, not the pre-wait purge. That is not a gap: both call sites
+  # now share one primitive, fleetlib.claim_matching_decision (round-3
+  # review, N1), so they cannot disagree about what counts as a match --
+  # and that primitive's own honour/discard behaviour is unit-tested
+  # directly, decision-file-already-planted, in
+  # tests/test_fleetlib.py::PendingTests (test_claim_matching_decision_*).
+  # This test's remaining job is narrower and still real: prove the
+  # end-to-end path does not lose a decision that arrives early.
   OUT="$BATS_TEST_TMPDIR/out.txt"
   decide > "$OUT" &
   pid=$!
-  for _ in $(seq 1 50); do
-    [ -f "$FLEET_HOME/pending/S1.json" ] && break
-    sleep 0.02
-  done
+  await_pending
   answer '{"behavior":"allow"}'
   wait "$pid"
   output="$(cat "$OUT")"
@@ -247,7 +270,7 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   : > "$OUT"
   ( decide > "$OUT" ) &
   pid=$!
-  sleep 0.2
+  await_pending
   mkdir -p "$FLEET_HOME/decisions"
   printf '%s' '{"behavior":"allow","request_id":"WRONG"}' > "$FLEET_HOME/decisions/S1.json"
   wait "$pid"
@@ -272,7 +295,7 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   printf '%s' "$PAYLOAD" > "$IN"
   "$BIN/fleet-decide" < "$IN" >/dev/null &
   pid=$!
-  sleep 0.2
+  await_pending
   [ -f "$FLEET_HOME/pending/S1.json" ]
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true

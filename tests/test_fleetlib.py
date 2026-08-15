@@ -619,6 +619,40 @@ class PendingTests(unittest.TestCase):
         self.assertEqual(first, {"behavior": "allow"})
         self.assertIsNone(second)
 
+    # Round-3 review (N1): bin/fleet-decide's own bats coverage could not
+    # prove the "honour a matching leftover" branch actually ran --
+    # FLEET_SKIP_RECONCILE=1 collapses the staging-to-purge window to
+    # microseconds in tests, so the decision always arrived late enough for
+    # the wait loop's first poll to claim it instead, leaving the honour
+    # branch provably unexercised. Testing the extracted primitive directly,
+    # with the decision already planted before the call, removes the race
+    # entirely: both fleet-decide call sites (the pre-wait purge and the
+    # wait loop) now share this exact function, so proving it correct here
+    # proves both call sites correct, regardless of which one wins the race
+    # in production.
+    def test_claim_matching_decision_returns_a_match_and_consumes_the_file(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"),
+                                    {"behavior": "allow", "request_id": "R1"})
+        result = fleetlib.claim_matching_decision("A", "R1")
+        self.assertEqual(result, {"behavior": "allow", "request_id": "R1"})
+        self.assertFalse(fleetlib.decision_path("A").exists())
+
+    def test_claim_matching_decision_discards_a_mismatch_but_still_consumes_the_file(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"),
+                                    {"behavior": "allow", "request_id": "OTHER"})
+        result = fleetlib.claim_matching_decision("A", "R1")
+        self.assertIsNone(result)
+        self.assertFalse(fleetlib.decision_path("A").exists())
+
+    def test_claim_matching_decision_discards_a_decision_with_no_request_id_at_all(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"), {"behavior": "allow"})
+        result = fleetlib.claim_matching_decision("A", "R1")
+        self.assertIsNone(result)
+        self.assertFalse(fleetlib.decision_path("A").exists())
+
+    def test_claim_matching_decision_returns_none_when_nothing_is_present(self):
+        self.assertIsNone(fleetlib.claim_matching_decision("A", "R1"))
+
 
 if __name__ == "__main__":
     unittest.main()

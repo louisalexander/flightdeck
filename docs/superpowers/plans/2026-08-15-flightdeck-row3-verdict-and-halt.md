@@ -844,6 +844,7 @@ answerable -- so every failure degrades to not having flightdeck."
 - Produces: `bin/fleet-verdict <approve|remember|deny|interrupt|steer|detail> [verb-id]`
   - exit `0` delivered, `1` refused, `2` armed
   - every decision file written carries `request_id`, copied verbatim from the pending record's own `request_id` — fleet-decide (Task 3) mints that id per request and discards any decision whose `request_id` does not match the one currently staged, so a decision missing it is silently thrown away, not delivered
+  - a pending record with no usable `request_id` refuses (exit `1`) rather than delivering — writing a decision fleet-decide is guaranteed to discard would otherwise flash DELIVERED for a press that does nothing
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -875,6 +876,16 @@ PY
 decision() { python3 -c "import json,sys;print(json.dumps(json.load(open(sys.argv[1]))))" \
                "$FLEET_HOME/decisions/$1.json"; }
 
+stage_without_request_id() {  # stage_without_request_id <session> <tier>
+  python3 - "$FLEET_HOME/pending/$1.json" "$1" "$2" <<'PY'
+import json,sys
+path,sid,tier = sys.argv[1:4]
+json.dump({"session_id":sid,"tool":"Bash","input_digest":"sha256:a",
+           "input_summary":"x","tier":tier,"suggestion":None,
+           "repo":"flightdeck","cwd":"/tmp","repeats":1,"requested_at":1}, open(path,"w"))
+PY
+}
+
 @test "no pending request refuses with exit 1" {
   run "$BIN/fleet-verdict" approve
   [ "$status" -eq 1 ]
@@ -892,6 +903,13 @@ decision() { python3 -c "import json,sys;print(json.dumps(json.load(open(sys.arg
   run "$BIN/fleet-verdict" approve
   [ "$status" -eq 0 ]
   [[ "$(decision S1)" == *'"request_id": "req-S1"'* ]]
+}
+
+@test "a pending record with no usable request_id refuses rather than delivering" {
+  stage_without_request_id S1 normal
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }
 
 @test "approve on a high tier arms first" {
@@ -1144,6 +1162,17 @@ def run(argv):
 
     if action == "detail":
         return _focus(target, record)
+
+    request_id = record.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        # fleet-decide (Task 3) rejects a decision whose own request_id is
+        # missing or does not match the pending record's, so writing one
+        # from a record with no usable request_id would deliver an answer
+        # fleet-decide is guaranteed to discard -- the operator would see a
+        # delivered flash and nothing happen, exactly the failure the
+        # three-way exit status exists to prevent. Refuse instead.
+        fleetlib.log("verdict: pending record for {} has no usable request_id".format(target))
+        return REFUSED
 
     tier = record.get("tier") if isinstance(record.get("tier"), str) else "normal"
     if _needs_arm(action, tier) and not _take_arm(action, target):

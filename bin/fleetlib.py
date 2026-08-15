@@ -232,6 +232,38 @@ def claim_decision(session_id):
             pass
 
 
+def claim_matching_decision(session_id, request_id):
+    """claim_decision, filtered to one that actually answers THIS request.
+
+    A session can outlive more than one PermissionRequest, and a decision
+    file is only a legitimate answer to the request that minted the
+    request_id it carries. Whatever is claimed here -- matching,
+    mismatched, or malformed -- is removed from disk either way (that part
+    is claim_decision's job, not this function's); only a decision whose
+    own request_id equals `request_id` is ever handed back. Round-2 review
+    (C1/N2, row-3-verdict-and-halt): without this check, a decision left
+    over from an earlier, already-answered request for the same session --
+    a crashed decide, a double press, or (round 2's specific repro) an
+    earlier tool call in the same prompt turn -- could auto-answer a
+    later, unrelated request with no human ever having pressed anything.
+
+    Extracted out of bin/fleet-decide (round-3 review, N1) so the two call
+    sites that need this -- the pre-wait purge of a leftover decision, and
+    the wait loop's own polling -- are structurally the same code and
+    cannot diverge, and so it can be unit-tested directly (see
+    tests/test_fleetlib.py) rather than only through end-to-end timing
+    that a fast test environment can accidentally never exercise.
+    """
+    claimed = claim_decision(session_id)
+    if claimed is None:
+        return None
+    if isinstance(claimed, dict) and claimed.get("request_id") == request_id:
+        return claimed
+    log("fleetlib: discarding a decision for {} with a missing or mismatched request_id".format(
+        session_id))
+    return None
+
+
 PENDING_TTL_DEFAULT_SECS = 300
 
 # Kept in sync BY HAND with bin/fleet-decide's own DEFAULT_TIMEOUT_SECS.
