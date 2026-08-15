@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { renderSvg, toDataUri } from "./render.js";
 import { bootConfig, shouldShowSplash, splashTileSvg, renderBootTile } from "./splash.js";
 import { renderCommandSvg } from "./command.js";
-import { renderVerdictSvg, renderDetailSvg, type Feedback as VerdictFeedback } from "./verdict.js";
+import { renderVerdictSvg, renderDetailFeedback, type Feedback as VerdictFeedback } from "./verdict.js";
 import type { Slot, SlotsFile, Config, VerdictTarget } from "./types.js";
 
 const FLEET_HOME = join(homedir(), ".fleet");
@@ -461,6 +461,14 @@ export class Verdict extends SingletonAction<VerdictSettings> {
     } catch (err) {
       streamDeck.logger.error(`cannot watch ${FLEET_HOME}: ${String(err)}`);
     }
+    // Safety net for missed events -- same reasoning as FleetSlot's
+    // identical interval above. macOS fs.watch is known-flaky precisely
+    // when a file is replaced by rename, which is exactly how
+    // fleetlib.write_json_atomic writes slots.json on every reconcile. A
+    // dropped event here does not self-heal like Row 1: a request the
+    // operator already answered in the terminal would otherwise leave Row
+    // 3 bright and active indefinitely, until a press against it refuses.
+    setInterval(() => this.repaintAll(), 1000);
   }
 
   override onWillAppear(ev: WillAppearEvent<VerdictSettings>): void {
@@ -498,10 +506,20 @@ export class Verdict extends SingletonAction<VerdictSettings> {
 
     const outcome = await runFleetVerdict(verdict, verb);
     // DETAIL writes no decision -- it only focuses and selects the target
-    // session (see bin/fleet-verdict's _focus) -- and renderDetailSvg has
-    // no feedback channel to flash, since its face is already carrying the
-    // classification rather than a verb label. Repaint straight to idle.
+    // session (see bin/fleet-verdict's _focus) -- but the focus attempt
+    // itself can genuinely fail: no iterm_session recorded for the target,
+    // or fleet-focus exiting non-zero or timing out. Discarding `outcome`
+    // here would make a failed press indistinguishable from a missed one --
+    // exactly the failure bin/fleet-verdict's three-way exit status exists
+    // to prevent, reintroduced at the last hop -- so a non-delivered
+    // outcome flashes refused (via renderDetailFeedback, since the plain
+    // classification has no feedback channel of its own) before restoring.
     if (verdict === "detail") {
+      if (outcome !== "delivered") {
+        ev.action.setImage(toDataUri(this.render(verdict, this.target(), "refused")));
+        this.scheduleRestore(id, ev.action, verdict, 1200);
+        return;
+      }
       ev.action.setImage(toDataUri(this.render(verdict, this.target(), "")));
       return;
     }
@@ -517,7 +535,7 @@ export class Verdict extends SingletonAction<VerdictSettings> {
   }
 
   private render(verdict: string, target: VerdictTarget | null, feedback: VerdictFeedback): string {
-    if (verdict === "detail") return renderDetailSvg(target);
+    if (verdict === "detail") return renderDetailFeedback(target, feedback);
     const active = target !== null;
     const tier = target?.tier ?? "normal";
     return renderVerdictSvg(verdict.toUpperCase(), tier, feedback, active);

@@ -101,3 +101,21 @@ export function renderDetailSvg(target: VerdictTarget | null): string {
     "</svg>",
   ].join("");
 }
+
+/**
+ * DETAIL's idle face carries a classification (agent, tool, tier), not a
+ * feedback channel -- renderDetailSvg above has no marker for "refused".
+ * But the press it answers for can genuinely fail: bin/fleet-verdict's
+ * `_focus` returns REFUSED when the target has no recorded iterm_session,
+ * or when fleet-focus itself exits non-zero or times out. A silent no-op
+ * on that failure is exactly the "a key that does nothing is
+ * indistinguishable from a broken one" failure the three-way exit status
+ * exists to prevent, reintroduced at the last hop. So a non-delivered
+ * outcome borrows the generic verdict face -- the one render path that
+ * already has a "refused" marker -- instead of falling silently back to
+ * the classification; the classification returns once the flash clears.
+ */
+export function renderDetailFeedback(target: VerdictTarget | null, feedback: Feedback): string {
+  if (feedback === "") return renderDetailSvg(target);
+  return renderVerdictSvg("DETAIL", target?.tier ?? "normal", feedback, target !== null);
+}

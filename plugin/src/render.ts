@@ -62,11 +62,24 @@ export function renderSvg(
   // one thing on this panel allowed to shout. The pip says "this one has no
   // brakes" to an operator who looks; it does not pull the eye across a desk.
   //
+  // Two-tone, not a flat fill: a single colour composites away against
+  // whichever lifecycle background happens to match it, and #F5A623 (the
+  // original single-tone pip) is BYTE-IDENTICAL to the `blocked` background
+  // in config/fleet.json -- the one key where an operator scanning for "no
+  // brakes" agents would most need to see it, since Notification fires
+  // regardless of permission mode and idle-input/plan-mode prompts still
+  // fire under bypassPermissions. A dark ring around a light dot survives
+  // every state background: the ring separates from light fills (blocked,
+  // working, done), the dot separates from dark ones (idle, failed, empty,
+  // armed). See "the bypass pip never matches any lifecycle background
+  // colour" in render.test.mjs for the regression this guards.
+  //
   // An unknown mode draws no pip. Absence must never be read as "default":
   // that would tell the operator a session is guarded when we simply have
   // not heard from it yet, which is the wrong direction to err.
   const pip = permissionMode === "bypassPermissions"
-    ? `<circle cx="130" cy="14" r="5" fill="#F5A623" fill-opacity="0.85"/>`
+    ? `<circle cx="130" cy="14" r="7" fill="#0A0E13"/>`
+      + `<circle cx="130" cy="14" r="3.5" fill="#FFFFFF"/>`
     : "";
 
   // A halt is a fact about every agent, not one slot's state, so it hatches

@@ -208,3 +208,44 @@ PY
   [ "$status" -eq 2 ]
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }
+
+# --- REACHABLE: ui/verdict.html mirrors what it must offer -----------------
+#
+# tests/verbs.bats gained its REACHABLE test because FORK shipped valid and
+# working but absent from ui/command.html, so no key could ever be bound to
+# it -- see commit 09c1b31. ui/verdict.html hardcodes two lists of its own:
+# fleet-verdict's ACTIONS tuple, and the property-inspector's steer-verb
+# picker. Nothing asserted either mirror stayed true, so a fourth action or
+# steer verb could ship and silently be unreachable from Row 3. Both are
+# read from their real source -- ACTIONS out of this script, steer verbs out
+# of config/verbs/*.md's frontmatter -- rather than duplicated as a second
+# hardcoded list here, which would only move the drift risk, not close it.
+
+@test "REACHABLE: every fleet-verdict action appears in the property inspector" {
+  local pi="$ROOT/plugin/com.louisalexander.flightdeck.sdPlugin/ui/verdict.html"
+  local actions
+  actions="$(python3 -c "
+import re
+text = open('$BIN/fleet-verdict').read()
+m = re.search(r'ACTIONS = \(([^)]*)\)', text)
+print(' '.join(re.findall(r'\"([a-z]+)\"', m.group(1))))
+")"
+  [ -n "$actions" ] || { echo "could not parse ACTIONS out of fleet-verdict"; false; }
+  local missing=""
+  for action in $actions; do
+    grep -q "value=\"$action\"" "$pi" || missing="$missing $action"
+  done
+  [ -z "$missing" ] || { echo "not offered in the verdict picker:$missing"; false; }
+}
+
+@test "REACHABLE: every steer verb appears in the property inspector's steer-verb picker" {
+  local pi="$ROOT/plugin/com.louisalexander.flightdeck.sdPlugin/ui/verdict.html"
+  local missing=""
+  for f in "$ROOT"/config/verbs/*.md; do
+    grep -q "^steer: true$" "$f" || continue
+    local id
+    id="$(basename "$f" .md)"
+    grep -q "value=\"$id\"" "$pi" || missing="$missing $id"
+  done
+  [ -z "$missing" ] || { echo "not offered in the steer-verb picker:$missing"; false; }
+}

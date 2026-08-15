@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { renderSvg, toDataUri } from "../com.louisalexander.flightdeck.sdPlugin/bin/render.js";
 import {
   tileViewBox, splashTileSvg, nightTileSvg, bootConfig, isBooting,
@@ -272,6 +273,30 @@ test("a halted fleet hatches every key", () => {
   assert.match(svg, /pattern|hatch/i);
 });
 
+// A flat-colour pip once shipped as #F5A623 -- byte-identical to the
+// `blocked` background in config/fleet.json, so it composited away on
+// exactly the key an operator scanning for "no brakes" agents would most
+// need it visible on (blocked fires under bypassPermissions same as any
+// other mode). Reads real backgrounds from config/fleet.json, not a
+// hardcoded list, so a future state addition is checked against the pip
+// automatically rather than trusting whoever adds it to remember this bug.
+test("the bypass pip never matches any lifecycle background colour", () => {
+  const fleetConfigPath = new URL("../../config/fleet.json", import.meta.url);
+  const fleetConfig = JSON.parse(readFileSync(fleetConfigPath, "utf8"));
+  const backgrounds = new Set(
+    Object.values(fleetConfig.states).map((s) => String(s.color).toUpperCase())
+  );
+  const svg = renderSvg(slot, cfg, false, "bypassPermissions", false);
+  const pipCircles = [...svg.matchAll(/<circle cx="130" cy="14"[^>]*fill="(#[0-9A-Fa-f]{6})"/g)];
+  assert.ok(pipCircles.length > 0, "the pip actually renders at least one circle");
+  for (const [, color] of pipCircles) {
+    assert.ok(
+      !backgrounds.has(color.toUpperCase()),
+      `pip colour ${color} collides with a lifecycle background from config/fleet.json`
+    );
+  }
+});
+
 // --- Row 2 command keys -------------------------------------------------
 import { renderCommandSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/command.js";
 
@@ -319,7 +344,7 @@ console.log("render tests passed");
 // --- Row 3 verdict keys --------------------------------------------------
 // Import from the bundle rollup actually emits, matching how renderSvg and
 // renderCommandSvg are imported above -- there is no separate dist/ output.
-import { renderVerdictSvg, renderDetailSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
+import { renderVerdictSvg, renderDetailSvg, renderDetailFeedback } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
 
 test("a verdict key at rest keeps its label, dimmed", () => {
   const svg = renderVerdictSvg("APPROVE", "normal", "", false);
@@ -366,4 +391,22 @@ test("detail never renders tool input", () => {
     input_summary: "rm -rf /",
   });
   assert.doesNotMatch(svg, /rm -rf/);
+});
+
+// A failed DETAIL press (no iterm_session recorded for the target, or
+// fleet-focus itself failing/timing out) must not be silent -- see
+// bin/fleet-verdict's `_focus`, which genuinely returns REFUSED on both
+// paths. renderDetailSvg alone has no feedback channel to show that, so
+// plugin.ts's Verdict action routes a non-delivered outcome through this
+// function instead, which must actually change what is drawn.
+test("a refused DETAIL press is not silent", () => {
+  const idle = renderDetailFeedback(null, "");
+  const refused = renderDetailFeedback(null, "refused");
+  assert.notStrictEqual(idle, refused);
+  assert.match(refused, /DETAIL/);
+});
+
+test("a delivered DETAIL outcome falls through to the plain classification", () => {
+  const target = { session_id: "S1", agent: "flightdeck", tool: "Bash", tier: "normal", repeats: 1 };
+  assert.strictEqual(renderDetailFeedback(target, ""), renderDetailSvg(target));
 });
