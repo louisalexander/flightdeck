@@ -21,6 +21,7 @@ import os
 import signal
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -183,16 +184,18 @@ def run():
             repo = Path(top).name
 
     # The identity of THIS request, so a decision can be checked against it
-    # rather than merely against the session id. prompt_id (docs/hook-
-    # contract.md: on every event, unique per turn) is preferred; input_digest
-    # is the fallback for a payload without one, and is weaker -- an
-    # identical retried call shares its digest, so a decision meant for the
-    # earlier attempt would still match. See C1 in the row-3-verdict-and-halt
-    # review: without this, a decision file left over from ANY earlier
-    # request for this session -- a crashed decide, a double press landing in
-    # the claim/unlink window -- auto-answers a request no human ever saw.
-    prompt_id = payload.get("prompt_id")
-    request_id = prompt_id if isinstance(prompt_id, str) and prompt_id.strip() else digest
+    # rather than merely against the session id. Minted fresh here with
+    # uuid4 -- NOT payload.get("prompt_id"). prompt_id is unique per TURN
+    # (docs/hook-contract.md), and a single turn can raise several
+    # PermissionRequests for several tool calls, all sharing one prompt_id;
+    # round-2 review (N2) reproduced a decision meant for an earlier call in
+    # the same turn being accepted as the answer to a later, unrelated one.
+    # Nothing outside this process needs to predict the id -- fleet-verdict
+    # reads it back out of the pending record it stages below -- so a random
+    # one is strictly stronger with no cost, and there is no weaker fallback
+    # to fall back to. prompt_id is still recorded in the pending record
+    # below as a plain debugging field, never as the identity check itself.
+    request_id = uuid.uuid4().hex
 
     # A denied agent may retry the identical call immediately, which would
     # otherwise produce a fresh prompt per press forever. Counting repeats
@@ -208,6 +211,9 @@ def run():
         "tool": tool_name,
         "input_digest": digest,
         "request_id": request_id,
+        # Debugging only -- never the identity check. See the comment on
+        # request_id above for why prompt_id itself cannot be that.
+        "prompt_id": payload.get("prompt_id") if isinstance(payload.get("prompt_id"), str) else "",
         "input_summary": _summarise(tool_input),
         "tier": tier,
         "suggestion": _first_suggestion(payload),
@@ -237,18 +243,29 @@ def run():
         _touch_session_blocked(session_id, now)
         _reconcile()
 
-        # A decision file can only legitimately answer THIS request if it
-        # was written after the request was staged above. Anything already
-        # sitting in decisions/ at this point predates this request by
-        # construction -- leftover from a crashed decide or a double press
-        # -- so claim and drop it before it can be misread as the answer to
-        # what we are about to ask.
+        # A decision can already be sitting in decisions/ by the time we get
+        # here, and it can be entirely legitimate: the pending record was
+        # staged (and so resolve_target() already resolves to this session)
+        # before create_blocked_marker, _touch_session_blocked and the
+        # _reconcile() subprocess above ran, and a Row 3 press landing
+        # anywhere in that window -- realistically hundreds of ms, up to
+        # 10s if a renderer hangs -- produces a correctly request_id-stamped
+        # decision before the wait loop below ever starts polling. Round-2
+        # review (N1): discarding it unconditionally here threw away a real
+        # press with nothing but a log line to show for it. Only claim and
+        # drop it if it does NOT match -- the wait loop already rejects a
+        # mismatch on its own, so an unconditional purge bought nothing.
         leftover = fleetlib.claim_decision(session_id)
         if leftover is not None:
-            fleetlib.log("decide: discarding stale decision for {} predating this request".format(
-                session_id))
+            if _matches_request(leftover, request_id):
+                decision = leftover
+            else:
+                fleetlib.log(
+                    "decide: discarding stale decision for {} predating this request".format(
+                        session_id))
 
-        decision = _wait_for_decision(session_id, _timeout_secs(config), request_id)
+        if decision is None:
+            decision = _wait_for_decision(session_id, _timeout_secs(config), request_id)
     finally:
         try:
             fleetlib.pending_path(session_id).unlink()

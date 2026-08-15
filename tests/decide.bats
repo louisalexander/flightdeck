@@ -8,22 +8,44 @@ setup() {
   export FLEET_DECIDE_TIMEOUT_SECS=1
   export FLEET_SKIP_RECONCILE=1
   mkdir -p "$FLEET_HOME"
-  # prompt_id "P1" is the request identity fleet-decide stamps into the
-  # pending record as request_id (docs/hook-contract.md: prompt_id is on
-  # every event, unique per turn). Decision fixtures below carry a matching
-  # "request_id":"P1" so they are accepted as an answer to THIS request.
+  # prompt_id "P1" is recorded in the pending record purely as a debugging
+  # field. It is NOT the request identity: prompt_id is unique per TURN
+  # (docs/hook-contract.md), and one turn can raise several PermissionRequests
+  # for several tool calls sharing the same prompt_id -- round-2 review (N2)
+  # reproduced a decision meant for an earlier call in the same turn being
+  # accepted as the answer to a later, unrelated one. fleet-decide instead
+  # mints request_id fresh with uuid4() at staging time, so no fixture here
+  # can predict it in advance -- see request_id()/answer() below.
   PAYLOAD='{"session_id":"S1","cwd":"/tmp","prompt_id":"P1","tool_name":"Bash","tool_input":{"command":"rm -rf ./build"},"permission_suggestions":[{"type":"addRules","destination":"localSettings","rules":[{"toolName":"Bash","ruleContent":"rm:*"}],"behavior":"allow"}]}'
 }
 
 decide() { printf '%s' "${1:-$PAYLOAD}" | "$BIN/fleet-decide"; }
 pending() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" \
               "$FLEET_HOME/pending/S1.json" "$1"; }
+request_id() { pending request_id; }
+
+# Writes decisions/S1.json as <decision-json> merged with the request_id
+# fleet-decide actually minted for the pending record currently on disk --
+# the same round-trip fleet-verdict performs for real. Must be called after
+# fleet-decide has staged its pending record (poll or sleep for it first).
+answer() {
+  mkdir -p "$FLEET_HOME/decisions"
+  python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+d['request_id'] = json.load(open(sys.argv[2]))['request_id']
+json.dump(d, open(sys.argv[3], 'w'))
+" "$1" "$FLEET_HOME/pending/S1.json" "$FLEET_HOME/decisions/S1.json"
+}
 
 @test "a waiting decision is emitted as allow and the tool proceeds" {
-  mkdir -p "$FLEET_HOME/decisions"
-  printf '%s' '{"behavior":"allow","request_id":"P1"}' > "$FLEET_HOME/decisions/S1.json"
-  run decide
-  [ "$status" -eq 0 ]
+  OUT="$BATS_TEST_TMPDIR/out.txt"
+  decide > "$OUT" &
+  pid=$!
+  sleep 0.2
+  answer '{"behavior":"allow"}'
+  wait "$pid"
+  output="$(cat "$OUT")"
   [[ "$output" == *'"hookEventName":"PermissionRequest"'* ]]
   [[ "$output" == *'"behavior":"allow"'* ]]
   # permissionDecision is the documented PreToolUse field and is silently
@@ -33,37 +55,46 @@ pending() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.a
 }
 
 @test "a deny decision carries its message and interrupt flag" {
-  mkdir -p "$FLEET_HOME/decisions"
-  printf '%s' '{"behavior":"deny","message":"no","interrupt":true,"request_id":"P1"}' \
-    > "$FLEET_HOME/decisions/S1.json"
-  run decide
+  OUT="$BATS_TEST_TMPDIR/out.txt"
+  decide > "$OUT" &
+  pid=$!
+  sleep 0.2
+  answer '{"behavior":"deny","message":"no","interrupt":true}'
+  wait "$pid"
+  output="$(cat "$OUT")"
   [[ "$output" == *'"behavior":"deny"'* ]]
   [[ "$output" == *'"interrupt":true'* ]]
   [[ "$output" != *'permissionDecision'* ]]
 }
 
 @test "a deny decision with a non-string message and non-boolean interrupt normalises to a bare deny" {
-  mkdir -p "$FLEET_HOME/decisions"
-  printf '%s' '{"behavior":"deny","message":123,"interrupt":"yes","request_id":"P1"}' \
-    > "$FLEET_HOME/decisions/S1.json"
-  run decide
-  [ "$status" -eq 0 ]
+  OUT="$BATS_TEST_TMPDIR/out.txt"
+  decide > "$OUT" &
+  pid=$!
+  sleep 0.2
+  answer '{"behavior":"deny","message":123,"interrupt":"yes"}'
+  wait "$pid"
+  output="$(cat "$OUT")"
   [[ "$output" == *'"behavior":"deny"'* ]]
   [[ "$output" != *'"message"'* ]]
   [[ "$output" != *'"interrupt"'* ]]
 }
 
 @test "the decision file is consumed, not left behind" {
-  mkdir -p "$FLEET_HOME/decisions"
-  printf '%s' '{"behavior":"allow","request_id":"P1"}' > "$FLEET_HOME/decisions/S1.json"
-  decide >/dev/null
+  decide >/dev/null &
+  pid=$!
+  sleep 0.2
+  answer '{"behavior":"allow"}'
+  wait "$pid"
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }
 
 @test "the pending record is cleared once decided" {
-  mkdir -p "$FLEET_HOME/decisions"
-  printf '%s' '{"behavior":"allow","request_id":"P1"}' > "$FLEET_HOME/decisions/S1.json"
-  decide >/dev/null
+  decide >/dev/null &
+  pid=$!
+  sleep 0.2
+  answer '{"behavior":"allow"}'
+  wait "$pid"
   [ ! -f "$FLEET_HOME/pending/S1.json" ]
 }
 
@@ -139,11 +170,16 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
 }
 
 @test "a decision with an unrecognised behavior is discarded, nothing emitted" {
-  mkdir -p "$FLEET_HOME/decisions"
-  printf '%s' '{"behavior":"maybe","request_id":"P1"}' > "$FLEET_HOME/decisions/S1.json"
-  run decide
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  # Must be a genuinely MATCHING decision, not a stale/mismatched one -- a
+  # mismatched fixture would be discarded for the wrong reason (identity,
+  # not _normalise rejecting "maybe") and prove nothing about this path.
+  OUT="$BATS_TEST_TMPDIR/out.txt"
+  decide > "$OUT" &
+  pid=$!
+  sleep 0.2
+  answer '{"behavior":"maybe"}'
+  wait "$pid"
+  [ -z "$(cat "$OUT")" ]
 }
 
 @test "a decision file that is valid JSON but not an object is discarded, nothing emitted" {
@@ -179,6 +215,30 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "a decision already present when the purge runs is honoured if it matches, not discarded" {
+  # Round-2 review (N1): the pending record is on disk (and so
+  # resolve_target() already resolves to this session) before
+  # create_blocked_marker, _touch_session_blocked and _reconcile() run, so a
+  # Row 3 press landing anywhere in that window can produce a correctly
+  # request_id-stamped decision before the wait loop ever starts polling.
+  # The old unconditional purge threw that answer away with nothing but a
+  # log line to show for it. Races to answer as soon as the pending record
+  # exists, landing the decision as close to the staging window as this
+  # harness allows -- whether the pre-wait purge's honour branch or the wait
+  # loop's first poll actually claims it, the answer must not be dropped.
+  OUT="$BATS_TEST_TMPDIR/out.txt"
+  decide > "$OUT" &
+  pid=$!
+  for _ in $(seq 1 50); do
+    [ -f "$FLEET_HOME/pending/S1.json" ] && break
+    sleep 0.02
+  done
+  answer '{"behavior":"allow"}'
+  wait "$pid"
+  output="$(cat "$OUT")"
+  [[ "$output" == *'"behavior":"allow"'* ]]
 }
 
 @test "a decision with a mismatched request_id is rejected, not consumed" {

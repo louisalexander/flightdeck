@@ -234,24 +234,60 @@ def claim_decision(session_id):
 
 PENDING_TTL_DEFAULT_SECS = 300
 
+# Kept in sync BY HAND with bin/fleet-decide's own DEFAULT_TIMEOUT_SECS.
+# fleet-decide is a standalone script, not an importable module, so the two
+# constants cannot share one definition -- this is the closest available.
+DECIDE_TIMEOUT_DEFAULT_SECS = 120
+
+# How much longer the TTL floor must outlive the decide timeout (see
+# _pending_ttl_secs below).
+PENDING_TTL_MARGIN_SECS = 60
+
+
+def _decide_timeout_secs(config):
+    """How long a live fleet-decide will wait, per timings.decideTimeoutSecs.
+
+    Only reads the config's decideTimeoutSecs -- deliberately not
+    FLEET_DECIDE_TIMEOUT_SECS, which is a per-invocation test override on
+    fleet-decide's own process, not a fleet-wide setting this shared
+    library has any business reading.
+    """
+    timings = config.get("timings") if isinstance(config, dict) else None
+    if isinstance(timings, dict):
+        value = timings.get("decideTimeoutSecs")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    return float(DECIDE_TIMEOUT_DEFAULT_SECS)
+
 
 def _pending_ttl_secs():
     """How old a pending record may be before it is treated as dead.
 
     Configurable via timings.pendingTtlSecs; 300s in code if unset. This is
     the backstop for a fleet-decide killed by SIGKILL, which no signal
-    handler and no try/finally can intercept -- fleet-decide's own wait
-    timeout is 120s and Claude Code kills the hook at its documented
-    timeout: 130, so no live hook can own a record older than that. A
-    record surviving past this floor is proven dead, not merely slow.
+    handler and no try/finally can intercept -- a record surviving past
+    this floor is proven dead, not merely slow.
+
+    Floored at the configured decide timeout plus a margin
+    (PENDING_TTL_MARGIN_SECS, 60s): round-2 review flagged that
+    timings.decideTimeoutSecs and timings.pendingTtlSecs were two
+    independent knobs with no relationship enforced between them, so
+    configuring the former above the latter would make a live
+    fleet-decide's own pending record fall off resolve_target() while
+    fleet-decide is still legitimately waiting on it. The TTL exists to
+    prove a record is dead; a record a live hook still owns is
+    definitionally not, so the floor makes that misconfiguration
+    unreachable rather than merely undocumented.
     """
     config = load_config()
     timings = config.get("timings") if isinstance(config, dict) else None
+    configured = PENDING_TTL_DEFAULT_SECS
     if isinstance(timings, dict):
         value = timings.get("pendingTtlSecs")
         if isinstance(value, (int, float)) and value > 0:
-            return float(value)
-    return float(PENDING_TTL_DEFAULT_SECS)
+            configured = value
+    floor = _decide_timeout_secs(config) + PENDING_TTL_MARGIN_SECS
+    return float(max(configured, floor))
 
 
 def read_pending_all():

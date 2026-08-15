@@ -843,6 +843,7 @@ answerable -- so every failure degrades to not having flightdeck."
 - Consumes: `fleetlib.resolve_target`, `pending_path`, `decision_path`, `claim_verb_arm`, `verb_armed_path`, `write_focus`
 - Produces: `bin/fleet-verdict <approve|remember|deny|interrupt|steer|detail> [verb-id]`
   - exit `0` delivered, `1` refused, `2` armed
+  - every decision file written carries `request_id`, copied verbatim from the pending record's own `request_id` — fleet-decide (Task 3) mints that id per request and discards any decision whose `request_id` does not match the one currently staged, so a decision missing it is silently thrown away, not delivered
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -860,10 +861,13 @@ setup() {
 }
 
 stage() {  # stage <session> <tier> [suggestion-json]
+  # request_id is deterministic here (req-<session>) purely so tests can
+  # assert on it; fleet-decide mints a real uuid4 at staging time.
   python3 - "$FLEET_HOME/pending/$1.json" "$1" "$2" "${3:-null}" <<'PY'
 import json,sys
 path,sid,tier,sugg = sys.argv[1:5]
 json.dump({"session_id":sid,"tool":"Bash","input_digest":"sha256:a",
+           "request_id":"req-"+sid,
            "input_summary":"x","tier":tier,"suggestion":json.loads(sugg),
            "repo":"flightdeck","cwd":"/tmp","repeats":1,"requested_at":1}, open(path,"w"))
 PY
@@ -881,6 +885,13 @@ decision() { python3 -c "import json,sys;print(json.dumps(json.load(open(sys.arg
   run "$BIN/fleet-verdict" approve
   [ "$status" -eq 0 ]
   [[ "$(decision S1)" == *'"behavior": "allow"'* ]]
+}
+
+@test "a decision carries the pending record's request_id verbatim" {
+  stage S1 normal
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 0 ]
+  [[ "$(decision S1)" == *'"request_id": "req-S1"'* ]]
 }
 
 @test "approve on a high tier arms first" {
@@ -1090,23 +1101,30 @@ def _steer_message(verb_id):
 
 
 def _decision_for(action, record, verb_id):
+    # request_id is copied verbatim from the pending record, never minted
+    # here: fleet-decide stamps a fresh uuid4 onto the record at staging
+    # and discards any decision whose request_id does not match the one
+    # currently staged (Task 3), so a decision missing this would be
+    # delivered by this process and then silently thrown away by that one.
+    request_id = record.get("request_id")
     if action == "approve":
-        return {"behavior": "allow"}
+        return {"behavior": "allow", "request_id": request_id}
     if action == "remember":
         suggestion = record.get("suggestion")
         if not isinstance(suggestion, dict):
             fleetlib.log("verdict: no suggestion to remember")
             return None
-        return {"behavior": "allow", "updatedPermissions": [suggestion]}
+        return {"behavior": "allow", "updatedPermissions": [suggestion], "request_id": request_id}
     if action == "deny":
-        return {"behavior": "deny", "message": DENY_MESSAGE}
+        return {"behavior": "deny", "message": DENY_MESSAGE, "request_id": request_id}
     if action == "interrupt":
-        return {"behavior": "deny", "message": INTERRUPT_MESSAGE, "interrupt": True}
+        return {"behavior": "deny", "message": INTERRUPT_MESSAGE, "interrupt": True,
+                "request_id": request_id}
     if action == "steer":
         message = _steer_message(verb_id)
         if not message:
             return None
-        return {"behavior": "deny", "message": message}
+        return {"behavior": "deny", "message": message, "request_id": request_id}
     return None
 
 

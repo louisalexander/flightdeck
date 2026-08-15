@@ -564,10 +564,36 @@ class PendingTests(unittest.TestCase):
         try:
             os.environ["FLEET_CONFIG_DIR"] = cfg_dir
             with open(os.path.join(cfg_dir, "fleet.json"), "w", encoding="utf-8") as handle:
-                json.dump({"timings": {"pendingTtlSecs": 5}}, handle)
-            self._pending("OLD", 10)
-            self._pending("FRESH", 1)
+                # decideTimeoutSecs kept low so the decide-timeout coupling
+                # floor exercised below (60s margin) does not itself swallow
+                # this test's smaller pendingTtlSecs.
+                json.dump({"timings": {"decideTimeoutSecs": 1, "pendingTtlSecs": 100}}, handle)
+            self._pending("OLD", 150)
+            self._pending("FRESH", 10)
             self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["FRESH"])
+        finally:
+            os.environ.pop("FLEET_CONFIG_DIR", None)
+            shutil.rmtree(cfg_dir, ignore_errors=True)
+
+    def test_pending_ttl_floors_at_the_decide_timeout_plus_margin(self):
+        # Round-2 review: timings.decideTimeoutSecs and timings.pendingTtlSecs
+        # were two independent knobs with no relationship enforced -- setting
+        # the former above the latter would make a live fleet-decide's own
+        # pending record fall off resolve_target() while it is still
+        # legitimately waiting on it.
+        cfg_dir = tempfile.mkdtemp()
+        try:
+            os.environ["FLEET_CONFIG_DIR"] = cfg_dir
+            with open(os.path.join(cfg_dir, "fleet.json"), "w", encoding="utf-8") as handle:
+                # pendingTtlSecs (100) configured BELOW decideTimeoutSecs (300).
+                json.dump({"timings": {"decideTimeoutSecs": 300, "pendingTtlSecs": 100}}, handle)
+            # 200s old: past the configured pendingTtlSecs (100) but still
+            # within decideTimeoutSecs + the 60s margin (360) -- a live
+            # fleet-decide waiting that long must not have its own record
+            # vanish out from under it mid-wait.
+            self._pending("STILL_WAITING", 200)
+            self.assertEqual(
+                [p["session_id"] for p in fleetlib.read_pending_all()], ["STILL_WAITING"])
         finally:
             os.environ.pop("FLEET_CONFIG_DIR", None)
             shutil.rmtree(cfg_dir, ignore_errors=True)
