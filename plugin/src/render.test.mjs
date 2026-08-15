@@ -248,6 +248,30 @@ assert.ok(
   "an armed key shows no focus border"
 );
 
+// --- Row 1 bypass pip and halted hatch -----------------------------------
+
+test("a bypassed session gets a quiet corner pip", () => {
+  const svg = renderSvg(slot, cfg, false, "bypassPermissions", false);
+  assert.match(svg, /<circle/);
+});
+
+test("a default-mode session gets no pip", () => {
+  const plain = renderSvg(slot, cfg, false, "default", false);
+  const bypassed = renderSvg(slot, cfg, false, "bypassPermissions", false);
+  assert.notEqual(plain, bypassed);
+});
+
+test("an unknown mode gets no pip, since we must not claim it is guarded", () => {
+  const unknown = renderSvg(slot, cfg, false, "", false);
+  const plain = renderSvg(slot, cfg, false, "default", false);
+  assert.equal(unknown, plain);
+});
+
+test("a halted fleet hatches every key", () => {
+  const svg = renderSvg(slot, cfg, false, "default", true);
+  assert.match(svg, /pattern|hatch/i);
+});
+
 // --- Row 2 command keys -------------------------------------------------
 import { renderCommandSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/command.js";
 

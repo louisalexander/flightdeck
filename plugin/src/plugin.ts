@@ -178,7 +178,9 @@ export class FleetSlot extends SingletonAction<Settings> {
     const showSplash = shouldShowSplash(boot, elapsed, slot.state);
 
     ev.action.setTitle("");            // the SVG carries all text
-    const svg = showSplash ? splashTileSvg(0, column) : renderSvg(slot, this.config, armed);
+    const svg = showSplash
+      ? splashTileSvg(0, column)
+      : renderSvg(slot, this.config, armed, slot.permission_mode, !!file?.halted);
     ev.action.setImage(toDataUri(svg));
   }
 }
