@@ -196,3 +196,63 @@ print(cmds[0])
   [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]] || return 1
   [[ "$surviving" != *"$OLD_REPO"* ]] || return 1
 }
+
+# PermissionRequest is what actually runs bin/fleet-decide -- without this
+# entry surviving the merge, Row 3's whole verdict flow is inert even
+# though fleet-decide itself works fine when invoked by hand.
+
+@test "MERGE: the merged settings carry a PermissionRequest hook naming fleet-decide, timed out AFTER fleet-decide's own wait" {
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  py() { python3 -c "import json; d=json.load(open('$TARGET')); print($1)"; }
+
+  [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 1 ]
+  [[ "$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]')" == *"/bin/fleet-decide"* ]] || return 1
+
+  # The relationship, not just a number: fleet-decide blocks for up to
+  # timings.decideTimeoutSecs (120s by default) before returning having
+  # emitted nothing. If Claude Code's own hook timeout fired FIRST, the
+  # killed process would leak its pending record -- the exact leak
+  # fleet-decide's own two hardening rounds were about. Reading
+  # fleetlib's default here (not hardcoding 120) means tuning that
+  # default without also widening this hook's timeout fails this test,
+  # rather than silently reintroducing the leak.
+  decide_default="$(python3 -c "
+import sys; sys.path.insert(0, '$BIN')
+import fleetlib
+print(fleetlib.DECIDE_TIMEOUT_DEFAULT_SECS)
+")"
+  hook_timeout="$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"]')"
+  [ "$hook_timeout" -gt "$decide_default" ]
+}
+
+@test "MERGE: a second run does not duplicate the PermissionRequest hook" {
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  cp "$TARGET" "$BACKUP"
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  py() { python3 -c "import json; d=json.load(open('$TARGET')); print($1)"; }
+  [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 1 ]
+}
+
+@test "MERGE: a foreign PermissionRequest hook survives alongside ours" {
+  cat >"$TARGET" <<EOF
+{
+  "hooks": {
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/opt/other-plugin/decide.sh" }] }]
+  }
+}
+EOF
+  cp "$TARGET" "$BACKUP"
+
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  py() { python3 -c "import json; d=json.load(open('$TARGET')); print($1)"; }
+  [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 2 ]
+  [ "$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]')" = "/opt/other-plugin/decide.sh" ]
+}
