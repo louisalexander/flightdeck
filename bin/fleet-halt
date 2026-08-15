@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""HALT: stop the fleet from one key.
+
+Not a hook: may exit non-zero, because a halt that did not happen must be
+visible.
+
+Two mechanisms, deliberately. The latch is a file, read by a pure-shell
+clause in the PreToolUse hook, so no tool call in any permission mode can
+proceed -- including under bypassPermissions and
+--dangerously-skip-permissions, both verified. The interrupt is ESC, sent
+only to sessions Row 1 already knows are `working`.
+
+ESC is NOT sent to a blocked session. There, ESC is not an interrupt: it
+selects "No, and tell Claude what to do differently" and opens a text box,
+leaving a session in a state the operator did not choose and is not
+looking at. The deny already covers those sessions.
+
+Honest about its own limits: the deny latch guarantees that nothing an
+agent does reaches the machine. It does NOT guarantee the agent stops --
+the model on the other end receives a denial and reasons about it, and is
+free to retry the same call or try to route around the block. HALT stops
+the hands, not the head.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+INTERRUPTIBLE_STATES = ("working",)
+OSASCRIPT_TIMEOUT_SECS = 20
+
+ESC_SCRIPT = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{uuid}" then
+          tell s to write text (ASCII character 27) newline NO
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+'''
+
+
+def _sessions():
+    out = []
+    try:
+        entries = sorted(fleetlib.sessions_dir().iterdir())
+    except Exception:
+        return out
+    for entry in entries:
+        data = fleetlib.read_json(entry)
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def _interrupt(session):
+    uuid = session.get("iterm_session") or ""
+    # Reject anything that is not plain alphanumeric-plus-hyphen rather than
+    # escaping it: the value is interpolated into AppleScript, and a
+    # charset with no metacharacters leaves nothing to reason about. Same
+    # rule as bin/fleet-focus.
+    if not uuid or not all(c.isalnum() or c == "-" for c in uuid):
+        return False
+    binary = os.environ.get("FLEET_OSASCRIPT") or "osascript"
+    try:
+        proc = subprocess.run([binary, "-e", ESC_SCRIPT.format(uuid=uuid)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=OSASCRIPT_TIMEOUT_SECS)
+        return proc.returncode == 0
+    except Exception as err:
+        fleetlib.log("halt: osascript failed for {}: {}".format(uuid, err))
+        return False
+
+
+def _reconcile():
+    if os.environ.get("FLEET_SKIP_RECONCILE") == "1":
+        return
+    try:
+        subprocess.run([sys.executable,
+                        str(Path(__file__).resolve().parent / "fleet-reconcile")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except Exception:
+        pass
+
+
+def run(argv):
+    if "--off" in argv:
+        try:
+            fleetlib.halt_path().unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as err:
+            fleetlib.log("halt: could not clear latch: {}".format(err))
+            return 1
+        fleetlib.log("halt: cleared")
+        _reconcile()
+        return 0
+
+    try:
+        # write_text_atomic rather than a bare touch(): the shell gate
+        # treats the latch's mere existence as load-bearing, so even the
+        # very first write must never be observable half-done.
+        fleetlib.write_text_atomic(fleetlib.halt_path(), "")
+    except Exception as err:
+        fleetlib.log("halt: could not write latch: {}".format(err))
+        return 1
+
+    interrupted = 0
+    for session in _sessions():
+        if session.get("state") in INTERRUPTIBLE_STATES and _interrupt(session):
+            interrupted += 1
+    fleetlib.log("halt: latched, interrupted {} working session(s)".format(interrupted))
+    _reconcile()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(run(sys.argv[1:]))
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("halt: unhandled {!r}".format(err))
+        sys.exit(1)

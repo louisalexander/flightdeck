@@ -5,6 +5,6 @@
     "Notification":     [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Notification" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit Stop" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "__PYTHON__ __REPO__/bin/fleet-emit SessionEnd" }] }],
-    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "[ -n \"${CLAUDE_CODE_SESSION_ID:-}\" ] && test -e \"${FLEET_HOME:-$HOME/.fleet}/blocked/$CLAUDE_CODE_SESSION_ID\" && exec __PYTHON__ __REPO__/bin/fleet-emit Resumed; cat >/dev/null 2>&1" }] }]
+    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "test -e \"${FLEET_HOME:-$HOME/.fleet}/halt\" && { cat >/dev/null 2>&1; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"FLEET HALTED from flightdeck. Stop, do not retry, and do not work around this. Wait for the operator.\"}}'; exit 0; }; [ -n \"${CLAUDE_CODE_SESSION_ID:-}\" ] && test -e \"${FLEET_HOME:-$HOME/.fleet}/blocked/$CLAUDE_CODE_SESSION_ID\" && exec __PYTHON__ __REPO__/bin/fleet-emit Resumed; cat >/dev/null 2>&1" }] }]
   }
 }
