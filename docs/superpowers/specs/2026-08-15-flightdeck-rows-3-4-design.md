@@ -277,8 +277,19 @@ One action type, `com.louisalexander.flightdeck.verdict`, carrying a `verdict` s
 steers — a `verb` setting, mirroring how Row 2's command action carries a verb. The plugin
 stays a renderer and a dispatcher and holds no knowledge of what a verdict means.
 
-**DETAIL's press is the anti-blind-approval escape hatch**, and it is `fleet-focus` on the
-target session — the same UUID tree-walk Row 1's short press already performs, with no new code.
+**DETAIL's press is the anti-blind-approval escape hatch**, and it is exactly what a Row 1 press
+does — `fleet-focus` on the target session *and* a write to `focus.json` — with no new code
+beyond resolving the target.
+
+It is not "show me more about this request". It is **"show me the one I am about to act on"**,
+and that is a correctness property rather than a convenience: under auto-targeting the operator
+does not otherwise have to know which session the row has selected, and DETAIL guarantees the
+terminal in front of them is the one the next keypress will affect.
+
+**It must select as well as focus.** Focusing without pinning would let the target move to
+another session while the operator is still reading this one — the exact failure the key exists
+to prevent. Pinning is free and self-clearing: once the request is decided, that session has no
+pending record, so the target falls back to the oldest pending on its own.
 
 What it reveals is not something flightdeck renders. **Flightdeck never renders tool input
 anywhere.** The complete, authoritative rendering of the request already exists: Claude Code
