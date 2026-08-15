@@ -45,6 +45,21 @@ json.dump({'session_id':sys.argv[1],'state':sys.argv[2],'host':'iterm2',
 # __PYTHON__ pointed at a path that does not exist and __REPO__
 # substituted. Shared by every gate test so there is exactly one place
 # that parses hooks/settings.snippet.json.
+#
+# Every test below feeds it its payload with `<<<`, never with
+# `printf '{}' | $(gate_cmd)`. That pipe form is a trap: `|` binds
+# tighter than `&&`/`;`, so only the leading `test -e ...` in the gate
+# actually reads the piped payload -- the `cat` inside the deny branch
+# (and the plain `cat` in the not-halted fallthrough) reads THIS SCRIPT'S
+# OWN inherited stdin instead. If that never reaches EOF, the test hangs
+# forever with no diagnostic. `<<<` gives the whole `/bin/sh -c "..."`
+# process its own self-contained stdin, so nothing downstream can read
+# past it into whatever the test harness happened to leave open. Verified
+# empirically (see task-8-report.md, round 2): the pipe form hung
+# indefinitely against a stdin that never EOFs; `<<<` returned promptly
+# against the identical never-EOF stdin. No production impact -- Claude
+# Code execs the hook command with the payload already on its stdin, no
+# `printf |` prefix involved.
 gate_cmd() {
   local gate
   gate=$(python3 - "$ROOT/hooks/settings.snippet.json" <<'PY'
@@ -144,7 +159,7 @@ json.dump({'session_id':'M','state':'working','host':'iterm2',
   mkdir -p "$FLEET_HOME/blocked"
   touch "$FLEET_HOME/blocked/S1"
   run env FLEET_HOME="$FLEET_HOME" CLAUDE_CODE_SESSION_ID=S1 \
-      /bin/sh -c "printf '{}' | $(gate_cmd)"
+      /bin/sh -c "$(gate_cmd)" <<< '{}'
   [ "$status" -eq 0 ]
   [[ "$output" == *'"permissionDecision":"deny"'* ]] || return 1
 }
@@ -157,14 +172,14 @@ json.dump({'session_id':'M','state':'working','host':'iterm2',
 @test "the PreToolUse shell gate denies with NO python or other interpreter available" {
   touch "$FLEET_HOME/halt"
   run env PATH=/nonexistent FLEET_HOME="$FLEET_HOME" CLAUDE_CODE_SESSION_ID=S1 \
-      /bin/sh -c "printf '{}' | $(gate_cmd)"
+      /bin/sh -c "$(gate_cmd)" <<< '{}'
   [ "$status" -eq 0 ]
   [[ "$output" == *'"permissionDecision":"deny"'* ]] || return 1
 }
 
 @test "the shell gate is silent when not halted" {
   run env FLEET_HOME="$FLEET_HOME" CLAUDE_CODE_SESSION_ID=S1 \
-      /bin/sh -c "printf '{}' | $(gate_cmd)"
+      /bin/sh -c "$(gate_cmd)" <<< '{}'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }

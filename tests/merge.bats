@@ -225,6 +225,24 @@ print(fleetlib.DECIDE_TIMEOUT_DEFAULT_SECS)
 ")"
   hook_timeout="$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"]')"
   [ "$hook_timeout" -gt "$decide_default" ]
+
+  # NEW-2 (round-2 review): the check above alone passed only because
+  # HOOK_TIMEOUT_SECS (130) minus DECIDE_TIMEOUT_CEILING_MARGIN_SECS (10)
+  # happens to equal DECIDE_TIMEOUT_DEFAULT_SECS (120) -- coincidence, not
+  # coverage. Bumping fleetlib.HOOK_TIMEOUT_SECS to 200 without touching
+  # this hook's deployed "timeout" widens the ceiling to 190, silently
+  # disables the clamp fleetlib._decide_timeout_secs enforces, and
+  # reopens the SIGKILL/pending-leak path -- while the check above stays
+  # green (190 > 120 still holds). Asserting against
+  # fleetlib.DECIDE_TIMEOUT_CEILING_SECS directly (never hardcoded) closes
+  # that gap: the deployed hook timeout must outlive the actual clamp
+  # ceiling, not just the unclamped default.
+  decide_ceiling="$(python3 -c "
+import sys; sys.path.insert(0, '$BIN')
+import fleetlib
+print(fleetlib.DECIDE_TIMEOUT_CEILING_SECS)
+")"
+  [ "$hook_timeout" -gt "$decide_ceiling" ]
 }
 
 @test "MERGE: a second run does not duplicate the PermissionRequest hook" {

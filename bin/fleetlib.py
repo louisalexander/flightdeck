@@ -320,9 +320,13 @@ PENDING_TTL_DEFAULT_SECS = 300
 DECIDE_TIMEOUT_DEFAULT_SECS = 120
 
 # Kept in sync BY HAND with hooks/settings.snippet.json's PermissionRequest
-# "timeout", and with bin/fleet-decide's own HOOK_TIMEOUT_SECS -- same
-# constraint, same reason, as DECIDE_TIMEOUT_DEFAULT_SECS above: none of
-# JSON, a standalone script, and this module can share one definition.
+# "timeout" -- same constraint, same reason, as DECIDE_TIMEOUT_DEFAULT_SECS
+# above: JSON cannot import a Python constant from here. Unlike that pair,
+# bin/fleet-decide does NOT keep a second hand-synced copy of this one --
+# it already imports fleetlib (for other helpers) and references
+# DECIDE_TIMEOUT_CEILING_SECS below directly, so there is nothing to drift.
+# Do not "fix" that by adding a HOOK_TIMEOUT_SECS to fleet-decide; there is
+# deliberately only one definition of this half of the pair.
 HOOK_TIMEOUT_SECS = 130
 
 # The hard ceiling on a CONFIGURED decideTimeoutSecs, kept below
