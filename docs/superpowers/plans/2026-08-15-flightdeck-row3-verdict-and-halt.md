@@ -2173,3 +2173,92 @@ halt that nobody remembers setting looks exactly like a broken fleet."
 **Type consistency.** `resolve_target() -> str` is used identically in Tasks 4 and 7. `VerdictTarget` fields match `fleet-reconcile`'s `verdict` block exactly (`session_id`, `agent`, `tool`, `tier`, `repeats`). Exit codes `0/1/2` are the same triple in `fleet-verdict`, its bats tests, and the plugin's feedback mapping.
 
 **Known gap carried forward:** `fleet-verbs`' internal resolver name is referenced as `resolve` in Task 5; the implementer must use the real name in that file rather than adding a second resolver.
+
+---
+
+### Task 12: bats assertion integrity sweep
+
+Added during execution, not in the original plan. A Task 4 review found that
+`tests/verdict.bats`'s new assertion never failed: on macOS's system bash
+(3.2.57) a `[[ ]]` compound in a non-final position does not trip `set -e`,
+so the assertion is inert. Demonstrated:
+
+```
+/bin/bash -c 'set -e; [[ 1 == 2 ]]; echo REACHED'   ->  prints REACHED, rc=0
+/bin/bash -c 'set -e; [ 1 == 2 ]; echo REACHED'     ->  rc=1
+```
+
+This is repo-wide, not new: `tests/kill.bats` alone carries 28 `[[`
+occurrences and is the teardown guard the README calls "the highest-value
+test in the suite". Its assertions about refusing to delete dirty and
+unpushed worktrees may not have been verifying anything.
+
+This task runs BEFORE Task 6 so the remaining tasks inherit the corrected
+convention instead of adding more inert assertions.
+
+**Files:**
+- Modify: every `tests/*.bats`
+- Modify: `tests/run.sh` (add the guard)
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: a convention every later task must follow — in a bats file, every
+  `[[ ... ]]` is written `[[ ... ]] || return 1`
+
+- [ ] **Step 1: Prove the defect, and record the proof**
+
+Add to `tests/run.sh`, as a real check rather than a comment:
+
+```sh
+printf '\n== bats assertion integrity ==\n'
+# On macOS bash 3.2, `set -e` does not trip on a non-final [[ ]] compound, so
+# `[[ 1 == 2 ]]` mid-test is silently inert and the assertion never fails.
+# Requiring an explicit `|| return 1` on every [[ ]] makes the check
+# environment-independent rather than depending on which bash bats found.
+bad=$(grep -n '\[\[' "$ROOT"/tests/*.bats | grep -v '|| return 1' || true)
+if [ -n "$bad" ]; then
+  printf 'inert assertions (add `|| return 1`):\n%s\n' "$bad"
+  rc=1
+else
+  printf 'clean\n'
+fi
+```
+
+- [ ] **Step 2: Run it and see the suite fail**
+
+Run: `./tests/run.sh`
+Expected: the new check lists roughly 76 lines across `kill`, `verbs`,
+`decide`, `spawn`, `verdict`, `merge`, `send`, and exits non-zero.
+
+- [ ] **Step 3: Convert every occurrence**
+
+Append `|| return 1` to every `[[ ... ]]` line in `tests/*.bats`, including
+ones already in final position — uniformity is what makes the grep guard
+reliable. Do not convert `[[ ]]` to `[ ]`: several use `==` pattern matching
+that `[ ]` cannot express, and a mechanical rewrite would change semantics.
+
+- [ ] **Step 4: Run the full suite and confront what surfaces**
+
+Run: `./tests/run.sh`
+
+Assertions that were inert may now fail. **Each failure is a real finding, not
+noise.** For each one, determine whether the assertion was wrong or the code
+is wrong, fix the correct side, and record it in the report. Do not weaken an
+assertion to make it pass — that reintroduces exactly what this task removes.
+`tests/kill.bats` deserves the most care: it guards against a Stream Deck key
+destroying uncommitted work.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/
+git commit -m "fix: make bats assertions actually assert
+
+On macOS bash 3.2, set -e does not trip on a non-final [[ ]] compound, so
+~76 assertions across the suite were inert -- including 28 in kill.bats,
+the teardown guard the README calls the highest-value test in the repo.
+
+Every [[ ]] now carries an explicit || return 1, and tests/run.sh fails if
+a bare one reappears. The guard is environment-independent rather than
+depending on which bash bats happened to find."
+```
