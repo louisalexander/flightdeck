@@ -319,6 +319,22 @@ PENDING_TTL_DEFAULT_SECS = 300
 # constants cannot share one definition -- this is the closest available.
 DECIDE_TIMEOUT_DEFAULT_SECS = 120
 
+# Kept in sync BY HAND with hooks/settings.snippet.json's PermissionRequest
+# "timeout", and with bin/fleet-decide's own HOOK_TIMEOUT_SECS -- same
+# constraint, same reason, as DECIDE_TIMEOUT_DEFAULT_SECS above: none of
+# JSON, a standalone script, and this module can share one definition.
+HOOK_TIMEOUT_SECS = 130
+
+# The hard ceiling on a CONFIGURED decideTimeoutSecs, kept below
+# HOOK_TIMEOUT_SECS by this margin. Without a ceiling, timings.
+# decideTimeoutSecs = 300 in a user's config would make a live fleet-decide
+# wait 300s while Claude Code kills the hook at HOOK_TIMEOUT_SECS (130s) --
+# and a hook killed by SIGKILL skips the `finally` that clears its pending
+# record, reintroducing the exact leak this file has already been
+# hardened against twice.
+DECIDE_TIMEOUT_CEILING_MARGIN_SECS = 10
+DECIDE_TIMEOUT_CEILING_SECS = HOOK_TIMEOUT_SECS - DECIDE_TIMEOUT_CEILING_MARGIN_SECS
+
 # How much longer the TTL floor must outlive the decide timeout (see
 # _pending_ttl_secs below).
 PENDING_TTL_MARGIN_SECS = 60
@@ -331,12 +347,17 @@ def _decide_timeout_secs(config):
     FLEET_DECIDE_TIMEOUT_SECS, which is a per-invocation test override on
     fleet-decide's own process, not a fleet-wide setting this shared
     library has any business reading.
+
+    Clamped to DECIDE_TIMEOUT_CEILING_SECS -- see that constant's comment.
+    A configured value above the ceiling is silently capped, not honoured
+    and not rejected: fleet-decide must never actually wait longer than
+    the deployed hook timeout allows, no matter what a config file says.
     """
     timings = config.get("timings") if isinstance(config, dict) else None
     if isinstance(timings, dict):
         value = timings.get("decideTimeoutSecs")
         if isinstance(value, (int, float)) and value > 0:
-            return float(value)
+            return min(float(value), float(DECIDE_TIMEOUT_CEILING_SECS))
     return float(DECIDE_TIMEOUT_DEFAULT_SECS)
 
 

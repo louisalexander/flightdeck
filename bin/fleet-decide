@@ -64,12 +64,24 @@ def _float_env(name, fallback):
 def _timeout_secs(config):
     env = _float_env("FLEET_DECIDE_TIMEOUT_SECS", None)
     if env is not None:
+        # A deliberate per-invocation TEST override, not a fleet-wide
+        # setting -- intentionally NOT clamped below. Nothing stops a test
+        # asking this process to wait past the ceiling on purpose.
         return env
     timings = config.get("timings") if isinstance(config, dict) else None
     if isinstance(timings, dict):
         value = timings.get("decideTimeoutSecs")
         if isinstance(value, (int, float)) and value > 0:
-            return float(value)
+            # Clamped to fleetlib.DECIDE_TIMEOUT_CEILING_SECS: a configured
+            # wait longer than Claude Code's own PermissionRequest hook
+            # timeout (fleetlib.HOOK_TIMEOUT_SECS) gets this process
+            # SIGKILLed mid-wait, which skips the `finally` that clears the
+            # pending record -- the exact leak this file was hardened
+            # against twice already. Referencing fleetlib's constant here
+            # (rather than a second hand-synced copy) is possible because,
+            # unlike DEFAULT_TIMEOUT_SECS above, this constant was
+            # introduced after fleet-decide already imported fleetlib.
+            return min(float(value), float(fleetlib.DECIDE_TIMEOUT_CEILING_SECS))
     return DEFAULT_TIMEOUT_SECS
 
 

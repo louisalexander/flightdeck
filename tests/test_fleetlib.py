@@ -581,22 +581,41 @@ class PendingTests(unittest.TestCase):
         # the former above the latter would make a live fleet-decide's own
         # pending record fall off resolve_target() while it is still
         # legitimately waiting on it.
+        #
+        # decideTimeoutSecs (110) is chosen just under
+        # DECIDE_TIMEOUT_CEILING_SECS (120, see the B2 clamp test below) so
+        # this test stays unclamped and keeps isolating the ttl/decide
+        # COUPLING it was written for, independent of the ceiling itself.
         cfg_dir = tempfile.mkdtemp()
         try:
             os.environ["FLEET_CONFIG_DIR"] = cfg_dir
             with open(os.path.join(cfg_dir, "fleet.json"), "w", encoding="utf-8") as handle:
-                # pendingTtlSecs (100) configured BELOW decideTimeoutSecs (300).
-                json.dump({"timings": {"decideTimeoutSecs": 300, "pendingTtlSecs": 100}}, handle)
-            # 200s old: past the configured pendingTtlSecs (100) but still
-            # within decideTimeoutSecs + the 60s margin (360) -- a live
+                # pendingTtlSecs (50) configured BELOW decideTimeoutSecs (110).
+                json.dump({"timings": {"decideTimeoutSecs": 110, "pendingTtlSecs": 50}}, handle)
+            # 90s old: past the configured pendingTtlSecs (50) but still
+            # within decideTimeoutSecs + the 60s margin (170) -- a live
             # fleet-decide waiting that long must not have its own record
             # vanish out from under it mid-wait.
-            self._pending("STILL_WAITING", 200)
+            self._pending("STILL_WAITING", 90)
             self.assertEqual(
                 [p["session_id"] for p in fleetlib.read_pending_all()], ["STILL_WAITING"])
         finally:
             os.environ.pop("FLEET_CONFIG_DIR", None)
             shutil.rmtree(cfg_dir, ignore_errors=True)
+
+    def test_decide_timeout_secs_honours_a_configured_value_under_the_ceiling(self):
+        self.assertEqual(fleetlib._decide_timeout_secs({"timings": {"decideTimeoutSecs": 30}}),
+                          30.0)
+
+    def test_decide_timeout_secs_clamps_a_configured_value_above_the_ceiling(self):
+        # B2: without this clamp, timings.decideTimeoutSecs = 9999 would make
+        # a live fleet-decide wait 9999s while Claude Code kills the hook at
+        # fleetlib.HOOK_TIMEOUT_SECS (130s) -- and a hook killed by SIGKILL
+        # skips the `finally` that clears its pending record, the exact leak
+        # this file has already been hardened against twice.
+        self.assertEqual(
+            fleetlib._decide_timeout_secs({"timings": {"decideTimeoutSecs": 9999}}),
+            float(fleetlib.DECIDE_TIMEOUT_CEILING_SECS))
 
     def test_resolve_target_prefers_a_selection_that_is_pending(self):
         self._pending("A", 20)

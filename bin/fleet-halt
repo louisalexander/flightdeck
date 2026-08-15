@@ -4,25 +4,38 @@
 Not a hook: may exit non-zero, because a halt that did not happen must be
 visible.
 
-Two mechanisms, deliberately. The latch is a file, read by a pure-shell
-clause in the PreToolUse hook, so no tool call in any permission mode can
-proceed -- including under bypassPermissions and
---dangerously-skip-permissions, both verified. The interrupt is ESC, sent
-only to sessions Row 1 already knows are `working`.
+Two mechanisms, deliberately unlike each other. The latch is a file, read
+by a pure-shell clause in the PreToolUse hook with no interpreter
+involved, so while it exists every NEW tool call is denied before it
+runs -- even if flightdeck's own Python is broken or its config is
+unparseable. (Checked by hand, outside this repo's automated tests: a
+PreToolUse deny blocks the call under both bypassPermissions and
+--dangerously-skip-permissions.) The latch says nothing about a tool call
+already running when it is written -- a long `Bash` keeps going unless
+ESC reaches it.
+
+The interrupt is ESC, sent only to sessions Row 1 already knows are
+`working`, and only when the session is an iTerm2 host with a
+well-formed id and osascript succeeds; anything else -- a non-iTerm2
+host, a malformed id, a failed osascript call -- is simply not
+interrupted.
 
 ESC is NOT sent to a blocked session. There, ESC is not an interrupt: it
 selects "No, and tell Claude what to do differently" and opens a text box,
 leaving a session in a state the operator did not choose and is not
-looking at. The deny already covers those sessions.
+looking at. The latch already denies any NEW tool call from those
+sessions.
 
-Honest about its own limits: the deny latch guarantees that nothing an
-agent does reaches the machine. It does NOT guarantee the agent stops --
-the model on the other end receives a denial and reasons about it, and is
-free to retry the same call or try to route around the block. HALT stops
-the hands, not the head.
+Honest about its own limits: the latch guarantees no NEW tool call
+reaches the machine while it is set. It does not reach back into a call
+already in flight, and it does not guarantee the agent stops -- the model
+receives a denial and reasons about it, free to retry the same call or
+try to route around the block. HALT stops the hands going forward. It
+does not stop a hand already moving, and it does not stop the head.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +45,16 @@ import fleetlib  # noqa: E402
 
 INTERRUPTIBLE_STATES = ("working",)
 OSASCRIPT_TIMEOUT_SECS = 20
+
+# iTerm2 session ids are UUIDs: 8-4-4-4-12 hex, case-insensitive. Mirrors
+# bin/fleet-focus's UUID_RE exactly (not imported: fleet-focus is a
+# standalone script, not a module) -- looser acceptance here would be the
+# kind of drift that eventually gets copied somewhere it matters. \Z (not
+# $) anchors the end exactly -- $ matches before a trailing newline, which
+# would otherwise let "<valid-uuid>\n" slip past the guard.
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\Z"
+)
 
 ESC_SCRIPT = '''
 tell application "iTerm2"
@@ -63,11 +86,11 @@ def _sessions():
 
 def _interrupt(session):
     uuid = session.get("iterm_session") or ""
-    # Reject anything that is not plain alphanumeric-plus-hyphen rather than
+    # Reject anything not shaped like a real iTerm2 session id rather than
     # escaping it: the value is interpolated into AppleScript, and a
     # charset with no metacharacters leaves nothing to reason about. Same
-    # rule as bin/fleet-focus.
-    if not uuid or not all(c.isalnum() or c == "-" for c in uuid):
+    # rule, same pattern, as bin/fleet-focus.
+    if not UUID_RE.match(uuid):
         return False
     binary = os.environ.get("FLEET_OSASCRIPT") or "osascript"
     try:
@@ -92,6 +115,14 @@ def _reconcile():
 
 
 def run(argv):
+    # Only these two exact shapes are recognised. A typo like "--of" must
+    # not silently fall through to the latch-writing branch below: that
+    # would halt the fleet on a misfire nobody asked for. Failing safe
+    # (fail-closed on latch, fail-open on --off) still has to fail LOUDLY.
+    if argv not in ([], ["--off"]):
+        fleetlib.log("halt: refusing unrecognised arguments {!r}".format(argv))
+        return 1
+
     if "--off" in argv:
         try:
             fleetlib.halt_path().unlink()
