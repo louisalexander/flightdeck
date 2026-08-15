@@ -24,7 +24,12 @@ sf() {
   python3 -c "import json,sys;d=json.load(open('$FLEET_HOME/slots.json'));\
 print([s for s in d['slots'] if s['index']==$1][0]['$2'])"
 }
-top() { python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));print(d['$1'])"; }
+# json.dumps (not a bare print) so a dict/bool/null value round-trips
+# exactly, quotes and all -- callers that pattern-match on the rendered
+# JSON (e.g. the verdict tests below) depend on that. .get() rather than
+# [$1] so a genuinely absent key reads as the string "null", not a
+# KeyError, matching what a caller comparing against "null" expects.
+top() { python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));print(json.dumps(d.get('$1')))"; }
 
 @test "sessions claim the lowest free slot and the file always has 8 entries" {
   mksession A working flightdeck main
@@ -231,9 +236,11 @@ EOF
 # the halt latch, the currently-targeted permission request, and each slot's
 # permission mode all travel there rather than teaching the plugin a second
 # source to poll.
-
-top() { python3 -c "import json,sys;print(json.dumps(json.load(open(sys.argv[1])).get(sys.argv[2])))" \
-          "$FLEET_HOME/slots.json" "$1"; }
+#
+# Uses the single `top()` helper defined near the top of this file
+# (extended, not duplicated, so the pre-existing `top overflow` callers
+# below cannot silently start reading a shadowed definition -- see the
+# 2026-08-15 fix-round-1 report entry).
 
 @test "halted is false when no latch exists" {
   "$BIN/fleet-reconcile"
