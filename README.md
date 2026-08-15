@@ -79,13 +79,15 @@ Stream Deck plugin  (paints 8 keys, dispatches key presses)
 osascript (iTerm2) / open -a (pinned app)
 ```
 
-The plugin is deliberately dumb: it watches one JSON file, paints colour and
-label, and on press shells out to a script. It ships exactly one action
-type, `Fleet Slot`, parameterised by a slot index. Every rule that's likely
-to change — what counts as blocked, how slots get assigned, what teardown
-means, how a host gets focused — lives in Python scripts under `bin/` that
-you edit and run directly from a terminal. Nothing there requires rebuilding
-or reinstalling the plugin.
+The plugin is deliberately dumb: each action type watches the fleet's state
+under `~/.fleet`, paints colour and label, and — for the three you press —
+shells out to a script. It ships four action types, each parameterised by
+whatever its row needs rather than by one fixed shape: a slot index for Row
+1, a verb for Row 2, a verdict (plus, for STEER, a verb) for Row 3. Every
+rule that's likely to change — what counts as blocked, how slots get
+assigned, what teardown means, how a host gets focused — lives in Python
+scripts under `bin/` that you edit and run directly from a terminal.
+Nothing there requires rebuilding or reinstalling the plugin.
 
 Writes are event-driven, cleanup is polled: a hook fires on a real state
 transition, so a key turns amber the instant an agent blocks, with no
