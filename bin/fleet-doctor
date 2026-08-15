@@ -113,9 +113,23 @@ def main():
         # outcome when both a latch and a blocked marker are present (see
         # tests/halt.bats B1). A future edit that reordered them would leave
         # HALT silently not winning, with nothing else here to catch it.
-        pretooluse_blob = json.dumps(hooks.get("PreToolUse") or [])
-        halt_idx = pretooluse_blob.find("/halt")
-        blocked_idx = pretooluse_blob.find("/blocked/")
+        #
+        # Anchored on `marker` (the same fleet-emit path this checkout
+        # owns), exactly like the two checks above -- not on the whole
+        # PreToolUse array. A third-party PreToolUse hook containing
+        # "/halt" earlier in the array could otherwise mask a genuine
+        # reorder of OUR clause, and one containing "/blocked/" could fail
+        # a correct install for a reason that has nothing to do with us.
+        our_pretooluse = ""
+        for entry in hooks.get("PreToolUse") or []:
+            if not isinstance(entry, dict):
+                continue
+            for h in entry.get("hooks") or []:
+                command = h.get("command") or "" if isinstance(h, dict) else ""
+                if marker in command:
+                    our_pretooluse = command
+        halt_idx = our_pretooluse.find("/halt")
+        blocked_idx = our_pretooluse.find("/blocked/")
         if halt_idx != -1 and blocked_idx != -1 and halt_idx < blocked_idx:
             ok("halt clause precedes the resumed guard")
         else:
