@@ -25,6 +25,15 @@ export type VerdictTarget = {
   tool: string;
   tier: string;
   repeats: number;
+  // The two fields REMEMBER's armed face needs, and nothing else reads.
+  // `repo` is the CANONICAL repository (bin/fleet-decide derives it from
+  // git's --git-common-dir, never the worktree the agent runs in), because
+  // the rule REMEMBER writes lands in the canonical repo root and widens
+  // every worktree of it. `rule` is Claude Code's own suggestion rendered
+  // as one line, e.g. `Bash(git push:*)`, formatted by bin/fleet-reconcile
+  // so the plugin stays a renderer. Both are "" when unknown.
+  repo?: string;
+  rule?: string;
 };
 
 export type SlotsFile = {

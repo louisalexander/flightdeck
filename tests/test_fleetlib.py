@@ -294,6 +294,71 @@ class GitTests(unittest.TestCase):
             self.assertLess(elapsed, 10)
 
 
+class CanonicalRepoNameTests(unittest.TestCase):
+    """The repository REMEMBER's armed face names.
+
+    A remembered permission rule lands in the CANONICAL repo root's
+    .claude/settings.local.json -- never in the worktree the agent is
+    running in -- so it widens permissions for every agent in every
+    worktree of that repository. Naming the worktree on the confirmation
+    would name the one scope the press is not limited to, which makes the
+    mitigation actively misleading rather than merely incomplete. Real git
+    repositories here, including a real linked worktree, because the whole
+    point is what git actually reports.
+    """
+
+    def _repo(self, parent, name):
+        repo = os.path.join(parent, name)
+        os.makedirs(repo)
+        subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
+        Path(repo, "f.txt").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", repo, "add", "f.txt"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "init"], check=True)
+        return repo
+
+    def test_names_the_repository_at_its_top_level(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, "flightdeck")
+            self.assertEqual(fleetlib.canonical_repo_name(repo), "flightdeck")
+
+    def test_names_the_repository_from_a_subdirectory(self):
+        # git prints --git-common-dir RELATIVE to cwd ("../.git" here), so
+        # this covers the resolution step, not just the happy absolute path.
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, "flightdeck")
+            sub = os.path.join(repo, "bin")
+            os.makedirs(sub)
+            self.assertEqual(fleetlib.canonical_repo_name(sub), "flightdeck")
+
+    def test_names_the_CANONICAL_repository_from_inside_a_worktree(self):
+        # The one that matters. --show-toplevel would answer "rows-3-4"
+        # here, which is the wrong name for a trap whose entire point is
+        # that the rule lands in the canonical repo root and widens every
+        # worktree of it, including this one's siblings.
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, "flightdeck")
+            worktree = os.path.join(repo, ".claude", "worktrees", "rows-3-4")
+            subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "-b", "wt", worktree],
+                           check=True)
+            self.assertEqual(fleetlib.canonical_repo_name(worktree), "flightdeck")
+            # And from a subdirectory of the worktree, which is where an
+            # agent's cwd usually is.
+            sub = os.path.join(worktree, "bin")
+            os.makedirs(sub)
+            self.assertEqual(fleetlib.canonical_repo_name(sub), "flightdeck")
+
+    def test_a_non_git_directory_is_unknown_rather_than_guessed_from_the_path(self):
+        # A wrong repository name on that key is worse than none: the whole
+        # value of the line is that it is the true blast radius.
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(fleetlib.canonical_repo_name(d), "")
+
+    def test_an_empty_cwd_is_unknown(self):
+        self.assertEqual(fleetlib.canonical_repo_name(""), "")
+
+
 class ClaimQueueTests(unittest.TestCase):
     """Direct coverage for fleetlib.claim_queue's ownership guarantee.
 

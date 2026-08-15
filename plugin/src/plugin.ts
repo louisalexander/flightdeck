@@ -538,7 +538,15 @@ export class Verdict extends SingletonAction<VerdictSettings> {
     if (verdict === "detail") return renderDetailFeedback(target, feedback);
     const active = target !== null;
     const tier = target?.tier ?? "normal";
-    return renderVerdictSvg(verdict.toUpperCase(), tier, feedback, active);
+    // Only REMEMBER gets the three-line armed face. Its rule persists to the
+    // canonical repo root and widens every worktree of that repository, so
+    // the confirmation must say which repository and which rule -- the
+    // mitigation the design and the README both promise. Every other armed
+    // key is a decision about one call, and its label is enough.
+    const scope = verdict === "remember"
+      ? { repo: target?.repo ?? "", rule: target?.rule ?? "" }
+      : null;
+    return renderVerdictSvg(verdict.toUpperCase(), tier, feedback, active, scope);
   }
 
   private paintIdle(ev: WillAppearEvent<VerdictSettings>): void {

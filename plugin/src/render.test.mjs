@@ -344,7 +344,7 @@ console.log("render tests passed");
 // --- Row 3 verdict keys --------------------------------------------------
 // Import from the bundle rollup actually emits, matching how renderSvg and
 // renderCommandSvg are imported above -- there is no separate dist/ output.
-import { renderVerdictSvg, renderDetailSvg, renderDetailFeedback } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
+import { renderVerdictSvg, renderDetailSvg, renderDetailFeedback, fitRule } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
 
 test("a verdict key at rest keeps its label, dimmed", () => {
   const svg = renderVerdictSvg("APPROVE", "normal", "", false);
@@ -409,4 +409,62 @@ test("a refused DETAIL press is not silent", () => {
 test("a delivered DETAIL outcome falls through to the plain classification", () => {
   const target = { session_id: "S1", agent: "flightdeck", tool: "Bash", tier: "normal", repeats: 1 };
   assert.strictEqual(renderDetailFeedback(target, ""), renderDetailSvg(target));
+});
+
+// --- the armed REMEMBER face --------------------------------------------
+// The single most consequential press in the design: the rule persists to
+// the CANONICAL repo root and widens every agent in every worktree of that
+// repository, including ones that do not exist yet. Naming the repository
+// and the rule on the confirmation is the stated mitigation, promised by
+// both the README and the Rows 3-4 design. It shipped as a bare "CONFIRM?"
+// because bin/fleet-reconcile never published the rule at all.
+
+const SCOPE = { repo: "flightdeck", rule: "Bash(git push:*)" };
+
+test("the armed REMEMBER face names the repository and the rule", () => {
+  const svg = renderVerdictSvg("REMEMBER", "high", "armed", true, SCOPE);
+  assert.match(svg, /flightdeck/);
+  assert.match(svg, /git push/);
+  assert.match(svg, /CONFIRM\?/);
+});
+
+test("the armed REMEMBER face never names the agent", () => {
+  // The agent is the one thing this press is NOT scoped to, so it is the one
+  // thing that must not appear on the confirmation.
+  const svg = renderVerdictSvg("REMEMBER", "high", "armed", true,
+    { repo: "flightdeck", rule: "Bash(git push:*)" });
+  assert.doesNotMatch(svg, /REMEMBER/);
+});
+
+test("a long rule is shortened rather than overflowing the key", () => {
+  const long = "Bash(git push --force --set-upstream origin main:*)";
+  const svg = renderVerdictSvg("REMEMBER", "high", "armed", true, { repo: "flightdeck", rule: long });
+  assert.doesNotMatch(svg, /--set-upstream/, "the full rule is not drawn whole");
+  for (const [, text] of svg.matchAll(/>([^<>]+)<\/text>/g)) {
+    assert.ok(text.length <= 22, `a line stays inside the key's budget: ${text}`);
+  }
+});
+
+test("shortening a rule keeps both ends, because the tail is what distinguishes it", () => {
+  const a = fitRule("Bash(git push --force:*)", 20);
+  const b = fitRule("Bash(git push --dry-run:*)", 20);
+  assert.notStrictEqual(a, b, "two rules sharing a long prefix must not shorten identically");
+  assert.ok(a.startsWith("Bash("), "the head survives");
+  assert.ok(a.endsWith(":*)"), "the tail survives -- that is where a rule's scope lives");
+  assert.strictEqual(fitRule("Bash(ls:*)", 20), "Bash(ls:*)", "a short rule is untouched");
+});
+
+test("without a known scope the armed face falls back to the plain CONFIRM? key", () => {
+  // REMEMBER refuses without a suggestion anyway; an armed face that cannot
+  // name the rule must say nothing rather than invent something.
+  const bare = renderVerdictSvg("REMEMBER", "high", "armed", true, { repo: "", rule: "" });
+  assert.strictEqual(bare, renderVerdictSvg("REMEMBER", "high", "armed", true));
+  assert.match(bare, /CONFIRM\?/);
+});
+
+test("the scope only ever appears on the armed face", () => {
+  for (const feedback of ["", "delivered", "refused"]) {
+    const svg = renderVerdictSvg("REMEMBER", "high", feedback, true, SCOPE);
+    assert.doesNotMatch(svg, /git push/, `${feedback || "idle"} must not name the rule`);
+  }
 });

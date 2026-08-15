@@ -172,6 +172,35 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   wait
 }
 
+# The pending record's `repo` is what REMEMBER's armed face names, and a
+# remembered rule lands in the CANONICAL repo root -- it widens every agent
+# in every worktree of that repository. --show-toplevel would record the
+# worktree ("wt" below), naming the one scope the press is NOT limited to
+# and making the mitigation actively misleading. Real git, real linked
+# worktree, because the point is what git actually reports.
+@test "the pending record names the canonical repository, not the worktree" {
+  local repo="$BATS_TEST_TMPDIR/canonrepo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email t@example.com
+  git -C "$repo" config user.name t
+  : > "$repo/f.txt"
+  git -C "$repo" add f.txt
+  git -C "$repo" commit -qm init
+  local wt="$repo/.claude/worktrees/wt"
+  git -C "$repo" worktree add -q -b wt "$wt"
+
+  local payload
+  payload="$(python3 -c "
+import json, sys
+p = json.loads(sys.argv[1]); p['cwd'] = sys.argv[2]
+print(json.dumps(p))" "$PAYLOAD" "$wt")"
+  decide "$payload" >/dev/null &
+  await_pending
+  [ "$(pending repo)" = "canonrepo" ]
+  wait
+}
+
 @test "an unparseable payload exits 0 and emits nothing" {
   run bash -c "printf 'not json' | '$BIN/fleet-decide'"
   [ "$status" -eq 0 ]

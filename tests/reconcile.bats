@@ -271,6 +271,55 @@ json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x
   [[ "$(top verdict)" == *'"repeats": 3'* ]] || return 1
 }
 
+# REMEMBER's armed face names the repository and the rule -- the stated
+# mitigation for the worktree trap, and undeliverable until slots.json
+# carried the rule at all. `repo` is the CANONICAL repository (fleet-decide
+# derives it from --git-common-dir); the AGENT is deliberately absent from
+# that face, since it is the one scope the press is not limited to.
+@test "verdict publishes the repository and the rule the armed REMEMBER face needs" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','repo':'flightdeck','cwd':'/tmp','repeats':1,
+           'suggestion':{'type':'addRules','destination':'localSettings','behavior':'allow',
+                         'rules':[{'toolName':'Bash','ruleContent':'git push:*'}]},
+           'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [[ "$(top verdict)" == *'"repo": "flightdeck"'* ]] || return 1
+  [[ "$(top verdict)" == *'"rule": "Bash(git push:*)"'* ]] || return 1
+}
+
+# DETAIL's identity line must read the same as the Row 1 key for the same
+# agent. The pending record's repo is the CANONICAL repository (for
+# REMEMBER's armed face); Row 1's label is the session's own repo, which for
+# a worktree session is the worktree. They differ for exactly the sessions
+# this fleet runs, so the two channels are read from their own sources.
+@test "verdict's agent line matches Row 1, while repo names the canonical repository" {
+  mksession S1 blocked rows-3-4 wt
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','suggestion':None,'repo':'flightdeck','cwd':'/tmp','repeats':1,
+           'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_top)" = "rows-3-4" ]
+  [[ "$(top verdict)" == *'"agent": "rows-3-4"'* ]] || return 1
+  [[ "$(top verdict)" == *'"repo": "flightdeck"'* ]] || return 1
+}
+
+@test "verdict publishes an empty rule when Claude Code offered no suggestion" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','suggestion':None,'repo':'flightdeck','cwd':'/tmp','repeats':1,
+           'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [[ "$(top verdict)" == *'"rule": ""'* ]] || return 1
+}
+
 @test "verdict never carries input_summary onto slots.json" {
   mkdir -p "$FLEET_HOME/pending"
   python3 -c "

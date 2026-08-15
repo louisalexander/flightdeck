@@ -407,6 +407,16 @@ def read_pending_all():
     """
     out = []
     try:
+        # DO NOT drop this sorted(). It looks redundant next to the
+        # requested_at sort at the bottom of this function, and it is not:
+        # requested_at is whole seconds, so ties between two records staged
+        # in the same second are common, and Python's sort is stable. The
+        # filename order established here is therefore what breaks those
+        # ties -- and resolve_target() picks out[0], so without it Row 3's
+        # target would depend on directory iteration order and could differ
+        # between two presses with nothing having changed. A key that shifts
+        # under your thumb is the failure this project's Row 1 design
+        # forbids outright.
         entries = sorted(pending_dir().iterdir())
     except Exception:
         return out
@@ -745,6 +755,54 @@ def score_risk(tool_name, tool_input, rules):
     return "normal"
 
 # --- process ---------------------------------------------------------------
+
+def canonical_repo_name(cwd, timeout=2):
+    """The name of the CANONICAL repository a working directory belongs to.
+
+    Derived from `git rev-parse --git-common-dir`, deliberately NOT
+    `--show-toplevel`. For a session running in a linked worktree,
+    --show-toplevel names the WORKTREE ("rows-3-4"), while Claude Code
+    writes a remembered permission rule to the canonical repo root's
+    .claude/settings.local.json -- verified with a probe whose cwd was
+    inside a worktree, which created no .claude/ there at all. REMEMBER's
+    armed face names the repository precisely BECAUSE the rule it writes
+    widens every worktree of that repository, including ones that do not
+    exist yet, so naming the worktree would name the one scope the press is
+    not limited to and make the mitigation actively misleading.
+
+    --git-common-dir is the shared git directory -- <canonical>/.git for a
+    linked worktree exactly as for the main checkout. git prints it
+    relative to `cwd` when it can (".git", "../.git"), so it is resolved
+    against cwd rather than trusted to be absolute.
+
+    Returns "" when git cannot answer. Callers must treat that as unknown
+    rather than falling back to a path component: a wrong repository name
+    on that key is worse than none.
+
+    timeout defaults to 2s, not git()'s 15: the one caller (bin/fleet-decide)
+    runs this before staging its pending record, in front of the
+    amber-immediately guarantee that is that hook's whole advantage over
+    the ~6s Notification debounce. A wedged git must not sit there.
+    """
+    if not cwd:
+        return ""
+    code, out = git(["rev-parse", "--git-common-dir"], cwd, timeout=timeout)
+    if code != 0 or not out:
+        return ""
+    try:
+        common = Path(out)
+        if not common.is_absolute():
+            common = Path(cwd) / common
+        common = common.resolve()
+    except Exception:
+        return ""
+    # <repo>/.git -> "repo"; a bare or otherwise oddly-named git dir keeps
+    # its own name rather than reporting the directory above it, which for
+    # /srv/git/foo.git would be "git".
+    if common.name == ".git":
+        return common.parent.name
+    return common.name
+
 
 def git(args, cwd, timeout=15):
     """Runs git with an argument LIST -- never a shell string.

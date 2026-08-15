@@ -185,15 +185,13 @@ def run():
     now = int(time.time())
 
     cwd = payload.get("cwd") or ""
-    repo = ""
-    if cwd:
-        # timeout=2, not git()'s 15s default: this runs BEFORE the pending
-        # record is staged, on the path to the amber-immediately guarantee
-        # that is this hook's whole advantage over the ~6s Notification
-        # debounce. A wedged git must not sit in front of that.
-        code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd, timeout=2)
-        if code == 0 and top:
-            repo = Path(top).name
+    # The CANONICAL repository, not the worktree -- see
+    # fleetlib.canonical_repo_name, which also explains the 2s bound. This
+    # field is what REMEMBER's armed face names, and a remembered rule lands
+    # in the canonical repo root where it widens every worktree of it, so
+    # naming the worktree here would name the one scope the press is not
+    # limited to.
+    repo = fleetlib.canonical_repo_name(cwd)
 
     # The identity of THIS request, so a decision can be checked against it
     # rather than merely against the session id. Minted fresh here with

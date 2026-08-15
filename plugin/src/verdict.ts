@@ -36,8 +36,38 @@ function open(): string {
     + `<rect width="144" height="144" fill="${NIGHT}"/>`;
 }
 
+/**
+ * What the armed REMEMBER face names: the repository the rule will land in,
+ * and the rule itself. Never the agent -- that is the one thing this press
+ * is NOT scoped to, which is exactly why it must not appear on the
+ * confirmation.
+ */
+export type ArmedScope = { repo: string; rule: string };
+
+/**
+ * Fit a string to `max` characters, keeping both ends.
+ *
+ * Blind truncation is wrong here for the same reason it is wrong on Row 1
+ * (see fleetlib.shorten) and the same reason no key ever renders tool
+ * input: `Bash(git push --force:*)` and `Bash(git push:*)` share a long
+ * prefix, so a head-only cut reads as information while being ambiguous
+ * exactly where it matters. The tail is what distinguishes one rule from
+ * another, so keep it and elide the middle.
+ */
+export function fitRule(text: string, max = 20): string {
+  const value = String(text ?? "").trim();
+  if (value.length <= max) return value;
+  // 1 char for the ellipsis; the tail gets the larger half because that is
+  // where the scope of a rule lives (`:*` versus a specific argument).
+  const keep = max - 1;
+  const tail = Math.ceil(keep / 2);
+  const head = keep - tail;
+  return value.slice(0, head) + "…" + value.slice(value.length - tail);
+}
+
 export function renderVerdictSvg(
   label: string, tier: string, feedback: Feedback, active: boolean,
+  armedScope?: ArmedScope | null,
 ): string {
   // At rest the row is dimmed, never blank. Row 1's "absence should look
   // absent" does not transfer: a Row 1 slot's meaning is positional and may
@@ -49,6 +79,30 @@ export function renderVerdictSvg(
     : !active ? INK_DIM
     : tier === "high" ? ATTENTION
     : INK;
+
+  // The armed REMEMBER face: repository, rule, CONFIRM?. Three lines, and
+  // the verdict word is dropped -- at 96px there is no room for a fourth,
+  // and "REMEMBER" is the one line the operator does not need, since the
+  // key they just pressed is under their thumb. What they cannot otherwise
+  // know is the blast radius: the rule persists to the CANONICAL repo root
+  // and applies to every agent in every worktree of that repository,
+  // including ones that do not exist yet. Naming it is the whole mitigation
+  // (see the Rows 3-4 design, "The worktree trap"), so it is drawn only
+  // when the scope is actually known and never faked from the label.
+  if (feedback === "armed" && armedScope && (armedScope.repo || armedScope.rule)) {
+    return [
+      open(),
+      `<text x="72" y="52" text-anchor="middle" font-family="Helvetica,Arial" `
+        + `font-size="15" font-weight="600" letter-spacing="0.4" fill="${INK}">`
+        + `${esc(fitRule(armedScope.repo, 14))}</text>`,
+      `<text x="72" y="82" text-anchor="middle" font-family="Helvetica,Arial" `
+        + `font-size="14" font-weight="700" letter-spacing="0.2" fill="${ATTENTION}">`
+        + `${esc(fitRule(armedScope.rule, 20))}</text>`,
+      `<text x="72" y="115" text-anchor="middle" font-family="Helvetica,Arial" `
+        + `font-size="15" font-weight="700" letter-spacing="0.8" fill="${ATTENTION}">CONFIRM?</text>`,
+      "</svg>",
+    ].join("");
+  }
 
   const marker = feedback === "armed"
     ? `<text x="72" y="115" text-anchor="middle" font-family="Helvetica,Arial" `
