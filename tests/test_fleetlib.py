@@ -18,6 +18,7 @@ Or via tests/run.sh, which wires this in alongside bats.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -459,6 +460,65 @@ class ScoreRiskTests(unittest.TestCase):
     def test_bad_regex_is_skipped_not_raised(self):
         rules = {"high": [{"tool": "Bash", "match": "([unclosed"}]}
         self.assertEqual(fleetlib.score_risk("Bash", {"command": "x"}, rules), "normal")
+
+
+class PendingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["FLEET_HOME"] = self.tmp
+
+    def tearDown(self):
+        os.environ.pop("FLEET_HOME", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _pending(self, sid, at, tier="normal"):
+        fleetlib.write_json_atomic(fleetlib.pending_path(sid), {
+            "session_id": sid, "tool": "Bash", "input_digest": "sha256:abc",
+            "input_summary": "x", "tier": tier, "suggestion": None,
+            "repo": "r", "repeats": 1, "requested_at": at,
+        })
+
+    def test_digest_is_stable_and_order_independent(self):
+        a = fleetlib.input_digest("Bash", {"command": "ls", "timeout": 1})
+        b = fleetlib.input_digest("Bash", {"timeout": 1, "command": "ls"})
+        self.assertEqual(a, b)
+        self.assertTrue(a.startswith("sha256:"))
+
+    def test_digest_changes_with_the_tool(self):
+        self.assertNotEqual(fleetlib.input_digest("Bash", {"c": 1}),
+                            fleetlib.input_digest("Write", {"c": 1}))
+
+    def test_read_pending_all_is_oldest_first(self):
+        self._pending("B", 200)
+        self._pending("A", 100)
+        self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["A", "B"])
+
+    def test_read_pending_all_skips_unreadable_files(self):
+        fleetlib.pending_dir().mkdir(parents=True, exist_ok=True)
+        (fleetlib.pending_dir() / "junk.json").write_text("{not json")
+        self._pending("A", 100)
+        self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["A"])
+
+    def test_resolve_target_prefers_a_selection_that_is_pending(self):
+        self._pending("A", 100)
+        self._pending("B", 200)
+        fleetlib.write_focus("B")
+        self.assertEqual(fleetlib.resolve_target(), "B")
+
+    def test_resolve_target_falls_back_when_the_selection_is_not_pending(self):
+        self._pending("A", 100)
+        fleetlib.write_focus("Z")
+        self.assertEqual(fleetlib.resolve_target(), "A")
+
+    def test_resolve_target_is_empty_when_nothing_is_pending(self):
+        self.assertEqual(fleetlib.resolve_target(), "")
+
+    def test_claim_decision_yields_exactly_one_winner(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"), {"behavior": "allow"})
+        first = fleetlib.claim_decision("A")
+        second = fleetlib.claim_decision("A")
+        self.assertEqual(first, {"behavior": "allow"})
+        self.assertIsNone(second)
 
 
 if __name__ == "__main__":

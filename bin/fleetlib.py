@@ -157,6 +157,106 @@ def claim_queue(session_id):
         except Exception:
             pass
 
+def pending_dir():
+    return fleet_home() / "pending"
+
+
+def pending_path(session_id):
+    return pending_dir() / "{}.json".format(session_id)
+
+
+def decisions_dir():
+    return fleet_home() / "decisions"
+
+
+def decision_path(session_id):
+    return decisions_dir() / "{}.json".format(session_id)
+
+
+def halt_path():
+    """The fleet-wide deny latch.
+
+    Read by a pure-shell clause in the PreToolUse hook, so its existence is
+    the entire protocol -- content is never parsed and must never become
+    load-bearing. The shell path is what lets the emergency brake work when
+    flightdeck's own interpreter does not.
+    """
+    return fleet_home() / "halt"
+
+
+def input_digest(tool_name, tool_input):
+    """A stable identity for one tool call, for detecting a retry loop.
+
+    sort_keys because a model may emit the same object with different key
+    order between attempts, and two spellings of one call must collide.
+    """
+    try:
+        blob = json.dumps(tool_input, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        blob = repr(tool_input)
+    payload = "{}\x00{}".format(tool_name, blob).encode("utf-8", "replace")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()[:16]
+
+
+def claim_decision(session_id):
+    """Takes sole ownership of a written verdict, or returns None.
+
+    Same os.replace ownership rename as claim_queue. Two claimants are
+    possible in principle -- a deciding hook polling, and a later one for a
+    retried call -- and a decision must be consumed exactly once so an
+    operator's single press cannot answer two requests.
+    """
+    claim = decisions_dir() / "{}.claim.{}.json".format(session_id, os.getpid())
+    try:
+        os.replace(str(decision_path(session_id)), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
+
+def read_pending_all():
+    """Every readable pending record, oldest requested_at first."""
+    out = []
+    try:
+        entries = sorted(pending_dir().iterdir())
+    except Exception:
+        return out
+    for entry in entries:
+        if entry.suffix != ".json" or ".claim." in entry.name:
+            continue
+        data = read_json(entry)
+        if isinstance(data, dict) and isinstance(data.get("session_id"), str):
+            if not isinstance(data.get("requested_at"), int):
+                data["requested_at"] = 0
+            out.append(data)
+    out.sort(key=lambda d: d["requested_at"])
+    return out
+
+
+def resolve_target():
+    """Which session a Row 3 press acts on.
+
+    The selection if it has a pending decision, otherwise the oldest pending
+    decision. Predictability beats recency on a device read peripherally,
+    and a selection pointing at a blocked agent is not a wrong answer -- that
+    agent does genuinely need deciding.
+    """
+    pending = read_pending_all()
+    if not pending:
+        return ""
+    selected = read_focus()
+    for record in pending:
+        if record["session_id"] == selected:
+            return selected
+    return pending[0]["session_id"]
+
+
 def events_path():
     return fleet_home() / "events.jsonl"
 
