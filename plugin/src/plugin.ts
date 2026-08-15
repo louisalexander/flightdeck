@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { renderSvg, toDataUri } from "./render.js";
 import { bootConfig, shouldShowSplash, splashTileSvg, renderBootTile } from "./splash.js";
 import { renderCommandSvg } from "./command.js";
-import { renderVerdictSvg, renderDetailFeedback, type Feedback as VerdictFeedback } from "./verdict.js";
+import { renderVerdictSvg, renderDetailFeedback, verdictLabel, type Feedback as VerdictFeedback } from "./verdict.js";
 import type { Slot, SlotsFile, Config, VerdictTarget } from "./types.js";
 
 const FLEET_HOME = join(homedir(), ".fleet");
@@ -499,8 +499,8 @@ export class Verdict extends SingletonAction<VerdictSettings> {
     if (!verdict) {
       // Unconfigured is a refusal too: without this the operator can't
       // tell "nothing bound to this key" from "the press was missed".
-      ev.action.setImage(toDataUri(this.render(verdict, this.target(), "refused")));
-      this.scheduleRestore(id, ev.action, verdict);
+      ev.action.setImage(toDataUri(this.render(verdict, this.target(), "refused", verb)));
+      this.scheduleRestore(id, ev.action, verdict, verb);
       return;
     }
 
@@ -516,25 +516,27 @@ export class Verdict extends SingletonAction<VerdictSettings> {
     // classification has no feedback channel of its own) before restoring.
     if (verdict === "detail") {
       if (outcome !== "delivered") {
-        ev.action.setImage(toDataUri(this.render(verdict, this.target(), "refused")));
-        this.scheduleRestore(id, ev.action, verdict, 1200);
+        ev.action.setImage(toDataUri(this.render(verdict, this.target(), "refused", verb)));
+        this.scheduleRestore(id, ev.action, verdict, verb, 1200);
         return;
       }
-      ev.action.setImage(toDataUri(this.render(verdict, this.target(), "")));
+      ev.action.setImage(toDataUri(this.render(verdict, this.target(), "", verb)));
       return;
     }
-    ev.action.setImage(toDataUri(this.render(verdict, this.target(), outcome)));
+    ev.action.setImage(toDataUri(this.render(verdict, this.target(), outcome, verb)));
     // Held longer for an armed key so it keeps inviting the confirming
     // press for as long as bin/fleet-verdict will actually honour one --
     // see Command.onKeyUp's identical reasoning about verbArmSecs.
-    this.scheduleRestore(id, ev.action, verdict, outcome === "armed" ? 9000 : 1200);
+    this.scheduleRestore(id, ev.action, verdict, verb, outcome === "armed" ? 9000 : 1200);
   }
 
   private target(): VerdictTarget | null {
     return readJson<SlotsFile>(SLOTS_PATH)?.verdict ?? null;
   }
 
-  private render(verdict: string, target: VerdictTarget | null, feedback: VerdictFeedback): string {
+  private render(
+    verdict: string, target: VerdictTarget | null, feedback: VerdictFeedback, verb = "",
+  ): string {
     if (verdict === "detail") return renderDetailFeedback(target, feedback);
     const active = target !== null;
     const tier = target?.tier ?? "normal";
@@ -546,12 +548,13 @@ export class Verdict extends SingletonAction<VerdictSettings> {
     const scope = verdict === "remember"
       ? { repo: target?.repo ?? "", rule: target?.rule ?? "" }
       : null;
-    return renderVerdictSvg(verdict.toUpperCase(), tier, feedback, active, scope);
+    return renderVerdictSvg(verdictLabel(verdict, verb), tier, feedback, active, scope);
   }
 
   private paintIdle(ev: WillAppearEvent<VerdictSettings>): void {
     const verdict = ev.payload.settings?.verdict ?? "";
-    ev.action.setImage(toDataUri(this.render(verdict, this.target(), "")));
+    const verb = ev.payload.settings?.verb ?? "";
+    ev.action.setImage(toDataUri(this.render(verdict, this.target(), "", verb)));
   }
 
   private repaintAll(): void {
@@ -568,12 +571,13 @@ export class Verdict extends SingletonAction<VerdictSettings> {
   // onWillAppear's WillAppearEvent are different types that happen to share
   // the same `action.setImage` shape -- this is the intersection they agree on.
   private scheduleRestore(
-    id: string, action: { setImage(image?: string): Promise<void> }, verdict: string, afterMs = 1200
+    id: string, action: { setImage(image?: string): Promise<void> }, verdict: string,
+    verb: string, afterMs = 1200
   ): void {
     this.clearPending(id);
     const timer = setTimeout(() => {
       this.pending.delete(id);
-      action.setImage(toDataUri(this.render(verdict, this.target(), "")));
+      action.setImage(toDataUri(this.render(verdict, this.target(), "", verb)));
     }, afterMs);
     this.pending.set(id, timer);
   }

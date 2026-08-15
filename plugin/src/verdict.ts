@@ -65,6 +65,28 @@ export function fitRule(text: string, max = 20): string {
   return value.slice(0, head) + "…" + value.slice(value.length - tail);
 }
 
+/**
+ * The word on a verdict key.
+ *
+ * A steer key is labelled by its VERB, not by the word STEER. Keys 5 and 7
+ * both carry verdict: "steer" and differed only in a `verb` setting nothing
+ * displayed, so they rendered pixel-identically -- reaching for one and
+ * hitting the other sent a different denial to a blocked agent with no
+ * visible difference before the press or after it.
+ *
+ * Uppercasing the verb id is exactly how Row 2's Command key labels itself
+ * (plugin.ts, paintIdle), and it is the only mechanism available here: the
+ * plugin never reads config/verbs, and a table of ids to display names
+ * inside the plugin would be a second copy of the verb list to keep in sync
+ * -- the drift the REACHABLE tests exist to catch. A steer key with no verb
+ * chosen yet falls back to STEER rather than blanking, because an
+ * unconfigured key must still say what it is.
+ */
+export function verdictLabel(verdict: string, verb: string): string {
+  if (verdict === "steer" && verb) return verb.toUpperCase();
+  return verdict.toUpperCase();
+}
+
 export function renderVerdictSvg(
   label: string, tier: string, feedback: Feedback, active: boolean,
   armedScope?: ArmedScope | null,

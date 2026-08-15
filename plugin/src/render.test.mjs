@@ -344,7 +344,7 @@ console.log("render tests passed");
 // --- Row 3 verdict keys --------------------------------------------------
 // Import from the bundle rollup actually emits, matching how renderSvg and
 // renderCommandSvg are imported above -- there is no separate dist/ output.
-import { renderVerdictSvg, renderDetailSvg, renderDetailFeedback, fitRule } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
+import { renderVerdictSvg, renderDetailSvg, renderDetailFeedback, fitRule, verdictLabel } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
 
 test("a verdict key at rest keeps its label, dimmed", () => {
   const svg = renderVerdictSvg("APPROVE", "normal", "", false);
@@ -467,4 +467,28 @@ test("the scope only ever appears on the armed face", () => {
     const svg = renderVerdictSvg("REMEMBER", "high", feedback, true, SCOPE);
     assert.doesNotMatch(svg, /git push/, `${feedback || "idle"} must not name the rule`);
   }
+});
+
+// --- steer keys are told apart ------------------------------------------
+// Row 3 keys 5 and 7 both carry verdict: "steer" and differ only in a `verb`
+// setting nothing displayed, so they rendered pixel-identically. Reaching for
+// one and hitting the other sends a different denial to a blocked agent with
+// no visible difference before the press or after it.
+
+test("a steer key is labelled by its verb, so two steer keys differ", () => {
+  const justify = renderVerdictSvg(verdictLabel("steer", "justify"), "normal", "", true);
+  const otherway = renderVerdictSvg(verdictLabel("steer", "otherway"), "normal", "", true);
+  assert.match(justify, /JUSTIFY/);
+  assert.match(otherway, /OTHERWAY/);
+  assert.notStrictEqual(justify, otherway, "the two steer keys must not render identically");
+});
+
+test("a steer key with no verb chosen still says what it is", () => {
+  assert.strictEqual(verdictLabel("steer", ""), "STEER");
+});
+
+test("a non-steer key ignores any verb setting left on it", () => {
+  // The property inspector keeps one `verb` control for all eight keys, so a
+  // stale verb can sit on a key later rebound to DENY. It must not relabel it.
+  assert.strictEqual(verdictLabel("deny", "justify"), "DENY");
 });
