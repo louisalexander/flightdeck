@@ -88,8 +88,49 @@ def main():
         else:
             bad("expected 6 fleet-emit hooks pointing at {}, found {}".format(repo, matching),
                 "re-run ./install.sh")
+
+        # This check looked only at fleet-emit hooks until now, so a stale or
+        # missing PermissionRequest entry -- the one that actually runs
+        # fleet-decide -- went unnoticed after a repo relocation: Row 3 would
+        # be silently dead while every other check stayed green. Same
+        # path-anchored style as the fleet-emit check above, on the one
+        # marker fleet-merge-hooks itself treats as "ours" for this event
+        # (see OWN_MARKERS in bin/fleet-merge-hooks).
+        decide_marker = "{}/bin/fleet-decide".format(repo)
+        decide_blob = json.dumps(hooks.get("PermissionRequest") or [])
+        if decide_marker in decide_blob:
+            ok("PermissionRequest hook registered")
+        elif "fleet-decide" in decide_blob:
+            bad("PermissionRequest hook references fleet-decide but not this checkout ({})".format(
+                    repo),
+                "stale install pointing at a different checkout; re-run ./install.sh")
+        else:
+            bad("no PermissionRequest hook naming fleet-decide", "re-run ./install.sh")
+
+        # The one check that stops HALT being a claim rather than a fact:
+        # the PreToolUse command packs the halt clause and the Resumed guard
+        # into one shell command, and it is their ORDER that decides the
+        # outcome when both a latch and a blocked marker are present (see
+        # tests/halt.bats B1). A future edit that reordered them would leave
+        # HALT silently not winning, with nothing else here to catch it.
+        pretooluse_blob = json.dumps(hooks.get("PreToolUse") or [])
+        halt_idx = pretooluse_blob.find("/halt")
+        blocked_idx = pretooluse_blob.find("/blocked/")
+        if halt_idx != -1 and blocked_idx != -1 and halt_idx < blocked_idx:
+            ok("halt clause precedes the resumed guard")
+        else:
+            bad("halt clause missing, or not ordered before the resumed guard",
+                "re-run ./install.sh")
     else:
         bad("{} not found".format(settings), "run claude once, then ./install.sh")
+
+    # A latched halt nobody remembers setting looks exactly like a broken
+    # fleet: every session sits blocked or denied and there is no other
+    # signal on the panel pointing at the cause.
+    if fleetlib.halt_path().exists():
+        bad("fleet is currently HALTED", "run bin/fleet-halt --off to resume")
+    else:
+        ok("fleet is not halted")
 
     listing = subprocess.run(["launchctl", "list"], stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL)

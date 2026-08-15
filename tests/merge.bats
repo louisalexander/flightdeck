@@ -257,6 +257,21 @@ print(fleetlib.DECIDE_TIMEOUT_CEILING_SECS)
   [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 1 ]
 }
 
+@test "MERGE: the halt clause survives the merge ahead of the resumed guard" {
+  # fleet-doctor's "halt clause precedes the resumed guard" check reads this
+  # same merged command string -- if a future edit to the snippet reordered
+  # the two clauses, the halt latch would stop taking priority over the
+  # Resumed guard (see tests/halt.bats B1) with nothing here to catch it.
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  python3 -c "
+import json
+cmd = json.load(open('$TARGET'))['hooks']['PreToolUse'][0]['hooks'][0]['command']
+assert cmd.index('/halt') < cmd.index('/blocked/'), 'halt clause must come first'
+"
+}
+
 @test "MERGE: a foreign PermissionRequest hook survives alongside ours" {
   cat >"$TARGET" <<EOF
 {
