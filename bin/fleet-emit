@@ -268,11 +268,24 @@ def run(event):
                 else:
                     drained = claimed
 
+        # Row 1 says an agent is working. It does not say whether it is working
+        # with the guard rails off, and "which of these has no brakes" is exactly
+        # what an annunciator panel exists to answer. Absence is recorded as
+        # unknown rather than assumed to be "default": claiming a session is
+        # guarded when we do not know would be the one wrong direction to err.
+        raw_mode = payload.get("permission_mode")
+        permission_mode = raw_mode if isinstance(raw_mode, str) else ""
+        if not permission_mode:
+            previous = fleetlib.read_json(target)
+            if isinstance(previous, dict) and isinstance(previous.get("permission_mode"), str):
+                permission_mode = previous["permission_mode"]
+
         fleetlib.write_json_atomic(target, {
             "session_id": session_id,
             "state": DRAIN_STATE if drained else state,
             "repo": repo, "branch": branch, "title": "", "cwd": cwd, "host": host,
             "iterm_session": iterm_uuid, "pid": find_agent_pid(), "ts": now,
+            "permission_mode": permission_mode,
         })
         if state == "blocked":
             fleetlib.create_blocked_marker(session_id)
