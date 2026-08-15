@@ -139,5 +139,5 @@ import json;print(json.loads('''$output''')['reason'])"
 @test "TTL: an entry with no expiry is unaffected and still delivers" {
   queue
   run emit Stop
-  [[ "$output" == *"RUN THE TESTS"* ]]
+  [[ "$output" == *"RUN THE TESTS"* ]] || return 1
 }

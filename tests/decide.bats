@@ -61,12 +61,12 @@ await_pending() { await '[ -f "$FLEET_HOME/pending/S1.json" ]'; }
   answer '{"behavior":"allow"}'
   wait "$pid"
   output="$(cat "$OUT")"
-  [[ "$output" == *'"hookEventName":"PermissionRequest"'* ]]
-  [[ "$output" == *'"behavior":"allow"'* ]]
+  [[ "$output" == *'"hookEventName":"PermissionRequest"'* ]] || return 1
+  [[ "$output" == *'"behavior":"allow"'* ]] || return 1
   # permissionDecision is the documented PreToolUse field and is silently
   # ignored on PermissionRequest -- its presence here would be an invisible
   # failure, since Claude Code would just discard the whole verdict.
-  [[ "$output" != *'permissionDecision'* ]]
+  [[ "$output" != *'permissionDecision'* ]] || return 1
 }
 
 @test "a deny decision carries its message and interrupt flag" {
@@ -77,9 +77,9 @@ await_pending() { await '[ -f "$FLEET_HOME/pending/S1.json" ]'; }
   answer '{"behavior":"deny","message":"no","interrupt":true}'
   wait "$pid"
   output="$(cat "$OUT")"
-  [[ "$output" == *'"behavior":"deny"'* ]]
-  [[ "$output" == *'"interrupt":true'* ]]
-  [[ "$output" != *'permissionDecision'* ]]
+  [[ "$output" == *'"behavior":"deny"'* ]] || return 1
+  [[ "$output" == *'"interrupt":true'* ]] || return 1
+  [[ "$output" != *'permissionDecision'* ]] || return 1
 }
 
 @test "a deny decision with a non-string message and non-boolean interrupt normalises to a bare deny" {
@@ -90,9 +90,9 @@ await_pending() { await '[ -f "$FLEET_HOME/pending/S1.json" ]'; }
   answer '{"behavior":"deny","message":123,"interrupt":"yes"}'
   wait "$pid"
   output="$(cat "$OUT")"
-  [[ "$output" == *'"behavior":"deny"'* ]]
-  [[ "$output" != *'"message"'* ]]
-  [[ "$output" != *'"interrupt"'* ]]
+  [[ "$output" == *'"behavior":"deny"'* ]] || return 1
+  [[ "$output" != *'"message"'* ]] || return 1
+  [[ "$output" != *'"interrupt"'* ]] || return 1
 }
 
 @test "the decision file is consumed, not left behind" {
@@ -261,7 +261,7 @@ assert sugg['rules'][0]['ruleContent'] == 'rm:*', sugg
   answer '{"behavior":"allow"}'
   wait "$pid"
   output="$(cat "$OUT")"
-  [[ "$output" == *'"behavior":"allow"'* ]]
+  [[ "$output" == *'"behavior":"allow"'* ]] || return 1
 }
 
 @test "a decision with a mismatched request_id is rejected, not consumed" {

@@ -114,7 +114,7 @@ EOF
   before_sha="$(shasum "$TARGET")"
   run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"restored"* ]]
+  [[ "$output" == *"restored"* ]] || return 1
   after_sha="$(shasum "$TARGET")"
   [ "$before_sha" = "$after_sha" ]
 }
@@ -131,7 +131,7 @@ EOF
   run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
   unset FLEET_MERGE_HOOKS_FORCE_WRITE_FAILURE
   [ "$status" -eq 1 ]
-  [[ "$output" == *"restored"* ]]
+  [[ "$output" == *"restored"* ]] || return 1
   after_target_sha="$(shasum "$TARGET" | awk '{print $1}')"
   after_backup_sha="$(shasum "$BACKUP" | awk '{print $1}')"
   [ "$after_backup_sha" = "${before_backup_sha%% *}" ]
@@ -157,8 +157,8 @@ EOF
   [ "$(count_ours SessionStart)" -eq 1 ]
 
   surviving="$(python3 -c "import json; d=json.load(open('$TARGET')); print(d['hooks']['SessionStart'][0]['hooks'][0]['command'])")"
-  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]]
-  [[ "$surviving" != *"$OLD_REPO"* ]]
+  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]] || return 1
+  [[ "$surviving" != *"$OLD_REPO"* ]] || return 1
 }
 
 @test "MERGE: a genuinely foreign hook survives alongside a relocated-and-replaced flightdeck entry" {
@@ -193,6 +193,6 @@ d = json.load(open('$TARGET'))
 cmds = [h['command'] for e in d['hooks']['Stop'] for h in e['hooks'] if '/bin/fleet-emit' in h['command']]
 print(cmds[0])
 ")"
-  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]]
-  [[ "$surviving" != *"$OLD_REPO"* ]]
+  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]] || return 1
+  [[ "$surviving" != *"$OLD_REPO"* ]] || return 1
 }

@@ -12,7 +12,7 @@ setup() {
 @test "a shipped verb resolves to its prompt body" {
   run "$BIN/fleet-verbs" show test
   [ "$status" -eq 0 ]
-  [[ "$output" == *"fleet-fail"* ]]
+  [[ "$output" == *"fleet-fail"* ]] || return 1
 }
 
 @test "note is on the panel and never blocks on a confirm" {
@@ -31,9 +31,9 @@ setup() {
   # `obsidian_*` tool name is server-specific.
   run "$BIN/fleet-verbs" show note
   [ "$status" -eq 0 ]
-  [[ "$output" != *"obsidian_"* ]]
-  [[ "$output" != *"Obsidian Vaults"* ]]
-  [[ "$output" != *"/Users/"* ]]
+  [[ "$output" != *"obsidian_"* ]] || return 1
+  [[ "$output" != *"Obsidian Vaults"* ]] || return 1
+  [[ "$output" != *"/Users/"* ]] || return 1
 }
 
 @test "the shipped Obsidian override parses and wins once installed" {
@@ -44,7 +44,7 @@ setup() {
   cp "$ROOT/config/verb-overrides/note-obsidian.md" "$FLEET_HOME/verbs/note.md"
   run "$BIN/fleet-verbs" show note
   [ "$status" -eq 0 ]
-  [[ "$output" == *"obsidian_"* ]]
+  [[ "$output" == *"obsidian_"* ]] || return 1
   run "$BIN/fleet-verbs" path note
   [ "$output" = "$FLEET_HOME/verbs/note.md" ]
 }
@@ -58,7 +58,7 @@ setup() {
   run --separate-stderr "$BIN/fleet-verbs" show nosuchverb
   [ "$status" -eq 1 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"nosuchverb"* ]]
+  [[ "$stderr" == *"nosuchverb"* ]] || return 1
 }
 
 @test "a local override wins over the shipped verb" {
@@ -129,12 +129,12 @@ MD
 @test "FORK resolves and names fleet-spawn by an absolute path" {
   run "$BIN/fleet-verbs" show fork
   [ "$status" -eq 0 ]
-  [[ "$output" == *"$ROOT/bin/fleet-spawn"* ]]
+  [[ "$output" == *"$ROOT/bin/fleet-spawn"* ]] || return 1
 }
 
 @test "FORK leaves no literal FLIGHTDECK_REPO token behind" {
   run "$BIN/fleet-verbs" show fork
-  [[ "$output" != *"FLIGHTDECK_REPO"* ]]
+  [[ "$output" != *"FLIGHTDECK_REPO"* ]] || return 1
 }
 
 @test "FORK is a confirm verb" {
@@ -146,20 +146,20 @@ MD
 
 @test "FORK tells the agent about --explain" {
   run "$BIN/fleet-verbs" show fork
-  [[ "$output" == *"--explain"* ]]
+  [[ "$output" == *"--explain"* ]] || return 1
 }
 
 @test "FORK permits doing nothing" {
   # The most common bad fork is one where there was nothing to fork.
   run "$BIN/fleet-verbs" show fork
-  [[ "$output" == *"do nothing"* ]]
+  [[ "$output" == *"do nothing"* ]] || return 1
 }
 
 @test "FORK tells the agent to return to what it was doing" {
   # Without this it writes a plan and then starts executing it, which is
   # the opposite of parking the work.
   run "$BIN/fleet-verbs" show fork
-  [[ "$output" == *"Return to what you were doing"* ]]
+  [[ "$output" == *"Return to what you were doing"* ]] || return 1
 }
 
 # --- keystroke verbs ------------------------------------------------------
@@ -260,7 +260,7 @@ MD
   for v in justify otherway dryrun; do
     run "$BIN/fleet-verbs" --steer "$v"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"not retry"* || "$output" == *"Do not retry"* ]]
+    [[ "$output" == *"not retry"* || "$output" == *"Do not retry"* ]] || return 1
   done
 }
 

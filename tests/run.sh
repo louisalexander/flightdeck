@@ -34,6 +34,19 @@ else
   rc=1
 fi
 
+printf '\n== bats assertion integrity ==\n'
+# On macOS bash 3.2, `set -e` does not trip on a non-final [[ ]] compound, so
+# `[[ 1 == 2 ]]` mid-test is silently inert and the assertion never fails.
+# Requiring an explicit `|| return 1` on every [[ ]] makes the check
+# environment-independent rather than depending on which bash bats found.
+bad=$(grep -n '\[\[' "$ROOT"/tests/*.bats | grep -v '|| return 1' || true)
+if [ -n "$bad" ]; then
+  printf 'inert assertions (add `|| return 1`):\n%s\n' "$bad"
+  rc=1
+else
+  printf 'clean\n'
+fi
+
 printf '\n== bats ==\n'
 bats "$ROOT/tests" || rc=1
 

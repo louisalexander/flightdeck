@@ -55,14 +55,14 @@ PY
   stage S1 normal
   run "$BIN/fleet-verdict" approve
   [ "$status" -eq 0 ]
-  [[ "$(decision S1)" == *'"behavior": "allow"'* ]]
+  [[ "$(decision S1)" == *'"behavior": "allow"'* ]] || return 1
 }
 
 @test "a decision carries the pending record's request_id verbatim" {
   stage S1 normal
   run "$BIN/fleet-verdict" approve
   [ "$status" -eq 0 ]
-  [[ "$(decision S1)" == *'"request_id": "req-S1"'* ]]
+  [[ "$(decision S1)" == *'"request_id": "req-S1"'* ]] || return 1
 }
 
 @test "a pending record with no usable request_id refuses rather than delivering" {
@@ -84,21 +84,21 @@ PY
   "$BIN/fleet-verdict" approve || true
   run "$BIN/fleet-verdict" approve
   [ "$status" -eq 0 ]
-  [[ "$(decision S1)" == *'"behavior": "allow"'* ]]
+  [[ "$(decision S1)" == *'"behavior": "allow"'* ]] || return 1
 }
 
 @test "deny writes a deny decision with a message" {
   stage S1 normal
   run "$BIN/fleet-verdict" deny
   [ "$status" -eq 0 ]
-  [[ "$(decision S1)" == *'"behavior": "deny"'* ]]
+  [[ "$(decision S1)" == *'"behavior": "deny"'* ]] || return 1
 }
 
 @test "interrupt sets the interrupt flag" {
   stage S1 normal
   run "$BIN/fleet-verdict" interrupt
   [ "$status" -eq 0 ]
-  [[ "$(decision S1)" == *'"interrupt": true'* ]]
+  [[ "$(decision S1)" == *'"interrupt": true'* ]] || return 1
 }
 
 @test "remember always arms, even on a low tier" {
@@ -112,8 +112,8 @@ PY
   "$BIN/fleet-verdict" remember || true
   run "$BIN/fleet-verdict" remember
   [ "$status" -eq 0 ]
-  [[ "$(decision S1)" == *'"updatedPermissions"'* ]]
-  [[ "$(decision S1)" == *'"ruleContent": "ls:*"'* ]]
+  [[ "$(decision S1)" == *'"updatedPermissions"'* ]] || return 1
+  [[ "$(decision S1)" == *'"ruleContent": "ls:*"'* ]] || return 1
 }
 
 @test "remember refuses when Claude Code offered no rule" {
@@ -190,11 +190,13 @@ PY
 @test "I2: detail pins the selection to the target and writes no decision" {
   stage S1 normal
   run "$BIN/fleet-verdict" detail
-  # Single-bracket, not [[ ]]: this repo's bash is 3.2.57, where set -e does
-  # not apply to a [[ ]] compound in a non-final position, so a failing
-  # [[ ]] assertion here would be silently swallowed and this test would
-  # pass even with write_focus() deleted from _focus -- exactly what
-  # round-2 review found and reproduced. [ ] has no such exemption.
+  # Single-bracket here: this repo's bash is 3.2.57, where set -e does not
+  # apply to a double-bracket compound in a non-final position, so a failing
+  # double-bracket assertion here would have been silently swallowed and this
+  # test would pass even with write_focus() deleted from _focus -- exactly
+  # what round-2 review found and reproduced. Single-bracket has no such
+  # exemption, and the repo-wide `|| return 1` convention (tests/run.sh)
+  # now closes the same hole for double-bracket assertions too.
   [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['session_id'])" "$FLEET_HOME/focus.json")" = "S1" ]
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }

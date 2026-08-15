@@ -48,24 +48,24 @@ PY
   mkwt clean; mksession CLEAN "$BATS_TEST_TMPDIR/repos/clean"
   run "$BIN/fleet-kill" CLEAN
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WOULD REMOVE"* ]]
+  [[ "$output" == *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES when tracked files are modified" {
   mkwt dirty; echo change >>"$BATS_TEST_TMPDIR/repos/dirty/f.txt"
   mksession DIRTY "$BATS_TEST_TMPDIR/repos/dirty"
   run "$BIN/fleet-kill" DIRTY
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" == *"uncommitted"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" == *"uncommitted"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES when an untracked file is present" {
   mkwt untracked; echo new >"$BATS_TEST_TMPDIR/repos/untracked/brand-new.txt"
   mksession UNTRACKED "$BATS_TEST_TMPDIR/repos/untracked"
   run "$BIN/fleet-kill" UNTRACKED
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES when commits exist only locally" {
@@ -75,39 +75,39 @@ PY
   git -C "$BATS_TEST_TMPDIR/repos/unpushed" commit -qm "local only"
   mksession UNPUSHED "$BATS_TEST_TMPDIR/repos/unpushed"
   run "$BIN/fleet-kill" UNPUSHED
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" == *"unpushed"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" == *"unpushed"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES when there is no upstream to prove the work is safe" {
   git -C "$MAIN" worktree add -q -b noups "$BATS_TEST_TMPDIR/repos/noups"
   mksession NOUPS "$BATS_TEST_TMPDIR/repos/noups"
   run "$BIN/fleet-kill" NOUPS
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES to remove a primary working tree, even a spotless one" {
   mksession MAINWT "$MAIN"
   run "$BIN/fleet-kill" MAINWT
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES a directory that is not a git repository" {
   mkdir -p "$BATS_TEST_TMPDIR/plain"
   mksession PLAIN "$BATS_TEST_TMPDIR/plain"
   run "$BIN/fleet-kill" PLAIN
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES when the recorded directory no longer exists" {
   mksession GONE "$BATS_TEST_TMPDIR/repos/deleted-since"
   run "$BIN/fleet-kill" GONE
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "a path containing spaces is handled as one argument" {
@@ -116,7 +116,7 @@ PY
   git -C "$BATS_TEST_TMPDIR/repos/has space here" branch --set-upstream-to=origin/spaced >/dev/null 2>&1
   mksession SPACED "$BATS_TEST_TMPDIR/repos/has space here"
   run "$BIN/fleet-kill" SPACED
-  [[ "$output" == *"WOULD REMOVE"* ]]
+  [[ "$output" == *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "an unknown session id is harmless" {
@@ -147,9 +147,9 @@ PY
   [ -z "$(git -C "$BATS_TEST_TMPDIR/repos/ignored" status --porcelain)" ]
   mksession IGNORED "$BATS_TEST_TMPDIR/repos/ignored"
   run "$BIN/fleet-kill" IGNORED
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" == *"ignored"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" == *"ignored"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES a submodule working directory, not just a primary tree" {
@@ -172,8 +172,8 @@ PY
 
   mksession SUBMOD "$MAIN/embedded"
   run "$BIN/fleet-kill" SUBMOD
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "REFUSES a primary working tree using --separate-git-dir, not just the ordinary layout" {
@@ -185,8 +185,8 @@ PY
   git init -q --separate-git-dir="$BATS_TEST_TMPDIR/repos/sepwork.gitdir" "$sepwork"
   mksession SEPGITDIR "$sepwork"
   run "$BIN/fleet-kill" SEPGITDIR
-  [[ "$output" == *"REFUSING"* ]]
-  [[ "$output" != *"WOULD REMOVE"* ]]
+  [[ "$output" == *"REFUSING"* ]] || return 1
+  [[ "$output" != *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "FLEET_DRY_RUN=true is honored as dry-run, not just the exact string 1" {
@@ -198,7 +198,7 @@ PY
   mkwt truthy; mksession TRUTHY "$BATS_TEST_TMPDIR/repos/truthy"
   run "$BIN/fleet-kill" TRUTHY
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WOULD REMOVE"* ]]
+  [[ "$output" == *"WOULD REMOVE"* ]] || return 1
   [ -d "$BATS_TEST_TMPDIR/repos/truthy" ]
 }
 
@@ -217,8 +217,8 @@ json.dump({"session_id": "BOOLPID", "state": "idle", "repo": "r", "branch": "b",
 PY
   run "$BIN/fleet-kill" BOOLPID
   [ "$status" -eq 0 ]
-  [[ "$output" != *"WOULD KILL"* ]]
-  [[ "$output" == *"WOULD REMOVE"* ]]
+  [[ "$output" != *"WOULD KILL"* ]] || return 1
+  [[ "$output" == *"WOULD REMOVE"* ]] || return 1
 }
 
 @test "a real (non-dry-run) removal deletes the worktree and session file, but keeps the branch ref" {
