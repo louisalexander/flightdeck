@@ -205,6 +205,18 @@ def claim_decision(session_id):
     possible in principle -- a deciding hook polling, and a later one for a
     retried call -- and a decision must be consumed exactly once so an
     operator's single press cannot answer two requests.
+
+    Same orphaning gap as claim_queue, too: if this process dies between
+    the successful os.replace() and the `finally: claim.unlink()` below,
+    the renamed <session>.claim.<pid>.json is stranded on disk and nothing
+    ever revisits it, so the verdict is silently and permanently lost, not
+    merely delayed -- and claim_queue's "a stray file is inert" reasoning
+    does not transfer here any more than it did there. The one thing that
+    genuinely differs from claim_queue is what happens next: a lost queued
+    verb has no fallback at all, while a lost verdict just leaves the
+    agent blocked until the hook times out and falls through to the
+    terminal dialog -- the same manual path this whole feature exists to
+    make unnecessary in the common case, not a new failure mode.
     """
     claim = decisions_dir() / "{}.claim.{}.json".format(session_id, os.getpid())
     try:

@@ -341,6 +341,49 @@ class ClaimQueueTests(unittest.TestCase):
                     os.environ["FLEET_HOME"] = old_home
 
 
+class ClaimDecisionTests(unittest.TestCase):
+    """Direct coverage for fleetlib.claim_decision's ownership guarantee.
+
+    PendingTests.test_claim_decision_yields_exactly_one_winner calls
+    claim_decision() twice sequentially in one process -- that proves the
+    already-claimed case (a second call finds the source gone), not an
+    actual race between simultaneous claimants, and would pass just as
+    happily against a naive read-then-delete implementation. The stakes
+    here are higher than for claim_queue: a double-claim on a decision
+    would let one operator keypress answer two permission requests. Same
+    ThreadPoolExecutor technique as ClaimQueueTests, for the same reason.
+    """
+
+    def test_concurrent_claimants_exactly_one_wins_across_many_rounds(self):
+        workers, rounds = 8, 25
+        with tempfile.TemporaryDirectory() as d:
+            old_home = os.environ.get("FLEET_HOME")
+            os.environ["FLEET_HOME"] = d
+            try:
+                for round_num in range(rounds):
+                    session_id = "S{}".format(round_num)
+                    fleetlib.write_json_atomic(
+                        fleetlib.decision_path(session_id),
+                        {"behavior": "allow"})
+
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        results = list(pool.map(
+                            lambda _: fleetlib.claim_decision(session_id),
+                            range(workers)))
+
+                    winners = [r for r in results if r is not None]
+                    self.assertEqual(
+                        len(winners), 1,
+                        "round {}: expected exactly one winner, got {}".format(
+                            round_num, len(winners)))
+                    self.assertFalse(fleetlib.decision_path(session_id).exists())
+            finally:
+                if old_home is None:
+                    os.environ.pop("FLEET_HOME", None)
+                else:
+                    os.environ["FLEET_HOME"] = old_home
+
+
 class SlugifyTests(unittest.TestCase):
     """A branch-name slug built from an issue title.
 
