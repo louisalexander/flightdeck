@@ -156,10 +156,9 @@ readable — never reachable from a key.
 Row 3 answers the permission prompt Claude Code is already showing, from
 the deck, without a context switch to the terminal. `bin/fleet-decide` sits
 on the `PermissionRequest` hook and blocks — up to `timings.decideTimeoutSecs`
-(120s) — until a decision is written or its own timeout notices first. It is
-the one hook in flightdeck allowed to add latency, and it is allowed exactly
-because it only ever runs once the agent is already waiting on a human: it
-cannot slow down a session that is, by definition, already stopped.
+(120s) — until a decision is written or its own timeout notices first. It's
+the one hook in flightdeck allowed to do that; see *Why the deciding hook
+may block* below for why that's safe.
 
 The row is auto-targeted: it answers for **the selected session if it has a
 pending decision, otherwise the oldest pending decision** — no separate
@@ -177,6 +176,13 @@ know which agent is which.
 | 6 | INTERRUPT | deny + `interrupt: true` — stop, don't retry |
 | 7 | STEER — OTHER WAY | deny: reach the goal without that command |
 | 8 | *(unbound — `dryrun` ships in `config/verbs/`, bind it if wanted)* | |
+
+**Getting the row onto the deck is per-key, unlike Row 1.** Drag the
+`Verdict` action across Row 3's eight keys, then set each key's verdict in
+its property inspector — it defaults to `(none)`, which does nothing when
+pressed. Keys 5 and 7 (STEER) also need their verb dropdown set to
+`justify` or `otherway`; key 8 is left unbound above but can take `dryrun`
+the same way.
 
 Risk tier comes from [`config/risk.json`](config/risk.json) — a rule table,
 not a model, so a `high` classification (`rm -rf`, `git push --force`,
@@ -237,13 +243,18 @@ waiting is a normal outcome of that race, not a failure of either path.
 
 ## HALT
 
-`bin/fleet-halt` is the emergency brake: a script, runnable from a
-terminal today, or bindable to any Stream Deck key via the built-in *Open*
-action — no plugin code required, the same shape the deep links below use.
-`bin/fleet-halt --off` clears it.
+`bin/fleet-halt` is the emergency brake. Today it's a script, run from a
+terminal — `bin/fleet-halt --off` clears it. A dedicated Stream Deck key
+for it arrives with Row 4; the design called for one calling this script
+directly, needing no custom plugin action. **Do not improvise a binding
+for it now.** Stream Deck's built-in *Open* action shells out to macOS
+`open`, and `bin/fleet-halt` is a shebang'd Python file with no
+`.command` extension — `open` on it launches a text editor instead of
+running it, which is the worst failure this feature can have: an operator
+reaches for the brake mid-incident and gets TextEdit.
 
-**HALT's exact guarantee: nothing an agent does reaches your machine while
-the latch is set. It does not guarantee the agent stops.** The latch is a
+**HALT's exact guarantee: no NEW tool call reaches your machine while the
+latch is set. It does not guarantee the agent stops.** The latch is a
 file, read by pure shell spliced onto the front of the `PreToolUse` hook —
 no Python, no config parsing, nothing flightdeck's own tooling could break
 — so every *new* tool call is denied before it runs, even under
@@ -312,6 +323,10 @@ the agent receives — resolved by [`bin/fleet-verbs`](bin/fleet-verbs).
 [`config/verbs/<id>.md`](config/verbs) **per verb**, so overriding one
 doesn't mean maintaining copies of the rest.
 
+Getting it onto the deck is per-key, the same as Row 3: drag the `Command`
+action onto each Row 2 key and pick its verb in the property inspector —
+it also defaults to `(none)`.
+
 Everything shipped in `config/verbs` is dependency-free: it assumes a shell,
 a git checkout, and nothing else. Prompts that depend on a particular
 machine's setup live in [`config/verb-overrides`](config/verb-overrides) —
@@ -359,9 +374,14 @@ immediately.
 ## Design decisions
 
 **Hooks, not polling.** A key turns amber the instant `Notification` fires,
-with none of the latency a poll loop would add. `PreToolUse` and
-`PostToolUse` are deliberately unused — they fire on every tool call, and
-the fleet must stay invisible to the thing it's watching.
+with none of the latency a poll loop would add. `PostToolUse` is
+deliberately unused — it fires on every tool call, and the fleet must stay
+invisible to the thing it's watching. `PreToolUse` *is* used — it's what
+carries the halt clause and the `Resumed` guard, see *HALT* above — but
+only through a pure-shell `test -e` per clause, paying for an interpreter
+only on a real transition (a resume) or never at all (a latched halt
+denies from shell alone). That is what keeps "stay invisible" true on this
+hook rather than abandoning it.
 
 **`bin/` is Python, not bash.** launchd's `PATH` is unset and resolves to
 `/usr/bin:/bin:/usr/sbin:/sbin`, a different interpreter than an interactive
@@ -383,12 +403,13 @@ even when the underlying data is perfectly correct.
 ```
 
 Runs shellcheck over the shell bootstrap, a Python syntax gate over `bin/`,
-and the bats suite. Currently 307 bats tests, all passing — covering hook
-emission, slot reconciliation (stickiness, reaping, overflow, pinned-slot
-exclusion), press dispatch and the arm/confirm state machine, the settings
-merge, the teardown guard against fixture worktrees (dirty, unpushed,
-clean — asserting only the clean one is ever removed), `fleet-decide`'s
-pending/decision lifecycle and the halt guard.
+and the bats suite — `./tests/run.sh` reports the current total and every
+result. Coverage includes hook emission, slot reconciliation (stickiness,
+reaping, overflow, pinned-slot exclusion), press dispatch and the
+arm/confirm state machine, the settings merge, the teardown guard against
+fixture worktrees (dirty, unpushed, clean — asserting only the clean one
+is ever removed), `fleet-decide`'s pending/decision lifecycle, and the
+halt guard.
 
 `fleet-focus` requires a live iTerm2 and is verified by hand; it's isolated
 in its own script for exactly that reason.
@@ -397,6 +418,6 @@ in its own script for exactly that reason.
 
 Row 4 (GATE, SPEND, DISPATCH) is not built. HALT — its fourth key in the
 original design — ships today as a script (`bin/fleet-halt`, see above)
-rather than a dedicated Stream Deck action, so it's run from a terminal or
-bound to a key by hand, the same way deep links are. Rows 1 through 3 are
-built and running on real hardware.
+rather than a dedicated Stream Deck action: run it from a terminal until
+Row 4's key exists. Rows 1 through 3 are built and running on real
+hardware.
