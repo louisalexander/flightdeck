@@ -11,8 +11,6 @@ Exit status mirrors bin/fleet-send:
     2  armed -- waiting on a second press
 """
 
-import json
-import os
 import subprocess
 import sys
 import time
@@ -48,22 +46,32 @@ def _arm_secs():
     return 10.0
 
 
-def _arm_key(action, target):
-    """Arms are keyed by action AND target.
+def _arm_key(action, target, request_id):
+    """Arms are keyed by action, target, AND request_id.
 
     Arming against one agent, then having the target move, then confirming
     would otherwise fire at whoever is targeted now -- a different repository
-    than the operator was looking at when they decided.
+    than the operator was looking at when they decided. request_id closes
+    the same hole one level up: a session outlives several PermissionRequests
+    (Task 3's whole reason for minting one), so keying on the session alone
+    lets an arm raised against one request survive to fire on a LATER,
+    unvetted request for the same session -- round-1 review reproduced this
+    directly (APPROVE arms on a high-tier rm -rf, the dialog gets answered
+    manually in the terminal in the meantime so fleet-decide unwinds, the
+    agent hits its next prompt, and the confirming press silently allows
+    THAT call because it copies whatever request_id happens to be staged
+    now). The double-press exists to make the operator mean "this action on
+    this request", not merely "this action on this session".
     """
-    return "{}:{}".format(action, target)
+    return "{}:{}:{}".format(action, target, request_id)
 
 
-def _take_arm(action, target):
+def _take_arm(action, target, request_id):
     """True if this press is a confirmation of a live, matching arm."""
-    claimed = fleetlib.claim_verb_arm()
+    claimed = fleetlib.claim_verdict_arm()
     if not isinstance(claimed, dict):
         return False
-    if claimed.get("key") != _arm_key(action, target):
+    if claimed.get("key") != _arm_key(action, target, request_id):
         return False
     expires_at = claimed.get("expires_at")
     if not isinstance(expires_at, (int, float)) or time.time() > expires_at:
@@ -71,9 +79,9 @@ def _take_arm(action, target):
     return True
 
 
-def _set_arm(action, target):
-    fleetlib.write_json_atomic(fleetlib.verb_armed_path(), {
-        "key": _arm_key(action, target),
+def _set_arm(action, target, request_id):
+    fleetlib.write_json_atomic(fleetlib.verdict_armed_path(), {
+        "key": _arm_key(action, target, request_id),
         "action": action,
         "target": target,
         "expires_at": time.time() + _arm_secs(),
@@ -86,7 +94,7 @@ def _needs_arm(action, tier):
     return action == "approve" and tier == "high"
 
 
-def _focus(session_id, record):
+def _focus(session_id):
     """DETAIL is exactly a Row 1 press: focus AND select.
 
     Focusing without pinning would let the target move to another session
@@ -169,7 +177,7 @@ def run(argv):
         return REFUSED
 
     if action == "detail":
-        return _focus(target, record)
+        return _focus(target)
 
     request_id = record.get("request_id")
     if not isinstance(request_id, str) or not request_id:
@@ -183,13 +191,13 @@ def run(argv):
         return REFUSED
 
     tier = record.get("tier") if isinstance(record.get("tier"), str) else "normal"
-    if _needs_arm(action, tier) and not _take_arm(action, target):
+    if _needs_arm(action, tier) and not _take_arm(action, target, request_id):
         # Build the decision first so an impossible one (REMEMBER with no
         # suggestion) refuses immediately instead of arming a press that
         # could never fire.
         if _decision_for(action, record, verb_id) is None:
             return REFUSED
-        _set_arm(action, target)
+        _set_arm(action, target, request_id)
         return ARMED
 
     decision = _decision_for(action, record, verb_id)
@@ -197,7 +205,7 @@ def run(argv):
         return REFUSED
 
     fleetlib.write_json_atomic(fleetlib.decision_path(target), decision)
-    fleetlib.clear_verb_arm()
+    fleetlib.clear_verdict_arm()
     return DELIVERED
 
 

@@ -120,6 +120,54 @@ def clear_verb_arm():
         pass
 
 
+def verdict_armed_path():
+    """Where a pending Row 3 verdict arm (APPROVE on high tier, REMEMBER) lives.
+
+    Deliberately its own third file, not a reuse of verb_armed_path() with a
+    discriminator field added to tell the two apart. armed.json means "slot
+    armed for destructive teardown" and fires fleet-kill; armed-verb.json
+    means "Row 2 confirm-verb armed" and fires fleet-send's queued verb --
+    each already gets its own file for exactly this reason (see
+    verb_armed_path's docstring). Round-1 review of this task reproduced the
+    interference directly: a live Row 2 ISSUE arm and a live Row 3 APPROVE
+    arm shared armed-verb.json, so pressing one silently claimed and
+    discarded the other's arm file, even though neither's liveness check
+    could ever be satisfied by the other's shape. Nothing fired wrongly --
+    but the symptom is exactly what fleet-send's own arm design exists to
+    prevent: a re-arm looks identical to a first arm, so the operator can't
+    tell "too slow" from "not registered". A distinct file removes the
+    interference outright rather than detecting it after the fact.
+    """
+    return fleet_home() / "armed-verdict.json"
+
+
+def claim_verdict_arm():
+    """Takes sole ownership of a pending verdict arm, or returns None.
+
+    Same os.replace ownership trick as claim_verb_arm, for the same reason:
+    two near-simultaneous confirming presses on Row 3 must not both fire.
+    """
+    claim = verdict_armed_path().parent / "armed-verdict.claim.{}.json".format(os.getpid())
+    try:
+        os.replace(str(verdict_armed_path()), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
+
+def clear_verdict_arm():
+    try:
+        verdict_armed_path().unlink()
+    except Exception:
+        pass
+
+
 def claim_queue(session_id):
     """Takes sole ownership of a queued verb, or returns None.
 

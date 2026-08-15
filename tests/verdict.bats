@@ -141,3 +141,63 @@ PY
   run "$BIN/fleet-verdict" nonsense
   [ "$status" -eq 1 ]
 }
+
+# --- round-1 review fixes ---------------------------------------------------
+
+@test "C1: the arm is keyed by request_id too, so a new request for the same session re-arms" {
+  stage S1 high
+  "$BIN/fleet-verdict" approve || true    # arms "approve:S1:req-S1"
+  # req-S1 resolves (e.g. the operator answered the dialog manually in the
+  # terminal) and a NEW request is staged for the same session, with its own
+  # fresh request_id -- fleet-decide mints one per request, not per session.
+  python3 - "$FLEET_HOME/pending/S1.json" <<'PY'
+import json,sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["request_id"] = "req-S1-v2"
+json.dump(record, open(path, "w"))
+PY
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 2 ]                     # re-armed against the new request, did not fire
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "I1: a Row 2 verb arm and a Row 3 verdict arm live in separate files and do not consume each other" {
+  stage S1 high
+  # A live Row 2 confirm-verb arm, in fleet-send's own file and shape --
+  # simulated directly rather than driving fleet-send end to end, since that
+  # needs a configured verb, a live session record and a stubbed osascript
+  # that tests/send.bats already exercises in full; what this test isolates
+  # is purely whether the two arm files interfere.
+  python3 - "$FLEET_HOME/armed-verb.json" <<'PY'
+import json,sys,time
+json.dump({"verb":"issue","session_id":"S1","expires": int(time.time())+30},
+           open(sys.argv[1], "w"))
+PY
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 2 ]                        # verdict arms on its own file
+  [ -f "$FLEET_HOME/armed-verb.json" ]       # Row 2's arm is untouched
+  [ -f "$FLEET_HOME/armed-verdict.json" ]    # verdict has its own arm file
+
+  # Confirming (which fires and clears the verdict arm) must not touch the
+  # still-live Row 2 arm either.
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 0 ]
+  [ -f "$FLEET_HOME/armed-verb.json" ]
+  [ ! -f "$FLEET_HOME/armed-verdict.json" ]
+}
+
+@test "I2: detail pins the selection to the target and writes no decision" {
+  stage S1 normal
+  run "$BIN/fleet-verdict" detail
+  [[ "$(python3 -c "import json;print(json.load(open('$FLEET_HOME/focus.json'))['session_id'])")" == "S1" ]]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "I3: the arm is keyed by action too, so a different action does not consume it" {
+  stage S1 high '{"type":"addRules","destination":"localSettings","rules":[{"toolName":"Bash","ruleContent":"ls:*"}],"behavior":"allow"}'
+  "$BIN/fleet-verdict" approve || true     # arms "approve:S1:req-S1"
+  run "$BIN/fleet-verdict" remember        # different action -- must re-arm, not fire
+  [ "$status" -eq 2 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
