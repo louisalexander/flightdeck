@@ -232,13 +232,45 @@ def claim_decision(session_id):
             pass
 
 
+PENDING_TTL_DEFAULT_SECS = 300
+
+
+def _pending_ttl_secs():
+    """How old a pending record may be before it is treated as dead.
+
+    Configurable via timings.pendingTtlSecs; 300s in code if unset. This is
+    the backstop for a fleet-decide killed by SIGKILL, which no signal
+    handler and no try/finally can intercept -- fleet-decide's own wait
+    timeout is 120s and Claude Code kills the hook at its documented
+    timeout: 130, so no live hook can own a record older than that. A
+    record surviving past this floor is proven dead, not merely slow.
+    """
+    config = load_config()
+    timings = config.get("timings") if isinstance(config, dict) else None
+    if isinstance(timings, dict):
+        value = timings.get("pendingTtlSecs")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    return float(PENDING_TTL_DEFAULT_SECS)
+
+
 def read_pending_all():
-    """Every readable pending record, oldest requested_at first."""
+    """Every readable, non-stale pending record, oldest requested_at first.
+
+    A record older than the TTL floor (see _pending_ttl_secs) is skipped
+    entirely. Without this, a leaked record left behind by a killed
+    fleet-decide would be the oldest pending record forever --
+    resolve_target() below always picks the oldest, so one leak would
+    permanently hijack every future Row 3 press onto a session nobody is
+    actually waiting to decide.
+    """
     out = []
     try:
         entries = sorted(pending_dir().iterdir())
     except Exception:
         return out
+    ttl = _pending_ttl_secs()
+    now = time.time()
     for entry in entries:
         if entry.suffix != ".json" or ".claim." in entry.name:
             continue
@@ -246,6 +278,8 @@ def read_pending_all():
         if isinstance(data, dict) and isinstance(data.get("session_id"), str):
             if not isinstance(data.get("requested_at"), int):
                 data["requested_at"] = 0
+            if now - data["requested_at"] > ttl:
+                continue
             out.append(data)
     out.sort(key=lambda d: d["requested_at"])
     return out

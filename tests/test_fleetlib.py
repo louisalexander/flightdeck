@@ -514,11 +514,20 @@ class PendingTests(unittest.TestCase):
         os.environ.pop("FLEET_HOME", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _pending(self, sid, at, tier="normal"):
+    def _pending(self, sid, age_secs, tier="normal"):
+        """`age_secs` is seconds-ago from now, not a raw epoch value.
+
+        read_pending_all() now applies a staleness TTL floor (see C2 in the
+        row-3-verdict-and-halt review), so a fixture timestamped near the
+        unix epoch -- as the old raw-integer `at` values (100, 200) were --
+        would be filtered out as impossibly stale before a test ever got to
+        assert on it. Seconds-ago keeps every fixture realistic while still
+        letting tests express clean relative ordering.
+        """
         fleetlib.write_json_atomic(fleetlib.pending_path(sid), {
             "session_id": sid, "tool": "Bash", "input_digest": "sha256:abc",
             "input_summary": "x", "tier": tier, "suggestion": None,
-            "repo": "r", "repeats": 1, "requested_at": at,
+            "repo": "r", "repeats": 1, "requested_at": int(time.time()) - age_secs,
         })
 
     def test_digest_is_stable_and_order_independent(self):
@@ -532,24 +541,45 @@ class PendingTests(unittest.TestCase):
                             fleetlib.input_digest("Write", {"c": 1}))
 
     def test_read_pending_all_is_oldest_first(self):
-        self._pending("B", 200)
-        self._pending("A", 100)
+        self._pending("B", 10)
+        self._pending("A", 20)
         self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["A", "B"])
 
     def test_read_pending_all_skips_unreadable_files(self):
         fleetlib.pending_dir().mkdir(parents=True, exist_ok=True)
         (fleetlib.pending_dir() / "junk.json").write_text("{not json")
-        self._pending("A", 100)
+        self._pending("A", 10)
         self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["A"])
 
+    def test_read_pending_all_skips_a_record_past_the_ttl_floor(self):
+        # The backstop for SIGKILL: a leaked record older than the TTL is
+        # proven dead, not merely slow, and must not be resolve_target()'s
+        # "oldest" forever.
+        self._pending("OLD", fleetlib.PENDING_TTL_DEFAULT_SECS + 5)
+        self._pending("FRESH", 5)
+        self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["FRESH"])
+
+    def test_read_pending_all_honours_a_configured_ttl(self):
+        cfg_dir = tempfile.mkdtemp()
+        try:
+            os.environ["FLEET_CONFIG_DIR"] = cfg_dir
+            with open(os.path.join(cfg_dir, "fleet.json"), "w", encoding="utf-8") as handle:
+                json.dump({"timings": {"pendingTtlSecs": 5}}, handle)
+            self._pending("OLD", 10)
+            self._pending("FRESH", 1)
+            self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["FRESH"])
+        finally:
+            os.environ.pop("FLEET_CONFIG_DIR", None)
+            shutil.rmtree(cfg_dir, ignore_errors=True)
+
     def test_resolve_target_prefers_a_selection_that_is_pending(self):
-        self._pending("A", 100)
-        self._pending("B", 200)
+        self._pending("A", 20)
+        self._pending("B", 10)
         fleetlib.write_focus("B")
         self.assertEqual(fleetlib.resolve_target(), "B")
 
     def test_resolve_target_falls_back_when_the_selection_is_not_pending(self):
-        self._pending("A", 100)
+        self._pending("A", 10)
         fleetlib.write_focus("Z")
         self.assertEqual(fleetlib.resolve_target(), "A")
 

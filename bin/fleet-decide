@@ -18,6 +18,7 @@ having flightdeck installed. Never emit a deny on timeout.
 
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -28,6 +29,28 @@ import fleetlib  # noqa: E402
 DEFAULT_TIMEOUT_SECS = 120
 DEFAULT_POLL_SECS = 0.15
 SUMMARY_MAX_CHARS = 300
+
+
+class _Terminated(BaseException):
+    """Raised from a SIGTERM handler so the wait loop unwinds through
+    try/finally instead of dying where it stands.
+
+    SIGTERM has no default Python handler -- unlike SIGINT, which the
+    interpreter already turns into a KeyboardInterrupt -- so without this,
+    a `kill` sent while this hook is blocked in the poll loop terminates
+    the process immediately, before any `finally` clause runs, and the
+    staged pending record is leaked. Deriving from BaseException, not
+    Exception, matches the widened guard in __main__ below: this must
+    survive to be caught there, not be swallowed by some inner `except
+    Exception`.
+    """
+
+
+def _handle_sigterm(signum, frame):
+    raise _Terminated()
+
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def _float_env(name, fallback):
@@ -151,9 +174,25 @@ def run():
     cwd = payload.get("cwd") or ""
     repo = ""
     if cwd:
-        code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
+        # timeout=2, not git()'s 15s default: this runs BEFORE the pending
+        # record is staged, on the path to the amber-immediately guarantee
+        # that is this hook's whole advantage over the ~6s Notification
+        # debounce. A wedged git must not sit in front of that.
+        code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd, timeout=2)
         if code == 0 and top:
             repo = Path(top).name
+
+    # The identity of THIS request, so a decision can be checked against it
+    # rather than merely against the session id. prompt_id (docs/hook-
+    # contract.md: on every event, unique per turn) is preferred; input_digest
+    # is the fallback for a payload without one, and is weaker -- an
+    # identical retried call shares its digest, so a decision meant for the
+    # earlier attempt would still match. See C1 in the row-3-verdict-and-halt
+    # review: without this, a decision file left over from ANY earlier
+    # request for this session -- a crashed decide, a double press landing in
+    # the claim/unlink window -- auto-answers a request no human ever saw.
+    prompt_id = payload.get("prompt_id")
+    request_id = prompt_id if isinstance(prompt_id, str) and prompt_id.strip() else digest
 
     # A denied agent may retry the identical call immediately, which would
     # otherwise produce a fresh prompt per press forever. Counting repeats
@@ -168,6 +207,7 @@ def run():
         "session_id": session_id,
         "tool": tool_name,
         "input_digest": digest,
+        "request_id": request_id,
         "input_summary": _summarise(tool_input),
         "tier": tier,
         "suggestion": _first_suggestion(payload),
@@ -182,19 +222,39 @@ def run():
         fleetlib.log("decide: could not stage pending: {}".format(err))
         return
 
-    # Amber now rather than in six seconds: PermissionRequest fires at once
-    # where Notification/permission_prompt is debounced ~6s.
-    fleetlib.create_blocked_marker(session_id)
-    _touch_session_blocked(session_id, now)
-    _reconcile()
-
-    decision = _wait_for_decision(session_id, _timeout_secs(config))
-
+    # Everything from here to the decision being resolved runs inside one
+    # try/finally so the pending record is cleared on every exit path --
+    # including SIGTERM/SIGINT unwinding through this frame, not just a
+    # normal return. fleetlib.resolve_target() always hands Row 3 the
+    # OLDEST pending record, so a leaked one would be oldest forever and
+    # permanently hijack every future press onto a session nobody asked
+    # about (see C2, row-3-verdict-and-halt review).
+    decision = None
     try:
-        fleetlib.pending_path(session_id).unlink()
-    except Exception:
-        pass
-    _reconcile()
+        # Amber now rather than in six seconds: PermissionRequest fires at
+        # once where Notification/permission_prompt is debounced ~6s.
+        fleetlib.create_blocked_marker(session_id)
+        _touch_session_blocked(session_id, now)
+        _reconcile()
+
+        # A decision file can only legitimately answer THIS request if it
+        # was written after the request was staged above. Anything already
+        # sitting in decisions/ at this point predates this request by
+        # construction -- leftover from a crashed decide or a double press
+        # -- so claim and drop it before it can be misread as the answer to
+        # what we are about to ask.
+        leftover = fleetlib.claim_decision(session_id)
+        if leftover is not None:
+            fleetlib.log("decide: discarding stale decision for {} predating this request".format(
+                session_id))
+
+        decision = _wait_for_decision(session_id, _timeout_secs(config), request_id)
+    finally:
+        try:
+            fleetlib.pending_path(session_id).unlink()
+        except Exception:
+            pass
+        _reconcile()
 
     if decision is None:
         # Timeout. Emit nothing at all -- the dialog is still on screen.
@@ -206,15 +266,32 @@ def run():
     _emit(normalised)
 
 
-def _wait_for_decision(session_id, timeout_secs):
+def _matches_request(decision, request_id):
+    """True if a claimed decision was actually written for THIS request.
+
+    A non-dict decision, or one with a missing or mismatched request_id,
+    is not ours -- it is either malformed or an answer meant for a
+    different request entirely, and must not be treated as a verdict on
+    the call currently blocked (C1, row-3-verdict-and-halt review).
+    """
+    return isinstance(decision, dict) and decision.get("request_id") == request_id
+
+
+def _wait_for_decision(session_id, timeout_secs, request_id):
     poll = _float_env("FLEET_DECIDE_POLL_SECS", DEFAULT_POLL_SECS)
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         claimed = fleetlib.claim_decision(session_id)
         if claimed is not None:
-            return claimed
+            if _matches_request(claimed, request_id):
+                return claimed
+            fleetlib.log("decide: discarding decision for {} with mismatched request_id".format(
+                session_id))
         time.sleep(poll)
-    return fleetlib.claim_decision(session_id)
+    claimed = fleetlib.claim_decision(session_id)
+    if claimed is not None and _matches_request(claimed, request_id):
+        return claimed
+    return None
 
 
 def _touch_session_blocked(session_id, now):
@@ -245,6 +322,38 @@ def _reconcile():
 if __name__ == "__main__":
     try:
         run()
-    except Exception as err:            # noqa: BLE001 -- the exit-0 guarantee
-        fleetlib.log("decide: unhandled {!r}".format(err))
-    sys.exit(0)
+    except BaseException as err:        # noqa: BLE001 -- the exit-0 guarantee
+        # BaseException, not Exception, deliberately departing from
+        # fleet-emit's guard. fleet-emit lives for milliseconds; this hook
+        # lives for up to two minutes with a permission dialog on screen, so
+        # it is the hook a user actually Ctrl-Cs, and the one Claude Code
+        # itself kills via its documented `timeout: 130` if this process
+        # never returns. Both arrive as KeyboardInterrupt/SystemExit (and
+        # SIGTERM as the _Terminated raised above), none of which
+        # `except Exception` catches -- an uncaught KeyboardInterrupt prints
+        # a traceback to stderr and exits -2, breaking the exit-0 contract
+        # on exactly the exit path this hook is most likely to take. Copying
+        # fleet-emit's narrower guard here would silently reopen that hole.
+        try:
+            fleetlib.log("decide: unhandled {!r}".format(err))
+        except Exception:
+            pass
+    try:
+        # The one path that writes to stdout. The hook contract says the
+        # terminal dialog races this hook and either can win, so a consumer
+        # that has already closed its end of the pipe (Claude Code went
+        # with the dialog) is a normal, documented outcome here -- not a
+        # bug. Flushing explicitly, inside this guarded region, means a
+        # BrokenPipeError from that surfaces here rather than during
+        # interpreter shutdown.
+        sys.stdout.flush()
+    except Exception:
+        pass
+    # os._exit rather than sys.exit: sys.exit(0) still runs the interpreter's
+    # normal shutdown sequence, which flushes stdout again -- and if the
+    # reader is gone, that second flush raises BrokenPipeError from
+    # site.py's atexit handling, which Python reports as "Exception ignored"
+    # and turns into exit code 120, breaking the exit-0 contract on
+    # precisely the path a race with the dialog is expected to take.
+    # os._exit(0) skips that shutdown entirely and always exits 0.
+    os._exit(0)
