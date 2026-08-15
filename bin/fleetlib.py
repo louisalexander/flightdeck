@@ -377,6 +377,86 @@ def slugify(text, max_chars=SLUG_MAX_CHARS):
         cut = cut.rsplit("-", 1)[0]
     return cut.strip("-")
 
+# --- risk ------------------------------------------------------------------
+
+RISK_TIERS = ("high", "normal", "low")
+
+
+def load_risk_rules():
+    """Rules from config/risk.json, layered with risk.local.json if present.
+
+    Returns {} on any failure. An empty table scores everything `normal`,
+    which is the safe degradation: a tier can only ever ADD friction on top
+    of a prompt the operator is already being shown, so knowing nothing
+    means behaving exactly as the deck did before tiers existed.
+    """
+    base = read_json(config_dir() / "risk.json", {}) or {}
+    local = read_json(config_dir() / "risk.local.json", {}) or {}
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(local, dict):
+        local = {}
+    out = dict(base)
+    for tier, extra in local.items():
+        if isinstance(extra, list):
+            out[tier] = list(out.get(tier) or []) + extra
+    return out
+
+
+def _input_strings(tool_input):
+    """Every string value in a tool input, one level deep plus list members.
+
+    Deliberately not a recursive walk of arbitrary depth: tool inputs are
+    shallow, and an unbounded walk over model-authored JSON is a place to
+    get stuck rather than a place to find more signal.
+    """
+    out = []
+    if not isinstance(tool_input, dict):
+        return out
+    for value in tool_input.values():
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, list):
+            out.extend(v for v in value if isinstance(v, str))
+    return out
+
+
+def _rule_matches(rule, tool_name, haystacks):
+    if not isinstance(rule, dict):
+        return False
+    want_tool = rule.get("tool")
+    if isinstance(want_tool, str) and want_tool != tool_name:
+        return False
+    pattern = rule.get("match")
+    if not isinstance(pattern, str) or not pattern:
+        # A tool-only rule matches on the tool alone.
+        return isinstance(want_tool, str)
+    try:
+        compiled = re.compile(pattern)
+    except re.error:
+        # A bad pattern is a config typo, not a reason to fail a hook.
+        return False
+    return any(compiled.search(text) for text in haystacks)
+
+
+def score_risk(tool_name, tool_input, rules):
+    """The tier for one tool call: 'high', 'normal' or 'low'.
+
+    Checked most-severe first so `high` always wins a tie -- a call that
+    matches both tables is the dangerous one.
+    """
+    if not isinstance(rules, dict):
+        return "normal"
+    haystacks = _input_strings(tool_input)
+    for tier in ("high", "low"):
+        table = rules.get(tier)
+        if not isinstance(table, list):
+            continue
+        for rule in table:
+            if _rule_matches(rule, tool_name, haystacks):
+                return tier
+    return "normal"
+
 # --- process ---------------------------------------------------------------
 
 def git(args, cwd, timeout=15):

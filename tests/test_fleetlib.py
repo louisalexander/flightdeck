@@ -422,5 +422,44 @@ class SpawnRecordTests(unittest.TestCase):
         self.assertRegex(path.name, r"\A[a-f0-9]+\.json\Z")
 
 
+RULES = {
+    "high": [
+        {"tool": "Bash", "match": r"rm\s+-[a-z]*[rf]"},
+        {"tool": "Bash", "match": r"push\s+.*--force"},
+        {"tool": "Bash", "match": r"curl.*\|\s*(ba)?sh"},
+    ],
+    "low": [{"tool": "Read"}, {"tool": "Grep"}, {"tool": "Glob"}],
+}
+
+
+class ScoreRiskTests(unittest.TestCase):
+    def test_unmatched_tool_is_normal(self):
+        self.assertEqual(fleetlib.score_risk("Write", {"file_path": "a"}, RULES), "normal")
+
+    def test_tool_only_rule_matches(self):
+        self.assertEqual(fleetlib.score_risk("Read", {"file_path": "a"}, RULES), "low")
+
+    def test_pattern_rule_matches_command(self):
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "rm -rf ./build"}, RULES), "high")
+
+    def test_pattern_rule_requires_the_named_tool(self):
+        # The same text under a different tool must not score high.
+        self.assertEqual(fleetlib.score_risk("Write", {"content": "rm -rf ./build"}, RULES), "normal")
+
+    def test_high_wins_over_low(self):
+        rules = {"high": [{"tool": "Read"}], "low": [{"tool": "Read"}]}
+        self.assertEqual(fleetlib.score_risk("Read", {}, rules), "high")
+
+    def test_scans_every_string_value_in_the_input(self):
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "git push --force"}, RULES), "high")
+
+    def test_malformed_rules_degrade_to_normal(self):
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "rm -rf /"}, {"high": "nope"}), "normal")
+
+    def test_bad_regex_is_skipped_not_raised(self):
+        rules = {"high": [{"tool": "Bash", "match": "([unclosed"}]}
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "x"}, rules), "normal")
+
+
 if __name__ == "__main__":
     unittest.main()
