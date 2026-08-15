@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {
+      font: 13px -apple-system, "Helvetica Neue", Arial, sans-serif;
+      color: #d8d8d8; background: #2d2d2d; margin: 0; padding: 14px;
+    }
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    label { width: 74px; text-align: right; color: #9a9a9a; }
+    select { flex: 1; padding: 4px; background: #3d3d3d; color: #d8d8d8;
+             border: 1px solid #4a4a4a; border-radius: 4px; }
+    .note { color: #8a8a8a; line-height: 1.45; }
+    .note b { color: #b8b8b8; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <label for="verdict">Verdict</label>
+    <select id="verdict">
+      <option value="">(none)</option>
+      <option value="detail">DETAIL</option>
+      <option value="approve">APPROVE</option>
+      <option value="remember">REMEMBER</option>
+      <option value="deny">DENY</option>
+      <option value="interrupt">INTERRUPT</option>
+      <option value="steer">STEER</option>
+    </select>
+  </div>
+  <div class="row">
+    <label for="verb">Steer verb</label>
+    <select id="verb">
+      <option value="">(none)</option>
+      <option value="justify">justify</option>
+      <option value="otherway">otherway</option>
+      <option value="dryrun">dryrun</option>
+    </select>
+  </div>
+  <p class="note">
+    A press answers whichever agent Row 3 is currently targeting -- the
+    selected session's pending request if it has one, otherwise the oldest
+    pending request. <b>Steer verb</b> only matters when <b>Verdict</b> is
+    <b>STEER</b>; it selects which prewritten message to deny with.
+    <b>REMEMBER</b> always asks for a second press before it fires, because
+    the rule it writes applies to every agent in every worktree of the
+    repository, not just this one. <b>DETAIL</b> writes no decision -- it
+    only focuses the terminal that is actually blocked, so you can read the
+    full request and answer it there if you would rather.
+  </p>
+
+<script>
+// Self-contained: no CDN. A property inspector that needs the network is a
+// property inspector that can silently render blank.
+let websocket = null, uuid = null, actionInfo = null;
+
+function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
+  uuid = inUUID;
+  actionInfo = JSON.parse(inActionInfo);
+  websocket = new WebSocket("ws://127.0.0.1:" + inPort);
+
+  websocket.onopen = function () {
+    websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+    const saved = (actionInfo.payload && actionInfo.payload.settings) || {};
+    document.getElementById("verdict").value = saved.verdict || "";
+    document.getElementById("verb").value = saved.verb || "";
+  };
+}
+
+function sendSettings() {
+  if (!websocket || websocket.readyState !== 1) return;
+  const verdict = document.getElementById("verdict").value;
+  const verb = document.getElementById("verb").value;
+  const settings = {};
+  if (verdict !== "") settings.verdict = verdict;
+  if (verb !== "") settings.verb = verb;
+  websocket.send(JSON.stringify({
+    event: "setSettings", context: uuid, payload: settings
+  }));
+}
+
+document.getElementById("verdict").addEventListener("change", sendSettings);
+document.getElementById("verb").addEventListener("change", sendSettings);
+</script>
+</body>
+</html>

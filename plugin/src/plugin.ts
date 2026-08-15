@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { renderSvg, toDataUri } from "./render.js";
 import { bootConfig, shouldShowSplash, splashTileSvg, renderBootTile } from "./splash.js";
 import { renderCommandSvg } from "./command.js";
-import type { Slot, SlotsFile, Config } from "./types.js";
+import { renderVerdictSvg, renderDetailSvg, type Feedback as VerdictFeedback } from "./verdict.js";
+import type { Slot, SlotsFile, Config, VerdictTarget } from "./types.js";
 
 const FLEET_HOME = join(homedir(), ".fleet");
 const REPO = process.env.FLIGHTDECK_REPO ?? join(homedir(), "code", "flightdeck");
@@ -57,7 +58,7 @@ function loadConfig(): Config {
 const EMPTY = (index: number): Slot => ({
   index, state: "empty", label_top: "", label_bottom: "",
   session_id: "", host: "", iterm_session: "", cwd: "", app: "",
-  focused: false
+  focused: false, permission_mode: ""
 });
 
 @action({ UUID: "com.louisalexander.flightdeck.slot" })
@@ -402,7 +403,164 @@ export class Command extends SingletonAction<{ verb?: string }> {
   }
 }
 
+/**
+ * bin/fleet-verdict mirrors bin/fleet-send's three-way exit status exactly:
+ * 0 delivered, 1 refused, 2 armed. See runFleetSend above for why a boolean
+ * would lose the "waiting on a confirming press" case.
+ */
+type VerdictOutcome = "delivered" | "refused" | "armed";
+const VERDICT_ARMED_EXIT = 2;
+
+function runFleetVerdict(verdict: string, verb: string): Promise<VerdictOutcome> {
+  return new Promise((resolve) => {
+    const args = [join(REPO, "bin", "fleet-verdict"), verdict];
+    if (verb) args.push(verb);
+    execFile(interpreter(), args, (err) => {
+      if (!err) return resolve("delivered");
+      const code = (err as unknown as { code?: number | string }).code;
+      if (Number(code) === VERDICT_ARMED_EXIT) {
+        streamDeck.logger.info(`fleet-verdict ${verdict} armed; awaiting confirm`);
+        return resolve("armed");
+      }
+      streamDeck.logger.error(`fleet-verdict ${verdict} refused: ${err.message}`);
+      resolve("refused");
+    });
+  });
+}
+
+type VerdictSettings = { verdict?: string; verb?: string };
+
+/**
+ * Row 3: eight keys, one action type, parameterised by which verdict a
+ * press sends. Dimmed at rest rather than blank -- a verdict key's meaning
+ * is fixed (APPROVE is APPROVE whether or not anything is pending), so
+ * blanking it would flicker the row's spatial memory on and off. See
+ * verdict.ts for the rendering rationale.
+ *
+ * The row's live content -- whether a request is pending, and its tier --
+ * comes from slots.json's `verdict` block, not from this action's own
+ * settings, so every key repaints on the same fs.watch signal FleetSlot
+ * already uses.
+ */
+@action({ UUID: "com.louisalexander.flightdeck.verdict" })
+export class Verdict extends SingletonAction<VerdictSettings> {
+  private visible = new Map<string, WillAppearEvent<VerdictSettings>>();
+  // Same house pattern as Command.pending: tracks the in-flight
+  // feedback-restore timer per key so a background repaint (fs.watch on
+  // slots.json) never stomps a flash that is still showing.
+  private pending = new Map<string, ReturnType<typeof setTimeout>>();
+
+  constructor() {
+    super();
+    try {
+      watch(FLEET_HOME, (_type, filename) => {
+        if (filename === "slots.json") this.repaintAll();
+      });
+    } catch (err) {
+      streamDeck.logger.error(`cannot watch ${FLEET_HOME}: ${String(err)}`);
+    }
+  }
+
+  override onWillAppear(ev: WillAppearEvent<VerdictSettings>): void {
+    ev.action.setTitle("");           // the SVG carries all text
+    this.visible.set(ev.action.id, ev);
+    this.paintIdle(ev);
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<VerdictSettings>): void {
+    this.visible.delete(ev.action.id);
+    this.clearPending(ev.action.id);
+  }
+
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<VerdictSettings>): void {
+    const entry = this.visible.get(ev.action.id);
+    if (!entry) return;
+    entry.payload.settings = ev.payload.settings;
+    this.clearPending(ev.action.id);
+    this.paintIdle(entry);
+  }
+
+  override async onKeyUp(ev: KeyUpEvent<VerdictSettings>): Promise<void> {
+    const id = ev.action.id;
+    this.clearPending(id);
+
+    const verdict = ev.payload.settings?.verdict ?? "";
+    const verb = ev.payload.settings?.verb ?? "";
+    if (!verdict) {
+      // Unconfigured is a refusal too: without this the operator can't
+      // tell "nothing bound to this key" from "the press was missed".
+      ev.action.setImage(toDataUri(this.render(verdict, this.target(), "refused")));
+      this.scheduleRestore(id, ev.action, verdict);
+      return;
+    }
+
+    const outcome = await runFleetVerdict(verdict, verb);
+    // DETAIL writes no decision -- it only focuses and selects the target
+    // session (see bin/fleet-verdict's _focus) -- and renderDetailSvg has
+    // no feedback channel to flash, since its face is already carrying the
+    // classification rather than a verb label. Repaint straight to idle.
+    if (verdict === "detail") {
+      ev.action.setImage(toDataUri(this.render(verdict, this.target(), "")));
+      return;
+    }
+    ev.action.setImage(toDataUri(this.render(verdict, this.target(), outcome)));
+    // Held longer for an armed key so it keeps inviting the confirming
+    // press for as long as bin/fleet-verdict will actually honour one --
+    // see Command.onKeyUp's identical reasoning about verbArmSecs.
+    this.scheduleRestore(id, ev.action, verdict, outcome === "armed" ? 9000 : 1200);
+  }
+
+  private target(): VerdictTarget | null {
+    return readJson<SlotsFile>(SLOTS_PATH)?.verdict ?? null;
+  }
+
+  private render(verdict: string, target: VerdictTarget | null, feedback: VerdictFeedback): string {
+    if (verdict === "detail") return renderDetailSvg(target);
+    const active = target !== null;
+    const tier = target?.tier ?? "normal";
+    return renderVerdictSvg(verdict.toUpperCase(), tier, feedback, active);
+  }
+
+  private paintIdle(ev: WillAppearEvent<VerdictSettings>): void {
+    const verdict = ev.payload.settings?.verdict ?? "";
+    ev.action.setImage(toDataUri(this.render(verdict, this.target(), "")));
+  }
+
+  private repaintAll(): void {
+    for (const [id, ev] of this.visible.entries()) {
+      if (this.pending.has(id)) continue;   // mid-feedback flash; don't stomp it
+      this.paintIdle(ev);
+    }
+  }
+
+  // Feedback is a brief change of ink, not a lasting one -- mirrors
+  // Command.scheduleRestore exactly, including the clear-before-set
+  // reasoning there about overlapping presses. Takes the action and verdict
+  // directly, rather than a whole event, because onKeyUp's KeyUpEvent and
+  // onWillAppear's WillAppearEvent are different types that happen to share
+  // the same `action.setImage` shape -- this is the intersection they agree on.
+  private scheduleRestore(
+    id: string, action: { setImage(image?: string): Promise<void> }, verdict: string, afterMs = 1200
+  ): void {
+    this.clearPending(id);
+    const timer = setTimeout(() => {
+      this.pending.delete(id);
+      action.setImage(toDataUri(this.render(verdict, this.target(), "")));
+    }, afterMs);
+    this.pending.set(id, timer);
+  }
+
+  private clearPending(id: string): void {
+    const timer = this.pending.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.pending.delete(id);
+    }
+  }
+}
+
 streamDeck.actions.registerAction(new FleetSlot());
 streamDeck.actions.registerAction(new BootTile());
 streamDeck.actions.registerAction(new Command());
+streamDeck.actions.registerAction(new Verdict());
 streamDeck.connect();

@@ -39,6 +39,15 @@
       "PropertyInspectorPath": "ui/command.html",
       "Controllers": ["Keypad"],
       "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
+    },
+    {
+      "Name": "Verdict",
+      "UUID": "com.louisalexander.flightdeck.verdict",
+      "Icon": "imgs/action",
+      "Tooltip": "Answer a pending Claude Code permission request",
+      "PropertyInspectorPath": "ui/verdict.html",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/key", "TitleAlignment": "middle" }]
     }
   ]
 }

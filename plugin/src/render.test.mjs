@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { test } from "node:test";
 import { renderSvg, toDataUri } from "../com.louisalexander.flightdeck.sdPlugin/bin/render.js";
 import {
   tileViewBox, splashTileSvg, nightTileSvg, bootConfig, isBooting,
@@ -290,3 +291,55 @@ console.log("render tests passed");
   }
   assert.notStrictEqual(armed, refused, "armed is not refused -- opposite meanings");
 }
+
+// --- Row 3 verdict keys --------------------------------------------------
+// Import from the bundle rollup actually emits, matching how renderSvg and
+// renderCommandSvg are imported above -- there is no separate dist/ output.
+import { renderVerdictSvg, renderDetailSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
+
+test("a verdict key at rest keeps its label, dimmed", () => {
+  const svg = renderVerdictSvg("APPROVE", "normal", "", false);
+  assert.match(svg, /APPROVE/);
+  assert.match(svg, /#5A6675/);   // INK_DIM -- legible, not blank
+});
+
+test("a verdict key with a target is bright", () => {
+  const svg = renderVerdictSvg("APPROVE", "normal", "", true);
+  assert.match(svg, /#C9D4E2/);
+});
+
+test("a high tier borrows the attention amber, never a new colour", () => {
+  const svg = renderVerdictSvg("APPROVE", "high", "", true);
+  assert.match(svg, /#F5A623/);
+});
+
+test("armed says CONFIRM?, matching Row 2", () => {
+  assert.match(renderVerdictSvg("REMEMBER", "low", "armed", true), /CONFIRM\?/);
+});
+
+test("detail at rest shows its label and no content lines", () => {
+  const svg = renderDetailSvg(null);
+  assert.match(svg, /DETAIL/);
+  assert.doesNotMatch(svg, /Bash/);
+});
+
+test("detail names the agent and the tool", () => {
+  const svg = renderDetailSvg({ session_id: "S1", agent: "flightdeck", tool: "Bash", tier: "high", repeats: 1 });
+  assert.match(svg, /flightdeck/);
+  assert.match(svg, /Bash/);
+});
+
+test("detail shows a repeat count only when it is above one", () => {
+  const once = renderDetailSvg({ session_id: "S1", agent: "a", tool: "Bash", tier: "normal", repeats: 1 });
+  const many = renderDetailSvg({ session_id: "S1", agent: "a", tool: "Bash", tier: "normal", repeats: 4 });
+  assert.doesNotMatch(once, /×/);
+  assert.match(many, /×4/);
+});
+
+test("detail never renders tool input", () => {
+  const svg = renderDetailSvg({
+    session_id: "S1", agent: "a", tool: "Bash", tier: "high", repeats: 1,
+    input_summary: "rm -rf /",
+  });
+  assert.doesNotMatch(svg, /rm -rf/);
+});
