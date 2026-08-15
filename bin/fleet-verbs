@@ -91,6 +91,7 @@ def parse_verb(text):
         "label": meta.get("label", ""),
         "interrupt": meta.get("interrupt", "").lower() in TRUE_WORDS,
         "confirm": meta.get("confirm", "").lower() in TRUE_WORDS,
+        "steer": meta.get("steer", "").lower() in TRUE_WORDS,
         "prompt": prompt,
     }
 
@@ -107,6 +108,17 @@ def load_verb(verb_id):
 
 
 def main(argv):
+    # --steer <id>: print a steer verb's body for use as a deny message.
+    # Refuses any verb not marked `steer: true`. A Row 2 verb body dropped
+    # into a deny message reads as the reason a call was refused, which is a
+    # different register -- binding PUSH to a steer key would deny a call
+    # with "Commit and push" as its justification.
+    if len(argv) >= 3 and argv[1] == "--steer":
+        resolved, _ = load_verb(argv[2])
+        if resolved is None or not resolved.get("steer") or not resolved.get("prompt", "").strip():
+            return 1
+        sys.stdout.write(resolved["prompt"].strip() + "\n")
+        return 0
     if len(argv) < 3:
         return 1
     command, verb_id = argv[1], argv[2]

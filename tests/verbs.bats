@@ -216,7 +216,54 @@ MD
   for f in "$ROOT"/config/verbs/*.md; do
     local id
     id="$(basename "$f" .md)"
+    # A steer verb is not a Row 2 command verb: it is never bound to a Row 2
+    # key, so it has no property-inspector entry by design. It is reached
+    # only via `fleet-verbs --steer <id>`, wired to Row 3 steer keys
+    # elsewhere -- see the STEER tests below. Excluding it here is not
+    # weakening this check: a steer verb that silently gained a `key:` or
+    # got dropped into the picker markup would still need to be caught, and
+    # nothing here does that today, but that is a different property than
+    # "reachable from Row 2", which is all this test asserts.
+    grep -q "^steer: true$" "$f" && continue
     grep -q "value=\"$id\"" "$pi" || missing="$missing $id"
   done
   [ -z "$missing" ] || { echo "not offered in the picker:$missing"; false; }
+}
+
+# --- steer verbs ------------------------------------------------------
+#
+# A Row 2 verb's body is a task instruction, read by an agent that is idle
+# or working normally. A steer verb's body is a deny message: it arrives
+# inside a refused tool call, as the reason the call was refused. Different
+# register, so the two must never blur -- a Row 2 verb bound to a steer key
+# would read as a justification for a refusal it never wrote. `steer: true`
+# in the frontmatter is the only thing that lets a verb be used this way.
+
+@test "STEER: a steer verb's body is printed by --steer" {
+  run "$BIN/fleet-verbs" --steer justify
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "STEER: a non-steer verb is refused on a steer key" {
+  run "$BIN/fleet-verbs" --steer push
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "STEER: an unknown verb is refused" {
+  run "$BIN/fleet-verbs" --steer nosuchverb
+  [ "$status" -eq 1 ]
+}
+
+@test "STEER: every shipped steer verb forbids an immediate retry" {
+  for v in justify otherway dryrun; do
+    run "$BIN/fleet-verbs" --steer "$v"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not retry"* || "$output" == *"Do not retry"* ]]
+  done
+}
+
+@test "STEER: dryrun ships but is not bound to a key by default" {
+  [ -f "$ROOT/config/verbs/dryrun.md" ]
 }
