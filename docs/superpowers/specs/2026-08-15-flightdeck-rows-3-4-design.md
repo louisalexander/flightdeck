@@ -92,6 +92,10 @@ invisible next to a human thumb.
 The target is **the selected session if it has a pending decision, otherwise the oldest pending
 decision.** Nothing else.
 
+Resolving a request needs no un-pin press. DETAIL pins by selecting, and once the request is
+decided that session has no pending record, so the selection stops overriding and the target
+falls to the oldest remaining request by itself. The pin lasts exactly as long as it is useful.
+
 **Why not a triage queue head with a cycle key**, as the originating sketch had it: that spends
 two of eight keys on targeting, and it gives key 1 a meaning that changes as the queue changes
 — which is the exact failure Row 1's design forbids ("a key that shifts under your thumb is
@@ -543,6 +547,23 @@ already idempotent per issue, so a double press focuses the existing tab.
 
 Rows 3 and 4 are **monochrome deep charcoal**, as Row 2 established, because Row 1 owns
 saturated backgrounds and state is the information.
+
+**Row 3's resting state is dimmed, not blank.** With nothing pending — which will be most of
+the time — every key keeps its label at low contrast. It is tempting to borrow Row 1's *absence
+should look absent* here and black the row out. That doctrine does not transfer: a Row 1 slot
+represents a thing that may not exist and its meaning is positional, whereas a Row 3 key's
+meaning is fixed. APPROVE is APPROVE whether or not there is anything to approve, and blanking
+it would destroy the spatial memory the row depends on while making eight keys flicker in and
+out of existence on a panel whose discipline is that only amber may move the operator's eye.
+Row 2 is the right sibling here, and its keys are drawn whether or not a session is selected.
+
+DETAIL at rest shows its label and no content lines. It does not report a pending count of zero;
+Row 1 already says that, and a key that reports absence is a key with two meanings.
+
+**Pressing a key at rest gives the no-target flash**, never nothing. The Row 2 spec's reasoning
+applies unchanged: a key that silently does nothing is indistinguishable from a broken one. This
+is also the outcome when a press races the last request's resolution, since `fleet-verdict`
+refuses on a missing pending record.
 
 **Tier is not a colour.** A `high` tier shows the amber warning triangle — the glyph the armed
 teardown already owns, which already means *you are one press from something serious*. Reusing
