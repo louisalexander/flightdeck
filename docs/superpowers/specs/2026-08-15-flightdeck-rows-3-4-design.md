@@ -277,9 +277,23 @@ One action type, `com.louisalexander.flightdeck.verdict`, carrying a `verdict` s
 steers — a `verb` setting, mirroring how Row 2's command action carries a verb. The plugin
 stays a renderer and a dispatcher and holds no knowledge of what a verdict means.
 
-**DETAIL's press is the anti-blind-approval escape hatch.** The deck tells you tool and tier;
-when that is not enough, one press puts the full text in front of you. That is what makes it
-honest to keep the input off the key face.
+**DETAIL's press is the anti-blind-approval escape hatch**, and it is `fleet-focus` on the
+target session — the same UUID tree-walk Row 1's short press already performs, with no new code.
+
+What it reveals is not something flightdeck renders. **Flightdeck never renders tool input
+anywhere.** The complete, authoritative rendering of the request already exists: Claude Code
+drew it in that terminal, and the session is blocked on it, so it is the live prompt at the
+bottom of that window, showing the full arguments and the numbered options. DETAIL is a pointer
+to that. This is why truncation was never a problem to solve — there is nothing to truncate.
+
+Two consequences:
+
+- **It is the only Row 3 key that writes no decision.** Every other key emits a verdict; this
+  one moves the operator's eyes.
+- **It is a complete exit from the deck, not a detour through it.** Once focused, answering in
+  the terminal wins: the dialog races the hook, and Claude Code discards the hook's late
+  decision through its orphaned-permission path. Nothing has to be pressed on the deck
+  afterwards, and nothing is left dangling if it is not.
 
 **REMEMBER always arms, and never invents a rule.** It emits `permission_suggestions` verbatim.
 If the payload carries none, the key refuses rather than synthesising one. It arms regardless
@@ -524,10 +538,15 @@ teardown already owns, which already means *you are one press from something ser
 an established meaning on a different row beats inventing a fourth colour language, and it
 cannot collide with lifecycle amber because Row 1 does not draw it.
 
-**The input never appears whole on a key.** At 96px roughly eleven characters fit per line, and
-`rm -rf ./build` and `rm -rf ./ build` truncate identically. DETAIL therefore carries agent
-identity, tool name, tier and the repeat count — a classification, never a quotation. The full
-text lives one press away, in the terminal.
+**The input never appears on a key at all.** At 96px roughly eleven characters fit per line, and
+`rm -rf ./build` and `rm -rf ./ build` truncate identically — so a truncated command is worse
+than no command, because it reads as information while being ambiguous exactly where it matters.
+DETAIL therefore carries agent identity, tool name, tier and the repeat count: a classification,
+never a quotation. The complete request is one press away in the terminal, rendered by Claude
+Code rather than reproduced here.
+
+`input_summary` on the pending record exists for the log and for `fleet-verdict`'s own output on
+a terminal. It is deliberately not a render source, and nothing in the plugin should read it.
 
 **Armed presentation is the existing one**: near-black, large amber triangle, high-contrast
 `CONFIRM?`. Not red — red is an observed failure, and an operator considering an approval has
