@@ -190,7 +190,12 @@ PY
 @test "I2: detail pins the selection to the target and writes no decision" {
   stage S1 normal
   run "$BIN/fleet-verdict" detail
-  [[ "$(python3 -c "import json;print(json.load(open('$FLEET_HOME/focus.json'))['session_id'])")" == "S1" ]]
+  # Single-bracket, not [[ ]]: this repo's bash is 3.2.57, where set -e does
+  # not apply to a [[ ]] compound in a non-final position, so a failing
+  # [[ ]] assertion here would be silently swallowed and this test would
+  # pass even with write_focus() deleted from _focus -- exactly what
+  # round-2 review found and reproduced. [ ] has no such exemption.
+  [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['session_id'])" "$FLEET_HOME/focus.json")" = "S1" ]
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }
 
