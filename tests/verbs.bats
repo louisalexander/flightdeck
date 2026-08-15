@@ -224,7 +224,14 @@ MD
     # got dropped into the picker markup would still need to be caught, and
     # nothing here does that today, but that is a different property than
     # "reachable from Row 2", which is all this test asserts.
-    grep -q "^steer: true$" "$f" && continue
+    #
+    # Asking fleet-verbs itself, via --steer, rather than grepping for
+    # "^steer: true$" here: the real parser accepts true/yes/1
+    # case-insensitively (TRUE_WORDS in bin/fleet-verbs), so a plain grep on
+    # the literal string "true" would misclassify a steer verb written
+    # `steer: yes` as a Row 2 verb missing from the picker. Reusing the
+    # parser keeps this test unable to drift from the rule it is checking.
+    "$BIN/fleet-verbs" --steer "$id" >/dev/null 2>&1 && continue
     grep -q "value=\"$id\"" "$pi" || missing="$missing $id"
   done
   [ -z "$missing" ] || { echo "not offered in the picker:$missing"; false; }

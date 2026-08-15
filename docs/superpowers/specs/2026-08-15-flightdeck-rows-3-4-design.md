@@ -214,21 +214,29 @@ On each firing:
 1. read `tool_name`, `tool_input` and `permission_suggestions` from the payload;
 2. score the tier against `config/risk.json`;
 3. hash `(session_id, tool_name, tool_input)`. If a pending record already carries that hash,
-   **increment its `repeats` and reuse it** rather than creating a second record;
+   carry its `repeats` forward incremented by one — but the record itself is **rewritten**, not
+   reused: it gets a fresh `request_id` (next step), because the OLD request_id belongs to the
+   call this one is repeating, not to this one;
 4. mint `request_id` fresh (`uuid4`) — never the payload's `prompt_id`, which is unique per
    *turn*, not per request, so a turn with several tool calls raises several requests sharing
-   one `prompt_id` — and write `~/.fleet/pending/<session_id>.json` atomically;
+   one `prompt_id` — and write `~/.fleet/pending/<session_id>.json` atomically, replacing
+   whatever pending record (repeat or not) was there before;
 5. flip the slot to `blocked` immediately;
 6. poll `~/.fleet/decisions/<session_id>.json` every 150ms;
 7. on a decision whose own `request_id` matches the pending record's, claim it with
    `os.replace`, emit the JSON, clear the pending record;
-8. on timeout, or on a decision with a missing or mismatched `request_id`, emit nothing and
-   clear the pending record.
+8. a decision with a missing or mismatched `request_id` is claimed (so it cannot be read twice)
+   and discarded — logged, not emitted — and **polling continues**; it is not a terminating
+   condition. Only the deadline elapsing with no matching decision ends the wait, and only then
+   is nothing emitted and the pending record cleared.
 
-A decision must echo `request_id` verbatim or `fleet-decide` discards it unread. A verdict has
-to be answerable by exactly one request — otherwise a decision left over from an earlier one
-(a crashed `fleet-decide`, a double press, or an earlier tool call sharing one prompt turn)
-would auto-answer a later, unrelated request with no operator involved at all.
+A decision must echo `request_id` verbatim or `fleet-decide` discards it unread and keeps
+waiting. A verdict has to be answerable by exactly one request — otherwise a decision left over
+from an earlier one (a crashed `fleet-decide`, a double press, or an earlier tool call sharing
+one prompt turn) would auto-answer a later, unrelated request with no operator involved at all.
+Discarding and continuing, rather than discarding and giving up, matters for the same reason: a
+stray mismatched decision must not be able to end the wait for the request that is actually
+outstanding.
 
 Step 5 is a latency improvement to the shipped product, not only to this feature.
 `PermissionRequest` fires at t≈0 where `Notification/permission_prompt` is debounced to t≈6.0s
@@ -273,10 +281,18 @@ since `fleet-decide` clears pending on the way out. A decision written into the 
 that check and the write is harmless: a stale decision file with no waiter, which the reaper
 clears alongside its existing work.
 
-Arming reuses `fleet-send`'s `os.replace` ownership rename and its `armed-verb.json`
-convention — **not** `armed.json`, which carries exactly one meaning, "slot N is armed for
-destructive teardown", and which `fleet-press` fires `fleet-kill` off. The Row 2 spec records
-why that separation is load-bearing; the same reasoning applies unchanged here.
+Arming reuses `fleet-send`'s `os.replace` ownership rename, but not its storage: a Row 3 verdict
+arm gets its **own** file, `armed-verdict.json` — a third file, not a reuse of Row 2's
+`armed-verb.json` with a discriminator added to tell the two apart. `armed.json` carries exactly
+one meaning, "slot N is armed for destructive teardown", and `fleet-press` fires `fleet-kill` off
+it; `armed-verb.json` means "Row 2 confirm-verb armed" and fires `fleet-send`'s queued verb. Each
+already had its own file for that reason before this row existed. Round-1 review of this task
+reproduced the interference that skipping the third file would cause directly: a live Row 2
+ISSUE arm and a live Row 3 APPROVE arm sharing `armed-verb.json` meant pressing one silently
+claimed and discarded the other's arm, even though neither's liveness check could ever be
+satisfied by the other's shape. Nothing fired wrongly, but the symptom is exactly what the
+arm-file design exists to prevent: a re-arm looks identical to a first arm, so the operator can't
+tell "too slow" from "not registered". A distinct file removes the interference outright.
 
 ### Row 3 — the verdict row
 

@@ -57,22 +57,27 @@ export function renderSvg(
       `stroke="#FFFFFF" stroke-width="4" stroke-opacity="0.92"/>`
     : "";
 
-  // Quiet on purpose. A bypassed agent is a standing condition, often a
-  // chosen one, and a marker that shouted would compete with amber -- the
-  // one thing on this panel allowed to shout. The pip says "this one has no
-  // brakes" to an operator who looks; it does not pull the eye across a desk.
+  // Opaque and two-tone, not quiet: it has to read on every one of the
+  // seven lifecycle backgrounds (blocked, working, done, idle, failed,
+  // empty, armed), and a single flat colour cannot do that -- #F5A623 (the
+  // original single-tone pip) was BYTE-IDENTICAL to the `blocked` background
+  // in config/fleet.json, invisible on exactly the key where an operator
+  // scanning for "no brakes" agents would most need to see it, since
+  // Notification fires regardless of permission mode and idle-input/
+  // plan-mode prompts still fire under bypassPermissions. A dark ring
+  // around a light dot survives every state background: the ring carries
+  // legibility on light fills where the dot alone could not -- `blocked`
+  // is the case that bit us -- and the dot carries it on dark ones (idle,
+  // failed, empty, armed) where the ring alone could not. See "the bypass
+  // pip never matches any lifecycle background colour" in render.test.mjs
+  // for the regression this guards.
   //
-  // Two-tone, not a flat fill: a single colour composites away against
-  // whichever lifecycle background happens to match it, and #F5A623 (the
-  // original single-tone pip) is BYTE-IDENTICAL to the `blocked` background
-  // in config/fleet.json -- the one key where an operator scanning for "no
-  // brakes" agents would most need to see it, since Notification fires
-  // regardless of permission mode and idle-input/plan-mode prompts still
-  // fire under bypassPermissions. A dark ring around a light dot survives
-  // every state background: the ring separates from light fills (blocked,
-  // working, done), the dot separates from dark ones (idle, failed, empty,
-  // armed). See "the bypass pip never matches any lifecycle background
-  // colour" in render.test.mjs for the regression this guards.
+  // What stays deliberately restrained is its size and corner placement,
+  // not its opacity: a bypassed agent is a standing condition, often a
+  // chosen one, and a pip that took more of the key would compete with
+  // amber -- the one channel on this panel allowed to pull the eye. It
+  // says "this one has no brakes" to an operator who looks; it does not
+  // try to make them look.
   //
   // An unknown mode draws no pip. Absence must never be read as "default":
   // that would tell the operator a session is guarded when we simply have
