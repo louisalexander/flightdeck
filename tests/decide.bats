@@ -242,6 +242,46 @@ print(json.dumps(p))" "$PAYLOAD" "$wt")"
   [ -z "$output" ]
 }
 
+# --- the timeout bounds the PROCESS, not just the sleep ---------------------
+#
+# Everything before the wait loop is bounded but not free: git rev-parse
+# (<=2s), the pending write, the blocked marker, and a _reconcile()
+# subprocess (<=10s). With the deadline computed after all of that, the
+# worst-case process lifetime was 120 + 12 = ~132s against a deployed hook
+# timeout of fleetlib.HOOK_TIMEOUT_SECS (130). Claude Code SIGKILLs at that
+# point, the `finally` never runs, the pending record leaks -- and
+# resolve_target() hands Row 3 the oldest pending record, so one leak
+# hijacks every press onto a dead session for the whole TTL.
+#
+# The delay is a stubbed `git` that never returns: fleetlib.git bounds it at
+# 2s and reports failure, so the pre-wait cost is a deterministic ~2s rather
+# than a sleep racing the assertion. With the timeout at 2s, a deadline
+# measured from process start caps the whole run at ~2s; measured from the
+# start of the wait it would be ~4s.
+@test "the configured timeout bounds the whole process, not just the wait" {
+  local stubbin="$BATS_TEST_TMPDIR/stubbin"
+  mkdir -p "$stubbin"
+  # exec, so the killed process IS the sleep -- a `sleep` left as a child of
+  # a killed wrapper would hold the inherited stdout pipe open and stall
+  # subprocess.run's own cleanup, which would make this test measure the
+  # wrong thing.
+  printf '#!/bin/sh\nexec sleep 30\n' > "$stubbin/git"
+  chmod +x "$stubbin/git"
+
+  export FLEET_DECIDE_TIMEOUT_SECS=2
+  local started
+  started="$(python3 -c 'import time;print(time.time())')"
+  PATH="$stubbin:$PATH" run decide
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  python3 -c "
+import sys, time
+elapsed = time.time() - float(sys.argv[1])
+assert elapsed < 3.2, 'took {:.2f}s -- the deadline is not measured from process start'.format(elapsed)
+assert elapsed > 1.5, 'took {:.2f}s -- the git stub did not delay anything, so this proves nothing'.format(elapsed)
+" "$started"
+}
+
 # --- C1: request identity, not just session identity ------------------------
 #
 # fleetlib.resolve_target() and this hook are both keyed by session_id, but a

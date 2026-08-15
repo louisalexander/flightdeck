@@ -161,6 +161,20 @@ def _normalise(decision):
 
 
 def run():
+    # The clock the timeout is measured against starts HERE, not when the
+    # wait loop finally begins. Everything between the two is bounded but
+    # not free: git rev-parse (<=2s), the pending write, the blocked marker
+    # and a _reconcile() subprocess (<=10s). Measuring the timeout from the
+    # start of the WAIT made the worst-case process lifetime
+    # 120 + 12 = ~132s against a deployed hook timeout of
+    # fleetlib.HOOK_TIMEOUT_SECS (130) -- so Claude Code would SIGKILL this
+    # process, the `finally` below would never run, and the pending record
+    # would leak. resolve_target() always hands Row 3 the OLDEST pending
+    # record, so one leak hijacks every future press onto a dead session
+    # for the whole TTL. That is the leak three earlier fix rounds were
+    # spent closing; the ceiling has to bound the process, not just the
+    # sleep inside it.
+    start = time.time()
     try:
         payload = json.loads(sys.stdin.read())
         if not isinstance(payload, dict):
@@ -270,7 +284,10 @@ def run():
         decision = fleetlib.claim_matching_decision(session_id, request_id)
 
         if decision is None:
-            decision = _wait_for_decision(session_id, _timeout_secs(config), request_id)
+            # An ABSOLUTE deadline off `start`, not a duration off now: see
+            # the comment at the top of run().
+            decision = _wait_for_decision(
+                session_id, start + _timeout_secs(config), request_id)
     finally:
         try:
             fleetlib.pending_path(session_id).unlink()
@@ -288,9 +305,17 @@ def run():
     _emit(normalised)
 
 
-def _wait_for_decision(session_id, timeout_secs, request_id):
+def _wait_for_decision(session_id, deadline, request_id):
+    """Polls until `deadline` -- an absolute time.time() value, deliberately.
+
+    Taking a duration here and adding it to now() would restart the clock
+    after staging, which is exactly the bug this signature prevents: the
+    ceiling must bound the whole process against Claude Code's own hook
+    timeout, not just the sleeping part of it. A deadline already in the
+    past still gets one final claim attempt below, so a decision that
+    landed during staging is never lost to the clock.
+    """
     poll = _float_env("FLEET_DECIDE_POLL_SECS", DEFAULT_POLL_SECS)
-    deadline = time.time() + timeout_secs
     while time.time() < deadline:
         claimed = fleetlib.claim_matching_decision(session_id, request_id)
         if claimed is not None:
