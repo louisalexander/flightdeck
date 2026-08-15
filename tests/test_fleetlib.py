@@ -61,6 +61,30 @@ class ShortenTests(unittest.TestCase):
         result = fleetlib.shorten("some-extremely-long-branch-name-here", 11)
         self.assertLessEqual(len(result), 11)
 
+    # --- the worktree- prefix ---------------------------------------------
+    #
+    # Every branch fleet-spawn creates is worktree-<slug>, so the prefix is
+    # shared by every worktree key on the deck and carries no information.
+    # Unstripped it is the FIRST token, which is exactly the one shorten
+    # protects -- so it survives while the distinguishing tokens are trimmed
+    # away, and five keys all read "workt-...".
+
+    def test_strips_the_worktree_prefix_every_spawned_branch_shares(self):
+        self.assertEqual(
+            fleetlib.shorten("worktree-vague-row-1-title"), "vague-title")
+
+    def test_a_short_branch_becomes_the_slug_alone(self):
+        self.assertEqual(fleetlib.shorten("worktree-note"), "note")
+
+    def test_a_branch_that_is_all_prefix_once_shortened_is_rescued(self):
+        # worktree-rows-3-4 shortened to "worktree-4": the label was the
+        # prefix plus one character, and said nothing at all.
+        self.assertEqual(fleetlib.shorten("worktree-rows-3-4"), "rows-3-4")
+
+    def test_the_prefix_is_anchored_and_does_not_match_mid_token(self):
+        # "worktreeish" merely starts with the letters; it is not the prefix.
+        self.assertEqual(fleetlib.shorten("worktreeish-plan"), "worktr-plan")
+
 
 class DeepMergeTests(unittest.TestCase):
     """New direct coverage: config.bats exercises deep_merge only

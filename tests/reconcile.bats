@@ -60,6 +60,28 @@ top() { python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));prin
   [ "$(sf 0 label_bottom)" = "login" ]
 }
 
+# --- the worktree- prefix -----------------------------------------------
+#
+# These read the shipped config/fleet.json (setup copies it), so they assert
+# the prefix list the operator's deck actually uses, not a fixture.
+
+@test "WTPREFIX: the worktree- prefix is stripped before the branch is shortened" {
+  mksession B blocked flightdeck worktree-vague-row-1-title
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_bottom)" = "vague-title" ]
+}
+
+@test "WTPREFIX: sibling worktrees of one repo stay distinguishable" {
+  # The point of the fix. Both keys used to read "workt-..." with the
+  # discriminating tokens trimmed off to make room for a shared prefix.
+  mksession A working flightdeck worktree-green-when-should-be-blue
+  mksession B working flightdeck worktree-rows-3-4
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_bottom)" = "green-blue" ]
+  [ "$(sf 1 label_bottom)" = "rows-3-4" ]
+  [ "$(sf 0 label_bottom)" != "$(sf 1 label_bottom)" ]
+}
+
 @test "task title beats branch for the bottom label" {
   mksession B blocked sisko feat/login break-state
   "$BIN/fleet-reconcile"

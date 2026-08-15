@@ -311,7 +311,16 @@ def load_config():
 
 # --- labels ----------------------------------------------------------------
 
-DEFAULT_PREFIXES = ("feat/", "fix/", "chore/", "feature/")
+# Mirrors labels.stripPrefixes in config/fleet.json; that is what actually
+# runs, this is the fallback when the key is absent. Keep the two in step.
+#
+# "worktree-" is not a convention, it is what fleet-spawn names every branch
+# it creates -- so it is shared by every worktree key on the deck and carries
+# no information. Unstripped it is the FIRST token, the one shorten protects,
+# so it survived while the distinguishing tokens were trimmed to fit around
+# it: five live worktrees rendered workt-title, workt-issue, worktr-blue,
+# worktr-note and worktree-4.
+DEFAULT_PREFIXES = ("feat/", "fix/", "chore/", "feature/", "worktree-")
 
 def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
     """Token-aware shortening.
