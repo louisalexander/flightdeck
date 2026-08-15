@@ -209,6 +209,77 @@ PY
   [ ! -f "$FLEET_HOME/decisions/S1.json" ]
 }
 
+# --- HALT disarms the allow half of Row 3 -----------------------------------
+#
+# The PreToolUse latch cannot cover the request Row 3 is targeting: that call
+# already passed PreToolUse and is now sitting in PermissionRequest, so an
+# allow written from here runs with the brake on. Reproduced before the guard
+# existed -- stage high, halt, press APPROVE twice, and the allow landed.
+
+@test "HALT: approve refuses while the fleet is halted, and arms nothing" {
+  stage S1 normal
+  touch "$FLEET_HOME/halt"
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+  [ ! -f "$FLEET_HOME/armed-verdict.json" ]
+}
+
+@test "HALT: a second approve press cannot deliver an allow either" {
+  stage S1 high
+  touch "$FLEET_HOME/halt"
+  "$BIN/fleet-verdict" approve || true
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "HALT: an arm raised before the latch cannot be confirmed after it" {
+  stage S1 high
+  "$BIN/fleet-verdict" approve || true      # armed while the fleet was running
+  [ -f "$FLEET_HOME/armed-verdict.json" ]
+  touch "$FLEET_HOME/halt"
+  run "$BIN/fleet-verdict" approve
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "HALT: remember refuses while the fleet is halted" {
+  stage S1 low '{"type":"addRules","destination":"localSettings","rules":[{"toolName":"Bash","ruleContent":"ls:*"}],"behavior":"allow"}'
+  touch "$FLEET_HOME/halt"
+  run "$BIN/fleet-verdict" remember
+  [ "$status" -eq 1 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+# Deny, interrupt and steer are the safe direction and must keep working: an
+# operator who has just hit the brake may well want to send one, and they
+# release an agent the latch would otherwise leave hanging.
+
+@test "HALT: deny still delivers while the fleet is halted" {
+  stage S1 normal
+  touch "$FLEET_HOME/halt"
+  run "$BIN/fleet-verdict" deny
+  [ "$status" -eq 0 ]
+  [[ "$(decision S1)" == *'"behavior": "deny"'* ]] || return 1
+}
+
+@test "HALT: interrupt still delivers while the fleet is halted" {
+  stage S1 normal
+  touch "$FLEET_HOME/halt"
+  run "$BIN/fleet-verdict" interrupt
+  [ "$status" -eq 0 ]
+  [[ "$(decision S1)" == *'"interrupt": true'* ]] || return 1
+}
+
+@test "HALT: steer still delivers while the fleet is halted" {
+  stage S1 normal
+  touch "$FLEET_HOME/halt"
+  run "$BIN/fleet-verdict" steer justify
+  [ "$status" -eq 0 ]
+  [[ "$(decision S1)" == *'"behavior": "deny"'* ]] || return 1
+}
+
 # --- REACHABLE: ui/verdict.html mirrors what it must offer -----------------
 #
 # tests/verbs.bats gained its REACHABLE test because FORK shipped valid and

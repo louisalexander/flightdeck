@@ -177,6 +177,60 @@ json.dump({'session_id':'M','state':'working','host':'iterm2',
   [[ "$output" == *'"permissionDecision":"deny"'* ]] || return 1
 }
 
+# C1: the latch is a PreToolUse mechanism, and a PermissionRequest is
+# DOWNSTREAM of PreToolUse -- so the one call the operator is staring at
+# when they panic-latch HALT is exactly the call the brake does not reach.
+# Latching therefore answers it directly.
+@test "latching releases every live pending request with a deny and an interrupt" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 - "$FLEET_HOME/pending/S1.json" "$FLEET_HOME/pending/S2.json" <<'PY'
+import json, sys, time
+for path, sid in zip(sys.argv[1:3], ("S1", "S2")):
+    json.dump({"session_id": sid, "tool": "Bash", "input_digest": "sha256:a",
+               "request_id": "req-" + sid, "input_summary": "x", "tier": "high",
+               "suggestion": None, "repo": "flightdeck", "cwd": "/tmp",
+               "repeats": 1, "requested_at": int(time.time())}, open(path, "w"))
+PY
+  run "$BIN/fleet-halt"
+  [ "$status" -eq 0 ]
+  for sid in S1 S2; do
+    [ -f "$FLEET_HOME/decisions/$sid.json" ]
+    decision="$(python3 -c "import json,sys;print(json.dumps(json.load(open(sys.argv[1]))))" \
+                  "$FLEET_HOME/decisions/$sid.json")"
+    [[ "$decision" == *'"behavior": "deny"'* ]] || return 1
+    [[ "$decision" == *'"interrupt": true'* ]] || return 1
+    # fleet-decide discards any decision whose request_id does not match the
+    # request currently staged, so a release without it would be thrown away
+    # and the agent would stay blocked -- the failure this echo prevents.
+    [[ "$decision" == *"\"request_id\": \"req-$sid\""* ]] || return 1
+  done
+}
+
+@test "a pending record with no request_id is skipped rather than answered unmatched" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json, time
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','suggestion':None,'repo':'r','cwd':'/tmp','repeats':1,
+           'requested_at':int(time.time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  run "$BIN/fleet-halt"
+  [ "$status" -eq 0 ]
+  [ -f "$FLEET_HOME/halt" ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
+@test "--off writes no decisions" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json, time
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','request_id':'req-S1',
+           'input_summary':'x','tier':'high','suggestion':None,'repo':'r','cwd':'/tmp',
+           'repeats':1,'requested_at':int(time.time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  run "$BIN/fleet-halt" --off
+  [ "$status" -eq 0 ]
+  [ ! -f "$FLEET_HOME/decisions/S1.json" ]
+}
+
 @test "the shell gate is silent when not halted" {
   run env FLEET_HOME="$FLEET_HOME" CLAUDE_CODE_SESSION_ID=S1 \
       /bin/sh -c "$(gate_cmd)" <<< '{}'

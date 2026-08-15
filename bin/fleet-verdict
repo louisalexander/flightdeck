@@ -29,6 +29,10 @@ INTERRUPT_MESSAGE = (
 
 ACTIONS = ("detail", "approve", "remember", "deny", "interrupt", "steer")
 
+# The two actions that let a tool call RUN. Refused outright while the halt
+# latch exists -- see _halted_refusal below.
+ALLOW_ACTIONS = ("approve", "remember")
+
 # REMEMBER always arms regardless of tier. Its rule persists to the
 # canonical repo root -- verified: a worktree session writes localSettings
 # there, not into the worktree -- so one press widens permissions for every
@@ -162,11 +166,45 @@ def _decision_for(action, record, verb_id):
     return None
 
 
+def _halted_refusal(action):
+    """True if this press would allow a tool call while the fleet is halted.
+
+    The PreToolUse shell latch only sees calls that have not run PreToolUse
+    yet. The request Row 3 is targeting has ALREADY passed that gate -- it is
+    sitting in PermissionRequest, downstream of it -- so an allow written from
+    here reaches the machine with the brake on. That is precisely the call the
+    operator was staring at when they panicked and latched HALT, and
+    bin/fleet-halt's own docstring promises no NEW tool call runs while the
+    latch exists. Reproduced before this guard existed: stage a high-tier
+    pending record, halt, then two APPROVE presses delivered an allow with
+    slots.json reporting halted: true the whole time.
+
+    Deny, interrupt and steer are deliberately still allowed while halted:
+    they are the safe direction, they release agents the latch would
+    otherwise leave hanging until their hook times out, and an operator who
+    has just hit the brake may very well want to send one.
+    """
+    if action not in ALLOW_ACTIONS:
+        return False
+    if not fleetlib.halt_path().exists():
+        return False
+    fleetlib.log(
+        "verdict: refusing {} -- the fleet is halted, and an allow would let a "
+        "call through the brake".format(action))
+    return True
+
+
 def run(argv):
     action = argv[0] if argv else ""
     verb_id = argv[1] if len(argv) > 1 else ""
     if action not in ACTIONS:
         fleetlib.log("verdict: unknown action {!r}".format(action))
+        return REFUSED
+
+    # Before anything else, including arming: an arm raised now could not be
+    # honoured, and painting CONFIRM? on a key that will refuse is worse than
+    # refusing at the first press.
+    if _halted_refusal(action):
         return REFUSED
 
     target = fleetlib.resolve_target()
