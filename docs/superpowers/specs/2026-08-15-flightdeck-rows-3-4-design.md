@@ -171,6 +171,20 @@ it still reads repo and base branch from its working directory. `fleet-dispatch`
 directory and passes an integer that `gh` produced. Nothing templated from an issue title,
 branch name, or model output ever reaches it.
 
+### 6. Permission mode is displayed, and flightdeck's own gate is what moves
+
+The deck never changes a session's native permission mode. It **shows** it — `permission_mode`
+arrives in every hook payload for free — and where a session needs tightening, flightdeck
+imposes its own per-session floor through `PreToolUse` rather than driving Claude Code's UI.
+
+A fleet-wide POSTURE dial was specced first and is withdrawn. Its stated purpose, the
+away-from-desk mode, does not hold up: a default-mode session already fails safe when you leave,
+by blocking on the prompt and waiting. Tightening only earns a key where a session does *not*
+block, which is a property of one session rather than of the fleet.
+
+Full reasoning, including why shift+tab mode-cycling was rejected on three independent grounds,
+is under *GATE* and *Permission mode on Row 1*.
+
 ## Architecture
 
 ```
@@ -182,8 +196,11 @@ PermissionRequest ──► bin/fleet-decide ──► ~/.fleet/pending/<session
                             ▲
                             │  bin/fleet-verdict <action>
                             │
-PreToolUse ──► shell guard ─┴─► $FLEET_HOME/halt   ──► bin/fleet-halt
-                                $FLEET_HOME/posture
+PreToolUse ──► shell guard ─┴─► $FLEET_HOME/halt        ──► bin/fleet-halt
+                                $FLEET_HOME/gate/<session>
+
+SessionStart ─┐
+Stop, etc.   ─┴─► permission_mode ──► sessions/<id>.json ──► Row 1 marker
 ```
 
 ### `bin/fleet-decide` — the deciding hook
@@ -328,7 +345,7 @@ specific call it is about — no queue, no waiting for a turn to end, no keystro
 |---|---|
 | 1 | HALT — fleet-wide deny latch, plus ESC to `working` sessions |
 | 2 | SPEND — fleet total; press overlays Row 1 for three seconds |
-| 3 | POSTURE — NORMAL / STRICT |
+| 3 | GATE — re-impose asking on the selected session |
 | 4–8 | DISPATCH — `fleet-dispatch <template-id>` |
 
 #### HALT
@@ -366,28 +383,88 @@ against running `claude` processes and publishes `untracked: N`; `fleet-doctor` 
 loud and the HALT key carries a small `+N` when it is non-zero. That is the difference between
 "un-bypassable" being true and being a demo that fails once, in front of someone.
 
-#### POSTURE
+#### GATE
 
-Two positions, held in `$FLEET_HOME/posture` as a single word. `NORMAL` adds nothing — the
-file's absence means normal. `STRICT` denies `high`-tier calls fleet-wide, through the same
-`PreToolUse` gate, before they ever raise a prompt — the "I am away from the desk" mode.
+GATE re-imposes asking on the **selected** session, regardless of the permission mode that
+session was launched in. Two positions, held in `$FLEET_HOME/gate/<session_id>` as a single
+word: absent means `OPEN` and adds nothing; `GUARDED` denies `high`-tier calls for that session
+through the same `PreToolUse` mechanism, before they ever raise a prompt.
 
-Unlike HALT, STRICT cannot be answered from shell: deciding whether *this* call is `high`
+Unlike HALT, GUARDED cannot be answered from shell: deciding whether *this* call is `high`
 requires reading the tool input and scoring it against `config/risk.json`. So the guard stays
-`test -e` cheap on the common path and execs the interpreter only when the posture file exists.
-That is the same shape as the `Resumed` guard, and the reason HALT and POSTURE are separate
+`test -e` cheap on the common path and execs the interpreter only when the gate file exists.
+That is the same shape as the `Resumed` guard, and the reason HALT and GATE are separate
 mechanisms rather than one dial with three positions.
 
-**"Trusted" is not on the dial because it is unreachable.** Hooks tighten and never loosen, and
-Claude Code enforces this in both directions. Offering a position that cannot do what its name
-says would be worse than not offering it.
+**Why per-session rather than fleet-wide.** An earlier draft made this a fleet POSTURE with
+NORMAL and STRICT positions, justified as the away-from-desk mode. That justification does not
+survive scrutiny: **a session in the default permission mode already fails safe when you walk
+away.** It reaches a high-risk call, raises a prompt, blocks, turns amber and waits. Nothing
+happens. A fleet-wide STRICT would convert *waits for you* into *gets denied and improvises*,
+which is strictly worse for the case that motivated it.
+
+The gate earns its key only where a session does **not** block — where it was launched in
+`acceptEdits` or `bypassPermissions` and high-risk calls execute without asking. That is
+inherently a property of one session, not of the fleet, so the control belongs where the
+problem is.
+
+**Why not cycle Claude Code's own permission mode instead.** The keystroke path exists —
+`fleet-send`'s `KEYS` table would need one entry for shift+tab — and it was seriously
+considered. Rejected for three reasons, any one sufficient:
+
+- **Shift+tab is a cycle, not a set.** It steps from the current mode, and flightdeck's
+  knowledge of the current mode is stale between hook firings. Pressing a key whose effect
+  depends on a state you cannot currently read is the failure Row 1's design forbids, made
+  worse because the effect is invisible until something goes wrong.
+- **The cycle order is UI vocabulary.** The TUI says "manual mode on" and "auto mode on", which
+  do not map one-to-one onto `default` / `acceptEdits` / `plan` / `bypassPermissions`. This repo
+  already decided to treat that class of string as unversioned and liable to change without
+  notice, after the iTerm2 title glyphs.
+- **`bypassPermissions` is in the cycle.** A mistimed press would disable the permission system
+  for an agent. A row that exists to make permission decisions visible must not contain a key
+  that can silently remove them.
+
+There is also a design objection independent of mechanism: a one-press "stop asking me" is
+blind approval moved up a level, which is what REMEMBER exists to replace with something narrow,
+scoped and reviewable.
+
+The gate reaches the same goal by the reliable route. It cannot loosen — only tighten — which
+is the direction hooks can actually guarantee.
+
+**Claude Code's own mode is displayed, never driven.** See *Permission mode on Row 1*.
 
 HALT is the far end of this same axis and is kept as its own key only because cycling to an
 emergency stop is wrong.
 
-**Posture does not set a default for dispatched sessions.** An earlier draft gave it that second
+**GATE does not set a default for dispatched sessions.** An earlier draft gave it that second
 meaning. It is dropped: two meanings on one key contradicts "one semantic channel per property",
 and whether a deep link can carry a permission mode is unverified.
+
+#### Permission mode on Row 1
+
+Every hook payload carries `permission_mode` — verified verbatim in the probe's `PreToolUse`
+records, which show both `"default"` and `"bypassPermissions"`. `fleet-emit` records it on the
+session file at no cost, since it is already parsing that payload.
+
+Row 1 today tells you an agent is `working`. It does not tell you whether it is working with
+the guard rails off, and *which of these eight has no brakes* is exactly the question an
+annunciator panel exists to answer.
+
+So a session whose `permission_mode` is `bypassPermissions` — or which flightdeck has gated —
+carries a small corner marker on its Row 1 key. Two properties keep this from taxing the row:
+it is **rare**, so it adds no noise in the ordinary case; and it is **standing rather than
+transient**, so it is a permanent marker rather than a timed overlay like SPEND.
+
+This is read-only. Nothing on the deck changes a session's native permission mode, for the
+reasons recorded under *GATE*. The marker reports a fact; the gate is flightdeck's own floor
+underneath it, and the two are deliberately separate channels because they can disagree — a
+bypassed session with a flightdeck gate is a real and useful state.
+
+**Staleness is bounded and acknowledged.** `permission_mode` is refreshed on every hook firing,
+so it is accurate as of the session's last tool call or turn boundary. A mode changed by hand
+mid-turn is not reflected until the next event. This is acceptable for a marker that reports
+standing risk and would not be acceptable for a control, which is a third reason the control
+was rejected.
 
 #### SPEND
 
@@ -460,6 +537,18 @@ The verb-arm window is `timings.verbArmSecs` (10s), not `armMs` (3s). The Row 2 
 why: 3s was observed to be too tight to read `CONFIRM?` and decide within, and a re-arm is
 visually identical to a first arm, so the operator cannot tell "too slow" from "not registered".
 
+**Row 1 gains exactly one new mark, and it is a corner pip.** The row's channels are otherwise
+fully committed — background is lifecycle state, glyph is its redundancy, the inset border is
+selection, brightness is reserved for seen-versus-unseen, and the two text lines are identity.
+The bypass marker takes none of them: it is a small pip in a corner the existing layout does not
+use, drawn as geometry like every other glyph in the product rather than as text.
+
+It is deliberately *quiet* rather than alarming. A bypassed agent is a standing condition, often
+a chosen one, and a marker that shouted would compete with amber — which is the one thing on the
+panel allowed to shout. The pip says *this one has no brakes* to an operator who looks; it does
+not try to pull the eye across the desk. That is the opposite call from the halt hatching, which
+does cover the row, because a halt is an event and bypass is a state.
+
 ## Non-goals
 
 - Flightdeck does not read the tool input to decide anything except a tier. It classifies; it
@@ -522,10 +611,16 @@ no hardware, no Stream Deck, and no live agent — the property that made Row 2 
 - **The halt guard** — the highest-value test on Row 4. Assert the shell clause emits valid deny
   JSON with no interpreter available on `PATH` at all, which is the property that makes it an
   emergency brake rather than another feature.
+- **The gate** — a `high` call denied for a gated session and allowed for an ungated one, driven
+  from fixture payloads carrying `permission_mode: "bypassPermissions"`, since that is the case
+  the gate exists for and the one where nothing else would have stopped it.
+- **`permission_mode` capture** — that `fleet-emit` records it on the session file from every
+  event that carries it, and that its absence is treated as unknown rather than as `default`.
 - **`fleet-dispatch`** — refusal on no selection, no matching issue, and a full fleet, with `gh`
   and `fleet-spawn` stubbed by the stub-bin pattern `tests/emit.bats` already uses.
 - **Plugin** — verdict key rendering as a pure function, including the armed REMEMBER face
-  showing repository rather than agent.
+  showing repository rather than agent, and the bypass marker appearing for a bypassed session
+  without displacing the lifecycle colour, glyph or selection border.
 
 **What cannot be faked** gets a live check on real sessions, the way the hook chain was
 verified: that a real blocked agent proceeds on an `allow`, and that ESC into a `working`
@@ -543,8 +638,12 @@ The decision channel is the whole mechanism, so it goes first and the deck goes 
 4. **REMEMBER and the steers** — the arming path, the repository-named armed face, the
    `steer: true` flag and the three verb files.
 5. **HALT** — the shell guard, the latch, the `working`-only interrupt, the Row 1 halted paint.
-6. **POSTURE, SPEND, DISPATCH** — in that order, each independently useful and none blocking
-   the others.
+6. **The permission-mode marker** — capture in `fleet-emit`, render on Row 1. Deliberately
+   before GATE: it is read-only, it needs no key, and it is what tells you whether GATE has
+   anything to do. On a fleet that never runs bypassed agents, the marker stays dark and GATE
+   can be deferred indefinitely.
+7. **GATE, SPEND, DISPATCH** — in that order, each independently useful and none blocking the
+   others.
 
 Steps 1 and 2 are worth landing before the deck can press anything, for the same reason Row 2's
 first slice was: a verdict can be issued by hand and observed to arrive, and the keypress is the
