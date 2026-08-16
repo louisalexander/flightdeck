@@ -18,6 +18,7 @@ Or via tests/run.sh, which wires this in alongside bats.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -131,6 +132,70 @@ class CleanTitleTests(unittest.TestCase):
         # the user actually typed is part of the title.
         self.assertEqual(fleetlib.clean_title("◑ fix the parser (again) (node)"),
                          "fix the parser (again)")
+
+
+class ItermSessionTitlesTests(unittest.TestCase):
+    """The osascript seam. Stubbed via FLEET_OSASCRIPT, the same seam
+    tests/spawn.bats:185 and tests/send.bats:92 use.
+    """
+
+    UUID_A = "11111111-2222-3333-4444-555555555555"
+    UUID_B = "66666666-7777-8888-9999-000000000000"
+
+    def _stub(self, body):
+        """Write an executable stub and point FLEET_OSASCRIPT at it."""
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "osa")
+        with open(p, "w") as fh:
+            fh.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(p, 0o755)
+        self.addCleanup(shutil.rmtree, d, True)
+        old = os.environ.get("FLEET_OSASCRIPT")
+        os.environ["FLEET_OSASCRIPT"] = p
+        if old is None:
+            self.addCleanup(os.environ.pop, "FLEET_OSASCRIPT", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "FLEET_OSASCRIPT", old)
+
+    def test_parses_tab_separated_uuid_and_name(self):
+        self._stub("printf '%s\\t%s\\n' '{a}' '◑ alpha (node)'".format(a=self.UUID_A))
+        self.assertEqual(fleetlib.iterm_session_titles(),
+                         {self.UUID_A: "◑ alpha (node)"})
+
+    def test_parses_several_sessions(self):
+        self._stub("printf '%s\\t%s\\n%s\\t%s\\n' '{a}' 'alpha' '{b}' 'beta'"
+                   .format(a=self.UUID_A, b=self.UUID_B))
+        self.assertEqual(fleetlib.iterm_session_titles(),
+                         {self.UUID_A: "alpha", self.UUID_B: "beta"})
+
+    def test_a_name_containing_a_tab_keeps_everything_after_the_first(self):
+        self._stub("printf '%s\\talpha\\tbeta\\n' '{a}'".format(a=self.UUID_A))
+        self.assertEqual(fleetlib.iterm_session_titles(),
+                         {self.UUID_A: "alpha\tbeta"})
+
+    def test_a_nonzero_exit_yields_an_empty_map(self):
+        self._stub("exit 1")
+        self.assertEqual(fleetlib.iterm_session_titles(), {})
+
+    def test_a_missing_osascript_yields_an_empty_map_not_a_raise(self):
+        os.environ["FLEET_OSASCRIPT"] = "/nonexistent/osascript"
+        self.addCleanup(os.environ.pop, "FLEET_OSASCRIPT", None)
+        self.assertEqual(fleetlib.iterm_session_titles(), {})
+
+    def test_a_hanging_osascript_is_timed_out_and_yields_an_empty_map(self):
+        self._stub("sleep 30")
+        start = time.time()
+        self.assertEqual(fleetlib.iterm_session_titles(timeout=1), {})
+        self.assertLess(time.time() - start, 10)
+
+    def test_lines_that_are_not_uuid_tab_name_are_skipped(self):
+        self._stub("printf 'garbage\\nnot-a-uuid\\tname\\n%s\\tgood\\n' '{a}'"
+                   .format(a=self.UUID_A))
+        self.assertEqual(fleetlib.iterm_session_titles(), {self.UUID_A: "good"})
+
+    def test_empty_output_yields_an_empty_map(self):
+        self._stub("true")
+        self.assertEqual(fleetlib.iterm_session_titles(), {})
 
 
 class DeepMergeTests(unittest.TestCase):

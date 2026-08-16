@@ -383,6 +383,72 @@ def clean_title(raw):
     return text.strip()
 
 
+# Bounded hard. This runs inside fleet-reconcile, which fleet-emit invokes
+# from a Claude Code hook with RECONCILE_TIMEOUT_SECS = 10 (fleet-emit:305).
+# iTerm2 answers immediately or is wedged -- most often on a pending
+# Automation-permission dialog macOS shows nobody. Two seconds sits well
+# inside the caller's budget; the operator learns about a denied permission
+# from fleet-doctor, which already checks it, not from a slow deck.
+ITERM_TITLES_TIMEOUT_SECS = 2
+
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\Z"
+)
+
+# A constant with NO format placeholders. Nothing from a session, a title or
+# any other input is interpolated into AppleScript -- the whole fleet is
+# enumerated and matched by UUID in Python instead. fleet-focus interpolates
+# a regex-validated UUID because it must address one session; here there is
+# no need to interpolate at all, so we do not.
+#
+# Walks windows -> tabs -> sessions because top-level `session id "..."`
+# addressing errors with -1728 (see fleet-focus:38).
+ITERM_TITLES_SCRIPT = '''
+tell application "iTerm2"
+  set out to ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        set out to out & (id of s) & tab & (name of s) & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return out
+end tell
+'''
+
+def iterm_session_titles(timeout=ITERM_TITLES_TIMEOUT_SECS):
+    """{session uuid: raw iTerm2 session name}, or {} if anything goes wrong.
+
+    Every failure -- osascript missing, denied, wedged, or answering with
+    something unexpected -- resolves to an empty map, which makes every key
+    fall back to its branch label. That is the behaviour before this
+    function existed, so degrading is invisible rather than broken.
+    """
+    osa = os.environ.get("FLEET_OSASCRIPT") or "osascript"
+    try:
+        proc = subprocess.run([osa, "-e", ITERM_TITLES_SCRIPT],
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL,
+                              timeout=timeout)
+    except Exception as err:
+        log("reconcile: iterm title lookup failed: {}".format(err))
+        return {}
+    if proc.returncode != 0:
+        return {}
+
+    titles = {}
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        uuid, sep, name = line.partition("\t")
+        if not sep:
+            continue
+        uuid = uuid.strip()
+        if not UUID_RE.match(uuid):
+            continue
+        titles[uuid] = name
+    return titles
+
+
 SLUG_MAX_CHARS = 32
 
 def slugify(text, max_chars=SLUG_MAX_CHARS):
