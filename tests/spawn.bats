@@ -63,8 +63,8 @@ spawn() { (cd "$REPO" && "$BIN/fleet-spawn" "$@"); }
   [ "$status" -eq 0 ]
   # It exists so an agent can learn the calling convention without being
   # told it in the verb prompt. Idempotency is the part it must convey.
-  [[ "$output" == *"issue number"* ]]
-  [[ "$output" == *"safe to re-run"* ]]
+  [[ "$output" == *"issue number"* ]] || return 1
+  [[ "$output" == *"safe to re-run"* ]] || return 1
 }
 
 @test "no argument refuses" {
@@ -196,15 +196,15 @@ SH
   stub_osascript
   spawn 7
   run cat "$OSA_LOG"
-  [[ "$output" == *"$REPO/.claude/worktrees/issue-7"* ]]
-  [[ "$output" == *"claude"* ]]
+  [[ "$output" == *"$REPO/.claude/worktrees/issue-7"* ]] || return 1
+  [[ "$output" == *"claude"* ]] || return 1
 }
 
 @test "TAB: the launch command names the issue number" {
   stub_osascript
   spawn 7
   run cat "$OSA_LOG"
-  [[ "$output" == *"gh issue view 7"* ]]
+  [[ "$output" == *"gh issue view 7"* ]] || return 1
 }
 
 @test "TAB: NO text from the issue title reaches the launch command" {
@@ -214,8 +214,8 @@ SH
   stub_gh 'pwned $(touch /tmp/fleet-pwned) `id` "quoted"'
   spawn 7
   run cat "$OSA_LOG"
-  [[ "$output" != *"pwned"* ]]
-  [[ "$output" != *"touch"* ]]
+  [[ "$output" != *"pwned"* ]] || return 1
+  [[ "$output" != *"touch"* ]] || return 1
   [ ! -e /tmp/fleet-pwned ]
 }
 
@@ -223,7 +223,7 @@ SH
   stub_osascript
   spawn 7
   run bash -c "cat '$FLEET_HOME'/spawns/*.json"
-  [[ "$output" == *"11111111-2222-3333-4444-555555555555"* ]]
+  [[ "$output" == *"11111111-2222-3333-4444-555555555555"* ]] || return 1
 }
 
 @test "TAB: a second call focuses the recorded session instead of spawning" {

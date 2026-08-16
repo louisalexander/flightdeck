@@ -25,5 +25,10 @@ export default [
     input: "src/command.ts",
     output: { file: `${OUT}/command.js`, format: "es" },
     plugins: [typescript()]
+  },
+  {
+    input: "src/verdict.ts",
+    output: { file: `${OUT}/verdict.js`, format: "es" },
+    plugins: [typescript()]
   }
 ];

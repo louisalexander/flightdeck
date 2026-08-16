@@ -120,6 +120,54 @@ def clear_verb_arm():
         pass
 
 
+def verdict_armed_path():
+    """Where a pending Row 3 verdict arm (APPROVE on high tier, REMEMBER) lives.
+
+    Deliberately its own third file, not a reuse of verb_armed_path() with a
+    discriminator field added to tell the two apart. armed.json means "slot
+    armed for destructive teardown" and fires fleet-kill; armed-verb.json
+    means "Row 2 confirm-verb armed" and fires fleet-send's queued verb --
+    each already gets its own file for exactly this reason (see
+    verb_armed_path's docstring). Round-1 review of this task reproduced the
+    interference directly: a live Row 2 ISSUE arm and a live Row 3 APPROVE
+    arm shared armed-verb.json, so pressing one silently claimed and
+    discarded the other's arm file, even though neither's liveness check
+    could ever be satisfied by the other's shape. Nothing fired wrongly --
+    but the symptom is exactly what fleet-send's own arm design exists to
+    prevent: a re-arm looks identical to a first arm, so the operator can't
+    tell "too slow" from "not registered". A distinct file removes the
+    interference outright rather than detecting it after the fact.
+    """
+    return fleet_home() / "armed-verdict.json"
+
+
+def claim_verdict_arm():
+    """Takes sole ownership of a pending verdict arm, or returns None.
+
+    Same os.replace ownership trick as claim_verb_arm, for the same reason:
+    two near-simultaneous confirming presses on Row 3 must not both fire.
+    """
+    claim = verdict_armed_path().parent / "armed-verdict.claim.{}.json".format(os.getpid())
+    try:
+        os.replace(str(verdict_armed_path()), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
+
+def clear_verdict_arm():
+    try:
+        verdict_armed_path().unlink()
+    except Exception:
+        pass
+
+
 def claim_queue(session_id):
     """Takes sole ownership of a queued verb, or returns None.
 
@@ -156,6 +204,255 @@ def claim_queue(session_id):
             claim.unlink()
         except Exception:
             pass
+
+def pending_dir():
+    return fleet_home() / "pending"
+
+
+def pending_path(session_id):
+    return pending_dir() / "{}.json".format(session_id)
+
+
+def decisions_dir():
+    return fleet_home() / "decisions"
+
+
+def decision_path(session_id):
+    return decisions_dir() / "{}.json".format(session_id)
+
+
+def halt_path():
+    """The fleet-wide deny latch.
+
+    Read by a pure-shell clause in the PreToolUse hook, so its existence is
+    the entire protocol -- content is never parsed and must never become
+    load-bearing. The shell path is what lets the emergency brake work when
+    flightdeck's own interpreter does not.
+    """
+    return fleet_home() / "halt"
+
+
+def input_digest(tool_name, tool_input):
+    """A stable identity for one tool call, for detecting a retry loop.
+
+    sort_keys because a model may emit the same object with different key
+    order between attempts, and two spellings of one call must collide.
+    """
+    try:
+        blob = json.dumps(tool_input, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        blob = repr(tool_input)
+    payload = "{}\x00{}".format(tool_name, blob).encode("utf-8", "replace")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()[:16]
+
+
+def claim_decision(session_id):
+    """Takes sole ownership of a written verdict, or returns None.
+
+    Same os.replace ownership rename as claim_queue. Two claimants are
+    possible in principle -- a deciding hook polling, and a later one for a
+    retried call -- and a decision must be consumed exactly once so an
+    operator's single press cannot answer two requests.
+
+    Same orphaning gap as claim_queue, too: if this process dies between
+    the successful os.replace() and the `finally: claim.unlink()` below,
+    the renamed <session>.claim.<pid>.json is stranded on disk and nothing
+    ever revisits it, so the verdict is silently and permanently lost, not
+    merely delayed -- and claim_queue's "a stray file is inert" reasoning
+    does not transfer here any more than it did there. The one thing that
+    genuinely differs from claim_queue is what happens next: a lost queued
+    verb has no fallback at all, while a lost verdict just leaves the
+    agent blocked until the hook times out and falls through to the
+    terminal dialog -- the same manual path this whole feature exists to
+    make unnecessary in the common case, not a new failure mode.
+    """
+    claim = decisions_dir() / "{}.claim.{}.json".format(session_id, os.getpid())
+    try:
+        os.replace(str(decision_path(session_id)), str(claim))
+    except OSError:
+        return None
+    try:
+        return read_json(claim)
+    finally:
+        try:
+            claim.unlink()
+        except Exception:
+            pass
+
+
+def claim_matching_decision(session_id, request_id):
+    """claim_decision, filtered to one that actually answers THIS request.
+
+    A session can outlive more than one PermissionRequest, and a decision
+    file is only a legitimate answer to the request that minted the
+    request_id it carries. Whatever is claimed here -- matching,
+    mismatched, or malformed -- is removed from disk either way (that part
+    is claim_decision's job, not this function's); only a decision whose
+    own request_id equals `request_id` is ever handed back. Round-2 review
+    (C1/N2, row-3-verdict-and-halt): without this check, a decision left
+    over from an earlier, already-answered request for the same session --
+    a crashed decide, a double press, or (round 2's specific repro) an
+    earlier tool call in the same prompt turn -- could auto-answer a
+    later, unrelated request with no human ever having pressed anything.
+
+    Extracted out of bin/fleet-decide (round-3 review, N1) so the two call
+    sites that need this -- the pre-wait purge of a leftover decision, and
+    the wait loop's own polling -- are structurally the same code and
+    cannot diverge, and so it can be unit-tested directly (see
+    tests/test_fleetlib.py) rather than only through end-to-end timing
+    that a fast test environment can accidentally never exercise.
+    """
+    claimed = claim_decision(session_id)
+    if claimed is None:
+        return None
+    if isinstance(claimed, dict) and claimed.get("request_id") == request_id:
+        return claimed
+    log("fleetlib: discarding a decision for {} with a missing or mismatched request_id".format(
+        session_id))
+    return None
+
+
+PENDING_TTL_DEFAULT_SECS = 300
+
+# Kept in sync BY HAND with bin/fleet-decide's own DEFAULT_TIMEOUT_SECS.
+# fleet-decide is a standalone script, not an importable module, so the two
+# constants cannot share one definition -- this is the closest available.
+DECIDE_TIMEOUT_DEFAULT_SECS = 120
+
+# Kept in sync BY HAND with hooks/settings.snippet.json's PermissionRequest
+# "timeout" -- same constraint, same reason, as DECIDE_TIMEOUT_DEFAULT_SECS
+# above: JSON cannot import a Python constant from here. Unlike that pair,
+# bin/fleet-decide does NOT keep a second hand-synced copy of this one --
+# it already imports fleetlib (for other helpers) and references
+# DECIDE_TIMEOUT_CEILING_SECS below directly, so there is nothing to drift.
+# Do not "fix" that by adding a HOOK_TIMEOUT_SECS to fleet-decide; there is
+# deliberately only one definition of this half of the pair.
+HOOK_TIMEOUT_SECS = 130
+
+# The hard ceiling on a CONFIGURED decideTimeoutSecs, kept below
+# HOOK_TIMEOUT_SECS by this margin. Without a ceiling, timings.
+# decideTimeoutSecs = 300 in a user's config would make a live fleet-decide
+# wait 300s while Claude Code kills the hook at HOOK_TIMEOUT_SECS (130s) --
+# and a hook killed by SIGKILL skips the `finally` that clears its pending
+# record, reintroducing the exact leak this file has already been
+# hardened against twice.
+DECIDE_TIMEOUT_CEILING_MARGIN_SECS = 10
+DECIDE_TIMEOUT_CEILING_SECS = HOOK_TIMEOUT_SECS - DECIDE_TIMEOUT_CEILING_MARGIN_SECS
+
+# How much longer the TTL floor must outlive the decide timeout (see
+# _pending_ttl_secs below).
+PENDING_TTL_MARGIN_SECS = 60
+
+
+def _decide_timeout_secs(config):
+    """How long a live fleet-decide will wait, per timings.decideTimeoutSecs.
+
+    Only reads the config's decideTimeoutSecs -- deliberately not
+    FLEET_DECIDE_TIMEOUT_SECS, which is a per-invocation test override on
+    fleet-decide's own process, not a fleet-wide setting this shared
+    library has any business reading.
+
+    Clamped to DECIDE_TIMEOUT_CEILING_SECS -- see that constant's comment.
+    A configured value above the ceiling is silently capped, not honoured
+    and not rejected: fleet-decide must never actually wait longer than
+    the deployed hook timeout allows, no matter what a config file says.
+    """
+    timings = config.get("timings") if isinstance(config, dict) else None
+    if isinstance(timings, dict):
+        value = timings.get("decideTimeoutSecs")
+        if isinstance(value, (int, float)) and value > 0:
+            return min(float(value), float(DECIDE_TIMEOUT_CEILING_SECS))
+    return float(DECIDE_TIMEOUT_DEFAULT_SECS)
+
+
+def _pending_ttl_secs():
+    """How old a pending record may be before it is treated as dead.
+
+    Configurable via timings.pendingTtlSecs; 300s in code if unset. This is
+    the backstop for a fleet-decide killed by SIGKILL, which no signal
+    handler and no try/finally can intercept -- a record surviving past
+    this floor is proven dead, not merely slow.
+
+    Floored at the configured decide timeout plus a margin
+    (PENDING_TTL_MARGIN_SECS, 60s): round-2 review flagged that
+    timings.decideTimeoutSecs and timings.pendingTtlSecs were two
+    independent knobs with no relationship enforced between them, so
+    configuring the former above the latter would make a live
+    fleet-decide's own pending record fall off resolve_target() while
+    fleet-decide is still legitimately waiting on it. The TTL exists to
+    prove a record is dead; a record a live hook still owns is
+    definitionally not, so the floor makes that misconfiguration
+    unreachable rather than merely undocumented.
+    """
+    config = load_config()
+    timings = config.get("timings") if isinstance(config, dict) else None
+    configured = PENDING_TTL_DEFAULT_SECS
+    if isinstance(timings, dict):
+        value = timings.get("pendingTtlSecs")
+        if isinstance(value, (int, float)) and value > 0:
+            configured = value
+    floor = _decide_timeout_secs(config) + PENDING_TTL_MARGIN_SECS
+    return float(max(configured, floor))
+
+
+def read_pending_all():
+    """Every readable, non-stale pending record, oldest requested_at first.
+
+    A record older than the TTL floor (see _pending_ttl_secs) is skipped
+    entirely. Without this, a leaked record left behind by a killed
+    fleet-decide would be the oldest pending record forever --
+    resolve_target() below always picks the oldest, so one leak would
+    permanently hijack every future Row 3 press onto a session nobody is
+    actually waiting to decide.
+    """
+    out = []
+    try:
+        # DO NOT drop this sorted(). It looks redundant next to the
+        # requested_at sort at the bottom of this function, and it is not:
+        # requested_at is whole seconds, so ties between two records staged
+        # in the same second are common, and Python's sort is stable. The
+        # filename order established here is therefore what breaks those
+        # ties -- and resolve_target() picks out[0], so without it Row 3's
+        # target would depend on directory iteration order and could differ
+        # between two presses with nothing having changed. A key that shifts
+        # under your thumb is the failure this project's Row 1 design
+        # forbids outright.
+        entries = sorted(pending_dir().iterdir())
+    except Exception:
+        return out
+    ttl = _pending_ttl_secs()
+    now = time.time()
+    for entry in entries:
+        if entry.suffix != ".json" or ".claim." in entry.name:
+            continue
+        data = read_json(entry)
+        if isinstance(data, dict) and isinstance(data.get("session_id"), str):
+            if not isinstance(data.get("requested_at"), int):
+                data["requested_at"] = 0
+            if now - data["requested_at"] > ttl:
+                continue
+            out.append(data)
+    out.sort(key=lambda d: d["requested_at"])
+    return out
+
+
+def resolve_target():
+    """Which session a Row 3 press acts on.
+
+    The selection if it has a pending decision, otherwise the oldest pending
+    decision. Predictability beats recency on a device read peripherally,
+    and a selection pointing at a blocked agent is not a wrong answer -- that
+    agent does genuinely need deciding.
+    """
+    pending = read_pending_all()
+    if not pending:
+        return ""
+    selected = read_focus()
+    for record in pending:
+        if record["session_id"] == selected:
+            return selected
+    return pending[0]["session_id"]
+
 
 def events_path():
     return fleet_home() / "events.jsonl"
@@ -386,7 +683,137 @@ def slugify(text, max_chars=SLUG_MAX_CHARS):
         cut = cut.rsplit("-", 1)[0]
     return cut.strip("-")
 
+# --- risk ------------------------------------------------------------------
+
+RISK_TIERS = ("high", "normal", "low")
+
+
+def load_risk_rules():
+    """Rules from config/risk.json, layered with risk.local.json if present.
+
+    Returns {} on any failure. An empty table scores everything `normal`,
+    which is the safe degradation: a tier can only ever ADD friction on top
+    of a prompt the operator is already being shown, so knowing nothing
+    means behaving exactly as the deck did before tiers existed.
+    """
+    base = read_json(config_dir() / "risk.json", {}) or {}
+    local = read_json(config_dir() / "risk.local.json", {}) or {}
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(local, dict):
+        local = {}
+    out = dict(base)
+    for tier, extra in local.items():
+        if isinstance(extra, list):
+            out[tier] = list(out.get(tier) or []) + extra
+    return out
+
+
+def _input_strings(tool_input):
+    """Every string value in a tool input, one level deep plus list members.
+
+    Deliberately not a recursive walk of arbitrary depth: tool inputs are
+    shallow, and an unbounded walk over model-authored JSON is a place to
+    get stuck rather than a place to find more signal.
+    """
+    out = []
+    if not isinstance(tool_input, dict):
+        return out
+    for value in tool_input.values():
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, list):
+            out.extend(v for v in value if isinstance(v, str))
+    return out
+
+
+def _rule_matches(rule, tool_name, haystacks):
+    if not isinstance(rule, dict):
+        return False
+    want_tool = rule.get("tool")
+    if isinstance(want_tool, str) and want_tool != tool_name:
+        return False
+    pattern = rule.get("match")
+    if not isinstance(pattern, str) or not pattern:
+        # A tool-only rule matches on the tool alone.
+        return isinstance(want_tool, str)
+    try:
+        compiled = re.compile(pattern)
+    except re.error:
+        # A bad pattern is a config typo, not a reason to fail a hook.
+        return False
+    return any(compiled.search(text) for text in haystacks)
+
+
+def score_risk(tool_name, tool_input, rules):
+    """The tier for one tool call: 'high', 'normal' or 'low'.
+
+    Checked most-severe first so `high` always wins a tie -- a call that
+    matches both tables is the dangerous one.
+    """
+    if not isinstance(rules, dict):
+        return "normal"
+    haystacks = _input_strings(tool_input)
+    for tier in ("high", "low"):
+        table = rules.get(tier)
+        if not isinstance(table, list):
+            continue
+        for rule in table:
+            if _rule_matches(rule, tool_name, haystacks):
+                return tier
+    return "normal"
+
 # --- process ---------------------------------------------------------------
+
+def canonical_repo_name(cwd, timeout=2):
+    """The name of the CANONICAL repository a working directory belongs to.
+
+    Derived from `git rev-parse --git-common-dir`, deliberately NOT
+    `--show-toplevel`. For a session running in a linked worktree,
+    --show-toplevel names the WORKTREE ("rows-3-4"), while Claude Code
+    writes a remembered permission rule to the canonical repo root's
+    .claude/settings.local.json -- verified with a probe whose cwd was
+    inside a worktree, which created no .claude/ there at all. REMEMBER's
+    armed face names the repository precisely BECAUSE the rule it writes
+    widens every worktree of that repository, including ones that do not
+    exist yet, so naming the worktree would name the one scope the press is
+    not limited to and make the mitigation actively misleading.
+
+    --git-common-dir is the shared git directory -- <canonical>/.git for a
+    linked worktree exactly as for the main checkout. git prints it
+    relative to `cwd` when it can (".git", "../.git"), so it is resolved
+    against cwd rather than trusted to be absolute.
+
+    Returns "" when git cannot answer. Callers must treat that as unknown
+    rather than falling back to a path component: a wrong repository name
+    on that key is worse than none.
+
+    timeout defaults to 2s, not git()'s 15, because both callers sit on a
+    latency path: bin/fleet-decide runs this before staging its pending
+    record, in front of the amber-immediately guarantee that is that hook's
+    whole advantage over the ~6s Notification debounce, and bin/fleet-emit
+    runs it on every hook firing of every session. A wedged git must not sit
+    on either.
+    """
+    if not cwd:
+        return ""
+    code, out = git(["rev-parse", "--git-common-dir"], cwd, timeout=timeout)
+    if code != 0 or not out:
+        return ""
+    try:
+        common = Path(out)
+        if not common.is_absolute():
+            common = Path(cwd) / common
+        common = common.resolve()
+    except Exception:
+        return ""
+    # <repo>/.git -> "repo"; a bare or otherwise oddly-named git dir keeps
+    # its own name rather than reporting the directory above it, which for
+    # /srv/git/foo.git would be "git".
+    if common.name == ".git":
+        return common.parent.name
+    return common.name
+
 
 def git(args, cwd, timeout=15):
     """Runs git with an argument LIST -- never a shell string.

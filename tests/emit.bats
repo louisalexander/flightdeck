@@ -487,3 +487,25 @@ print([r.get('notification_type') for r in rows if r['event']=='Notification'][0
   run python3 -c "import json;print(json.load(open('$FLEET_HOME/sessions/B1.json'))['branch'])"
   [ "$output" = "feature/thing" ]
 }
+
+# --- permission_mode -------------------------------------------------------
+#
+# Row 1 says an agent is working, not whether it is working with the guard
+# rails off. "Which of these eight has no brakes" is what Row 1's mode
+# annunciation exists to answer, so every session write must carry it.
+
+@test "permission_mode is recorded from the payload" {
+  emit UserPromptSubmit '{"session_id":"S1","cwd":"/tmp","permission_mode":"bypassPermissions"}'
+  [ "$(field permission_mode)" = "bypassPermissions" ]
+}
+
+@test "an absent permission_mode is recorded as unknown, not as default" {
+  emit UserPromptSubmit '{"session_id":"S1","cwd":"/tmp"}'
+  [ "$(field permission_mode)" = "" ]
+}
+
+@test "permission_mode survives a later event that does not carry it" {
+  emit UserPromptSubmit '{"session_id":"S1","cwd":"/tmp","permission_mode":"bypassPermissions"}'
+  emit Stop '{"session_id":"S1","cwd":"/tmp"}'
+  [ "$(field permission_mode)" = "bypassPermissions" ]
+}

@@ -18,6 +18,7 @@ Or via tests/run.sh, which wires this in alongside bats.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -317,6 +318,71 @@ class GitTests(unittest.TestCase):
             self.assertLess(elapsed, 10)
 
 
+class CanonicalRepoNameTests(unittest.TestCase):
+    """The repository REMEMBER's armed face names.
+
+    A remembered permission rule lands in the CANONICAL repo root's
+    .claude/settings.local.json -- never in the worktree the agent is
+    running in -- so it widens permissions for every agent in every
+    worktree of that repository. Naming the worktree on the confirmation
+    would name the one scope the press is not limited to, which makes the
+    mitigation actively misleading rather than merely incomplete. Real git
+    repositories here, including a real linked worktree, because the whole
+    point is what git actually reports.
+    """
+
+    def _repo(self, parent, name):
+        repo = os.path.join(parent, name)
+        os.makedirs(repo)
+        subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
+        Path(repo, "f.txt").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", repo, "add", "f.txt"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "init"], check=True)
+        return repo
+
+    def test_names_the_repository_at_its_top_level(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, "flightdeck")
+            self.assertEqual(fleetlib.canonical_repo_name(repo), "flightdeck")
+
+    def test_names_the_repository_from_a_subdirectory(self):
+        # git prints --git-common-dir RELATIVE to cwd ("../.git" here), so
+        # this covers the resolution step, not just the happy absolute path.
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, "flightdeck")
+            sub = os.path.join(repo, "bin")
+            os.makedirs(sub)
+            self.assertEqual(fleetlib.canonical_repo_name(sub), "flightdeck")
+
+    def test_names_the_CANONICAL_repository_from_inside_a_worktree(self):
+        # The one that matters. --show-toplevel would answer "rows-3-4"
+        # here, which is the wrong name for a trap whose entire point is
+        # that the rule lands in the canonical repo root and widens every
+        # worktree of it, including this one's siblings.
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, "flightdeck")
+            worktree = os.path.join(repo, ".claude", "worktrees", "rows-3-4")
+            subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "-b", "wt", worktree],
+                           check=True)
+            self.assertEqual(fleetlib.canonical_repo_name(worktree), "flightdeck")
+            # And from a subdirectory of the worktree, which is where an
+            # agent's cwd usually is.
+            sub = os.path.join(worktree, "bin")
+            os.makedirs(sub)
+            self.assertEqual(fleetlib.canonical_repo_name(sub), "flightdeck")
+
+    def test_a_non_git_directory_is_unknown_rather_than_guessed_from_the_path(self):
+        # A wrong repository name on that key is worse than none: the whole
+        # value of the line is that it is the true blast radius.
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(fleetlib.canonical_repo_name(d), "")
+
+    def test_an_empty_cwd_is_unknown(self):
+        self.assertEqual(fleetlib.canonical_repo_name(""), "")
+
+
 class ClaimQueueTests(unittest.TestCase):
     """Direct coverage for fleetlib.claim_queue's ownership guarantee.
 
@@ -357,6 +423,49 @@ class ClaimQueueTests(unittest.TestCase):
                         "round {}: expected exactly one winner, got {}".format(
                             round_num, len(winners)))
                     self.assertFalse(fleetlib.queue_path(session_id).exists())
+            finally:
+                if old_home is None:
+                    os.environ.pop("FLEET_HOME", None)
+                else:
+                    os.environ["FLEET_HOME"] = old_home
+
+
+class ClaimDecisionTests(unittest.TestCase):
+    """Direct coverage for fleetlib.claim_decision's ownership guarantee.
+
+    PendingTests.test_claim_decision_yields_exactly_one_winner calls
+    claim_decision() twice sequentially in one process -- that proves the
+    already-claimed case (a second call finds the source gone), not an
+    actual race between simultaneous claimants, and would pass just as
+    happily against a naive read-then-delete implementation. The stakes
+    here are higher than for claim_queue: a double-claim on a decision
+    would let one operator keypress answer two permission requests. Same
+    ThreadPoolExecutor technique as ClaimQueueTests, for the same reason.
+    """
+
+    def test_concurrent_claimants_exactly_one_wins_across_many_rounds(self):
+        workers, rounds = 8, 25
+        with tempfile.TemporaryDirectory() as d:
+            old_home = os.environ.get("FLEET_HOME")
+            os.environ["FLEET_HOME"] = d
+            try:
+                for round_num in range(rounds):
+                    session_id = "S{}".format(round_num)
+                    fleetlib.write_json_atomic(
+                        fleetlib.decision_path(session_id),
+                        {"behavior": "allow"})
+
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        results = list(pool.map(
+                            lambda _: fleetlib.claim_decision(session_id),
+                            range(workers)))
+
+                    winners = [r for r in results if r is not None]
+                    self.assertEqual(
+                        len(winners), 1,
+                        "round {}: expected exactly one winner, got {}".format(
+                            round_num, len(winners)))
+                    self.assertFalse(fleetlib.decision_path(session_id).exists())
             finally:
                 if old_home is None:
                     os.environ.pop("FLEET_HOME", None)
@@ -444,6 +553,213 @@ class SpawnRecordTests(unittest.TestCase):
     def test_record_filename_is_filesystem_safe(self):
         path = fleetlib.spawn_record_path("/a b/c'd/.claude/worktrees/issue-7")
         self.assertRegex(path.name, r"\A[a-f0-9]+\.json\Z")
+
+
+RULES = {
+    "high": [
+        {"tool": "Bash", "match": r"rm\s+-[a-z]*[rf]"},
+        {"tool": "Bash", "match": r"push\s+.*--force"},
+        {"tool": "Bash", "match": r"curl.*\|\s*(ba)?sh"},
+    ],
+    "low": [{"tool": "Read"}, {"tool": "Grep"}, {"tool": "Glob"}],
+}
+
+
+class ScoreRiskTests(unittest.TestCase):
+    def test_unmatched_tool_is_normal(self):
+        self.assertEqual(fleetlib.score_risk("Write", {"file_path": "a"}, RULES), "normal")
+
+    def test_tool_only_rule_matches(self):
+        self.assertEqual(fleetlib.score_risk("Read", {"file_path": "a"}, RULES), "low")
+
+    def test_pattern_rule_matches_command(self):
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "rm -rf ./build"}, RULES), "high")
+
+    def test_pattern_rule_requires_the_named_tool(self):
+        # The same text under a different tool must not score high.
+        self.assertEqual(fleetlib.score_risk("Write", {"content": "rm -rf ./build"}, RULES), "normal")
+
+    def test_high_wins_over_low(self):
+        rules = {"high": [{"tool": "Read"}], "low": [{"tool": "Read"}]}
+        self.assertEqual(fleetlib.score_risk("Read", {}, rules), "high")
+
+    def test_scans_every_string_value_in_the_input(self):
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "git push --force"}, RULES), "high")
+
+    def test_malformed_rules_degrade_to_normal(self):
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "rm -rf /"}, {"high": "nope"}), "normal")
+
+    def test_bad_regex_is_skipped_not_raised(self):
+        rules = {"high": [{"tool": "Bash", "match": "([unclosed"}]}
+        self.assertEqual(fleetlib.score_risk("Bash", {"command": "x"}, rules), "normal")
+
+
+class PendingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["FLEET_HOME"] = self.tmp
+
+    def tearDown(self):
+        os.environ.pop("FLEET_HOME", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _pending(self, sid, age_secs, tier="normal"):
+        """`age_secs` is seconds-ago from now, not a raw epoch value.
+
+        read_pending_all() now applies a staleness TTL floor (see C2 in the
+        row-3-verdict-and-halt review), so a fixture timestamped near the
+        unix epoch -- as the old raw-integer `at` values (100, 200) were --
+        would be filtered out as impossibly stale before a test ever got to
+        assert on it. Seconds-ago keeps every fixture realistic while still
+        letting tests express clean relative ordering.
+        """
+        fleetlib.write_json_atomic(fleetlib.pending_path(sid), {
+            "session_id": sid, "tool": "Bash", "input_digest": "sha256:abc",
+            "input_summary": "x", "tier": tier, "suggestion": None,
+            "repo": "r", "repeats": 1, "requested_at": int(time.time()) - age_secs,
+        })
+
+    def test_digest_is_stable_and_order_independent(self):
+        a = fleetlib.input_digest("Bash", {"command": "ls", "timeout": 1})
+        b = fleetlib.input_digest("Bash", {"timeout": 1, "command": "ls"})
+        self.assertEqual(a, b)
+        self.assertTrue(a.startswith("sha256:"))
+
+    def test_digest_changes_with_the_tool(self):
+        self.assertNotEqual(fleetlib.input_digest("Bash", {"c": 1}),
+                            fleetlib.input_digest("Write", {"c": 1}))
+
+    def test_read_pending_all_is_oldest_first(self):
+        self._pending("B", 10)
+        self._pending("A", 20)
+        self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["A", "B"])
+
+    def test_read_pending_all_skips_unreadable_files(self):
+        fleetlib.pending_dir().mkdir(parents=True, exist_ok=True)
+        (fleetlib.pending_dir() / "junk.json").write_text("{not json")
+        self._pending("A", 10)
+        self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["A"])
+
+    def test_read_pending_all_skips_a_record_past_the_ttl_floor(self):
+        # The backstop for SIGKILL: a leaked record older than the TTL is
+        # proven dead, not merely slow, and must not be resolve_target()'s
+        # "oldest" forever.
+        self._pending("OLD", fleetlib.PENDING_TTL_DEFAULT_SECS + 5)
+        self._pending("FRESH", 5)
+        self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["FRESH"])
+
+    def test_read_pending_all_honours_a_configured_ttl(self):
+        cfg_dir = tempfile.mkdtemp()
+        try:
+            os.environ["FLEET_CONFIG_DIR"] = cfg_dir
+            with open(os.path.join(cfg_dir, "fleet.json"), "w", encoding="utf-8") as handle:
+                # decideTimeoutSecs kept low so the decide-timeout coupling
+                # floor exercised below (60s margin) does not itself swallow
+                # this test's smaller pendingTtlSecs.
+                json.dump({"timings": {"decideTimeoutSecs": 1, "pendingTtlSecs": 100}}, handle)
+            self._pending("OLD", 150)
+            self._pending("FRESH", 10)
+            self.assertEqual([p["session_id"] for p in fleetlib.read_pending_all()], ["FRESH"])
+        finally:
+            os.environ.pop("FLEET_CONFIG_DIR", None)
+            shutil.rmtree(cfg_dir, ignore_errors=True)
+
+    def test_pending_ttl_floors_at_the_decide_timeout_plus_margin(self):
+        # Round-2 review: timings.decideTimeoutSecs and timings.pendingTtlSecs
+        # were two independent knobs with no relationship enforced -- setting
+        # the former above the latter would make a live fleet-decide's own
+        # pending record fall off resolve_target() while it is still
+        # legitimately waiting on it.
+        #
+        # decideTimeoutSecs (110) is chosen just under
+        # DECIDE_TIMEOUT_CEILING_SECS (120, see the B2 clamp test below) so
+        # this test stays unclamped and keeps isolating the ttl/decide
+        # COUPLING it was written for, independent of the ceiling itself.
+        cfg_dir = tempfile.mkdtemp()
+        try:
+            os.environ["FLEET_CONFIG_DIR"] = cfg_dir
+            with open(os.path.join(cfg_dir, "fleet.json"), "w", encoding="utf-8") as handle:
+                # pendingTtlSecs (50) configured BELOW decideTimeoutSecs (110).
+                json.dump({"timings": {"decideTimeoutSecs": 110, "pendingTtlSecs": 50}}, handle)
+            # 90s old: past the configured pendingTtlSecs (50) but still
+            # within decideTimeoutSecs + the 60s margin (170) -- a live
+            # fleet-decide waiting that long must not have its own record
+            # vanish out from under it mid-wait.
+            self._pending("STILL_WAITING", 90)
+            self.assertEqual(
+                [p["session_id"] for p in fleetlib.read_pending_all()], ["STILL_WAITING"])
+        finally:
+            os.environ.pop("FLEET_CONFIG_DIR", None)
+            shutil.rmtree(cfg_dir, ignore_errors=True)
+
+    def test_decide_timeout_secs_honours_a_configured_value_under_the_ceiling(self):
+        self.assertEqual(fleetlib._decide_timeout_secs({"timings": {"decideTimeoutSecs": 30}}),
+                          30.0)
+
+    def test_decide_timeout_secs_clamps_a_configured_value_above_the_ceiling(self):
+        # B2: without this clamp, timings.decideTimeoutSecs = 9999 would make
+        # a live fleet-decide wait 9999s while Claude Code kills the hook at
+        # fleetlib.HOOK_TIMEOUT_SECS (130s) -- and a hook killed by SIGKILL
+        # skips the `finally` that clears its pending record, the exact leak
+        # this file has already been hardened against twice.
+        self.assertEqual(
+            fleetlib._decide_timeout_secs({"timings": {"decideTimeoutSecs": 9999}}),
+            float(fleetlib.DECIDE_TIMEOUT_CEILING_SECS))
+
+    def test_resolve_target_prefers_a_selection_that_is_pending(self):
+        self._pending("A", 20)
+        self._pending("B", 10)
+        fleetlib.write_focus("B")
+        self.assertEqual(fleetlib.resolve_target(), "B")
+
+    def test_resolve_target_falls_back_when_the_selection_is_not_pending(self):
+        self._pending("A", 10)
+        fleetlib.write_focus("Z")
+        self.assertEqual(fleetlib.resolve_target(), "A")
+
+    def test_resolve_target_is_empty_when_nothing_is_pending(self):
+        self.assertEqual(fleetlib.resolve_target(), "")
+
+    def test_claim_decision_yields_exactly_one_winner(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"), {"behavior": "allow"})
+        first = fleetlib.claim_decision("A")
+        second = fleetlib.claim_decision("A")
+        self.assertEqual(first, {"behavior": "allow"})
+        self.assertIsNone(second)
+
+    # Round-3 review (N1): bin/fleet-decide's own bats coverage could not
+    # prove the "honour a matching leftover" branch actually ran --
+    # FLEET_SKIP_RECONCILE=1 collapses the staging-to-purge window to
+    # microseconds in tests, so the decision always arrived late enough for
+    # the wait loop's first poll to claim it instead, leaving the honour
+    # branch provably unexercised. Testing the extracted primitive directly,
+    # with the decision already planted before the call, removes the race
+    # entirely: both fleet-decide call sites (the pre-wait purge and the
+    # wait loop) now share this exact function, so proving it correct here
+    # proves both call sites correct, regardless of which one wins the race
+    # in production.
+    def test_claim_matching_decision_returns_a_match_and_consumes_the_file(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"),
+                                    {"behavior": "allow", "request_id": "R1"})
+        result = fleetlib.claim_matching_decision("A", "R1")
+        self.assertEqual(result, {"behavior": "allow", "request_id": "R1"})
+        self.assertFalse(fleetlib.decision_path("A").exists())
+
+    def test_claim_matching_decision_discards_a_mismatch_but_still_consumes_the_file(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"),
+                                    {"behavior": "allow", "request_id": "OTHER"})
+        result = fleetlib.claim_matching_decision("A", "R1")
+        self.assertIsNone(result)
+        self.assertFalse(fleetlib.decision_path("A").exists())
+
+    def test_claim_matching_decision_discards_a_decision_with_no_request_id_at_all(self):
+        fleetlib.write_json_atomic(fleetlib.decision_path("A"), {"behavior": "allow"})
+        result = fleetlib.claim_matching_decision("A", "R1")
+        self.assertIsNone(result)
+        self.assertFalse(fleetlib.decision_path("A").exists())
+
+    def test_claim_matching_decision_returns_none_when_nothing_is_present(self):
+        self.assertIsNone(fleetlib.claim_matching_decision("A", "R1"))
 
 
 if __name__ == "__main__":

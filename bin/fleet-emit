@@ -146,18 +146,19 @@ def run(event):
     iterm_uuid = iterm.split(":", 1)[1] if ":" in iterm else ""
     host = "iterm2" if iterm_uuid else "unknown"
 
-    repo = branch = ""
-    # The REPOSITORY, not this working tree. --show-toplevel returns the
-    # worktree's own root, so a linked worktree reported its directory name
-    # -- a FORK-spawned agent showed "issue-13" and nothing about which repo
-    # it belonged to. The common git dir is shared by the primary checkout
-    # and every linked worktree, so its parent is the repository for both.
+    branch = ""
+    # The REPOSITORY, not this working tree. A linked worktree's
+    # --show-toplevel is the worktree itself, so the label used to read the
+    # worktree's directory name -- a FORK-spawned agent showed "issue-13"
+    # with nothing about which repo it belonged to.
     #
-    # Resolved against cwd rather than assumed absolute: --path-format is
-    # git >= 2.31, and older git prints --git-common-dir relative to cwd.
-    code, common = fleetlib.git(["rev-parse", "--git-common-dir"], cwd)
-    if code == 0 and common:
-        repo = (Path(cwd) / common).resolve().parent.name
+    # Shares fleetlib.canonical_repo_name with fleet-decide rather than
+    # repeating the derivation: that helper also handles a relative
+    # --git-common-dir, a git that fails outright, and a bare repo whose
+    # common dir is not named ".git" -- cases an inline `.parent.name`
+    # gets wrong.
+    repo = fleetlib.canonical_repo_name(cwd)
+    if repo:
         # Branch stays per-worktree. Only the repo half moves -- taking the
         # branch from the primary checkout would report one branch for
         # every worktree of a repo, which is the opposite of useful.
@@ -279,11 +280,24 @@ def run(event):
                 else:
                     drained = claimed
 
+        # Row 1 says an agent is working. It does not say whether it is working
+        # with the guard rails off, and "which of these has no brakes" is exactly
+        # what an annunciator panel exists to answer. Absence is recorded as
+        # unknown rather than assumed to be "default": claiming a session is
+        # guarded when we do not know would be the one wrong direction to err.
+        raw_mode = payload.get("permission_mode")
+        permission_mode = raw_mode if isinstance(raw_mode, str) else ""
+        if not permission_mode:
+            previous = fleetlib.read_json(target)
+            if isinstance(previous, dict) and isinstance(previous.get("permission_mode"), str):
+                permission_mode = previous["permission_mode"]
+
         fleetlib.write_json_atomic(target, {
             "session_id": session_id,
             "state": DRAIN_STATE if drained else state,
             "repo": repo, "branch": branch, "title": "", "cwd": cwd, "host": host,
             "iterm_session": iterm_uuid, "pid": find_agent_pid(), "ts": now,
+            "permission_mode": permission_mode,
         })
         if state == "blocked":
             fleetlib.create_blocked_marker(session_id)
