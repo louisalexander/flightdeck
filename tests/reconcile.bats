@@ -252,6 +252,86 @@ EOF
   [ -f "$BATS_TEST_TMPDIR/second-ran" ]
 }
 
+# --- live iTerm2 task titles ---------------------------------------------
+#
+# The bottom line is meant to be the task title from the iTerm2 session name,
+# with the branch only as a fallback (design spec lines 205-211). mksession
+# writes iterm_session as "U-<id>", so these tests stub osascript to return a
+# real-shaped UUID and set the field to match.
+
+UUID_A="11111111-2222-3333-4444-555555555555"
+
+stub_titles() {
+  # $1 = raw session name to report for UUID_A
+  cat >"$BATS_TEST_TMPDIR/osa" <<EOF
+#!/bin/sh
+printf '%s\t%s\n' "$UUID_A" "$1"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/osa"
+  export FLEET_OSASCRIPT="$BATS_TEST_TMPDIR/osa"
+}
+
+# id state repo branch iterm_session
+mksession_iterm() {
+  python3 - "$FLEET_HOME/sessions/$1.json" "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json,sys
+p,sid,st,repo,br,iterm = sys.argv[1:7]
+json.dump({"session_id":sid,"state":st,"repo":repo,"branch":br,"title":"",
+           "cwd":"/tmp","host":"iterm2","iterm_session":iterm,"pid":1,"ts":1},
+          open(p,"w"))
+PY
+}
+
+@test "TITLE: the live iTerm2 task title becomes the bottom label" {
+  stub_titles "◑ break-state-exit-handling (node)"
+  mksession_iterm B working flightdeck worktree-vague-row-1-title "$UUID_A"
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_bottom)" = "break-handl" ]
+}
+
+@test "TITLE: a session with no matching iTerm2 title falls back to its branch" {
+  stub_titles "◑ irrelevant (node)"
+  mksession_iterm B working flightdeck worktree-vague-row-1-title "U-nomatch"
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_bottom)" = "vague-title" ]
+}
+
+@test "TITLE: a failing osascript falls back to branches, and reconcile still succeeds" {
+  printf '#!/bin/sh\nexit 1\n' >"$BATS_TEST_TMPDIR/osa"
+  chmod +x "$BATS_TEST_TMPDIR/osa"
+  export FLEET_OSASCRIPT="$BATS_TEST_TMPDIR/osa"
+  mksession_iterm B working flightdeck worktree-vague-row-1-title "$UUID_A"
+  run "$BIN/fleet-reconcile"
+  [ "$status" -eq 0 ]
+  [ "$(sf 0 label_bottom)" = "vague-title" ]
+}
+
+@test "TITLE: a hanging osascript is timed out and reconcile still writes slots" {
+  printf '#!/bin/sh\nsleep 30\n' >"$BATS_TEST_TMPDIR/osa"
+  chmod +x "$BATS_TEST_TMPDIR/osa"
+  export FLEET_OSASCRIPT="$BATS_TEST_TMPDIR/osa"
+  mksession_iterm B working flightdeck worktree-vague-row-1-title "$UUID_A"
+  # Times the whole invocation rather than shelling out to `timeout`, which
+  # is GNU coreutils and not on a stock macOS. Same approach as the wedged
+  # osascript test in tests/focus.bats.
+  start=$(date +%s)
+  run "$BIN/fleet-reconcile"
+  end=$(date +%s)
+  [ "$status" -eq 0 ]
+  [ "$((end - start))" -lt 10 ]
+  [ "$(sf 0 label_bottom)" = "vague-title" ]
+}
+
+@test "TITLE: a live title beats a stored one" {
+  stub_titles "◑ live-title-wins (node)"
+  python3 - "$FLEET_HOME/sessions/B.json" <<PY
+import json,sys
+json.dump({"session_id":"B","state":"working","repo":"flightdeck",
+           "branch":"main","title":"stored-title","cwd":"/tmp","host":"iterm2",
+           "iterm_session":"$UUID_A","pid":1,"ts":1}, open(sys.argv[1],"w"))
+PY
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_bottom)" = "live-wins" ]
 # --- halt, verdict and permission_mode publishing --------------------------
 #
 # The plugin watches slots.json and nothing else -- one file, one watch. So

@@ -87,6 +87,128 @@ class ShortenTests(unittest.TestCase):
         self.assertEqual(fleetlib.shorten("worktreeish-plan"), "worktr-plan")
 
 
+class CleanTitleTests(unittest.TestCase):
+    """iTerm2 session name -> task title.
+
+    Shapes observed on a live probe and recorded in the design spec
+    (2026-08-13-streamdeck-fleet-design.md:107-109).
+    """
+
+    def test_strips_a_busy_glyph_and_the_trailing_process_name(self):
+        self.assertEqual(
+            fleetlib.clean_title("◑ Set up Stream Deck XL as AI agent (node)"),
+            "Set up Stream Deck XL as AI agent")
+
+    def test_strips_a_ready_glyph(self):
+        self.assertEqual(
+            fleetlib.clean_title("✳ break-state-exit-handling (node)"),
+            "break-state-exit-handling")
+
+    def test_an_unknown_glyph_is_stripped_by_class_not_by_lookup(self):
+        # The spec calls the glyph vocabulary unversioned and liable to
+        # change without notice, so a glyph nobody has seen must still go.
+        self.assertEqual(fleetlib.clean_title("⚄ rebuild the index (node)"),
+                         "rebuild the index")
+
+    def test_a_name_with_no_glyph_survives_intact(self):
+        self.assertEqual(fleetlib.clean_title("plain session name"),
+                         "plain session name")
+
+    def test_a_name_with_no_trailing_process_survives(self):
+        self.assertEqual(fleetlib.clean_title("◑ mid-flight"), "mid-flight")
+
+    def test_a_leading_digit_is_not_mistaken_for_a_glyph(self):
+        self.assertEqual(fleetlib.clean_title("3-way merge (node)"), "3-way merge")
+
+    def test_a_name_that_is_only_a_glyph_yields_empty(self):
+        self.assertEqual(fleetlib.clean_title("◑"), "")
+
+    def test_empty_and_none_yield_empty(self):
+        self.assertEqual(fleetlib.clean_title(""), "")
+        self.assertEqual(fleetlib.clean_title(None), "")
+
+    def test_only_a_trailing_node_marker_is_stripped_not_any_parenthetical(self):
+        # "(node)" is iTerm2 reporting the foreground process. A parenthetical
+        # the user actually typed is part of the title.
+        self.assertEqual(fleetlib.clean_title("◑ fix the parser (again) (node)"),
+                         "fix the parser (again)")
+
+
+class ItermSessionTitlesTests(unittest.TestCase):
+    """The osascript seam. Stubbed via FLEET_OSASCRIPT, the same seam
+    tests/spawn.bats:185 and tests/send.bats:92 use.
+    """
+
+    UUID_A = "11111111-2222-3333-4444-555555555555"
+    UUID_B = "66666666-7777-8888-9999-000000000000"
+
+    def _stub(self, body):
+        """Write an executable stub and point FLEET_OSASCRIPT at it."""
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "osa")
+        with open(p, "w") as fh:
+            fh.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(p, 0o755)
+        self.addCleanup(shutil.rmtree, d, True)
+        old = os.environ.get("FLEET_OSASCRIPT")
+        os.environ["FLEET_OSASCRIPT"] = p
+        if old is None:
+            self.addCleanup(os.environ.pop, "FLEET_OSASCRIPT", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "FLEET_OSASCRIPT", old)
+
+    def test_parses_tab_separated_uuid_and_name(self):
+        self._stub("printf '%s\\t%s\\n' '{a}' '◑ alpha (node)'".format(a=self.UUID_A))
+        self.assertEqual(fleetlib.iterm_session_titles(),
+                         {self.UUID_A: "◑ alpha (node)"})
+
+    def test_parses_several_sessions(self):
+        self._stub("printf '%s\\t%s\\n%s\\t%s\\n' '{a}' 'alpha' '{b}' 'beta'"
+                   .format(a=self.UUID_A, b=self.UUID_B))
+        self.assertEqual(fleetlib.iterm_session_titles(),
+                         {self.UUID_A: "alpha", self.UUID_B: "beta"})
+
+    def test_a_name_containing_a_tab_keeps_everything_after_the_first(self):
+        self._stub("printf '%s\\talpha\\tbeta\\n' '{a}'".format(a=self.UUID_A))
+        self.assertEqual(fleetlib.iterm_session_titles(),
+                         {self.UUID_A: "alpha\tbeta"})
+
+    def test_a_nonzero_exit_yields_an_empty_map(self):
+        self._stub("exit 1")
+        self.assertEqual(fleetlib.iterm_session_titles(), {})
+
+    def test_a_missing_osascript_yields_an_empty_map_not_a_raise(self):
+        os.environ["FLEET_OSASCRIPT"] = "/nonexistent/osascript"
+        self.addCleanup(os.environ.pop, "FLEET_OSASCRIPT", None)
+        self.assertEqual(fleetlib.iterm_session_titles(), {})
+
+    def test_a_hanging_osascript_is_timed_out_and_yields_an_empty_map(self):
+        self._stub("sleep 30")
+        start = time.time()
+        self.assertEqual(fleetlib.iterm_session_titles(timeout=1), {})
+        self.assertLess(time.time() - start, 10)
+
+    def test_lines_that_are_not_uuid_tab_name_are_skipped(self):
+        self._stub("printf 'garbage\\nnot-a-uuid\\tname\\n%s\\tgood\\n' '{a}'"
+                   .format(a=self.UUID_A))
+        self.assertEqual(fleetlib.iterm_session_titles(), {self.UUID_A: "good"})
+
+    def test_empty_output_yields_an_empty_map(self):
+        self._stub("true")
+        self.assertEqual(fleetlib.iterm_session_titles(), {})
+
+    def test_the_separator_is_not_the_bare_applescript_tab_keyword(self):
+        # Every test above stubs osascript, so none of them can see what the
+        # real script emits. Inside `tell application "iTerm2"` the bare word
+        # `tab` resolves to iTerm2's tab class, not the tab character, and
+        # stringifies as the literal word "tab" -- so every line fails the
+        # UUID<TAB>name parse and the map comes back empty on a real Mac
+        # while the whole suite stays green. Caught once; guarded here.
+        script = fleetlib.ITERM_TITLES_SCRIPT
+        self.assertIn("ASCII character 9", script)
+        self.assertNotIn("& tab &", script)
+
+
 class DeepMergeTests(unittest.TestCase):
     """New direct coverage: config.bats exercises deep_merge only
     indirectly, through the fleet-config CLI. These call the function.
