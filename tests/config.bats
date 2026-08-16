@@ -55,5 +55,5 @@ assert d.get('journal',{}).get('vault') == '', 'example must ship no vault path'
 assert d.get('renderers') == [], 'example must ship no renderers'
 print('ok')"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ok"* ]]
+  [[ "$output" == *"ok"* ]] || return 1
 }

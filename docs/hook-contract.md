@@ -1,6 +1,9 @@
 # Claude Code Hook Contract (empirically verified)
 
 **Verified against:** Claude Code CLI `v2.1.232`, macOS (Darwin 24.6.0), on 2026-08-13/14.
+Extended against `v2.1.233` on 2026-08-14 with `PermissionRequest`, `PreToolUse` under
+bypassed permissions, and the second `Notification` type — see
+"Permission-decision events" below.
 
 **Method:** A project-scoped `.claude/settings.json` (this repo only — `~/.claude/settings.json`
 was never touched) registered all five hook events, each pointing at
@@ -30,7 +33,9 @@ started with that directory as project root.
 | `UserPromptSubmit` | YES | every prompt submission (headless and interactive) |
 | `Stop` | YES | every completed turn (headless and interactive) |
 | `SessionEnd` | YES | every session teardown (headless `-p` exit and interactive `/exit`) |
-| `Notification` | YES | only observed interactively, when a tool call required permission approval |
+| `Notification` | YES | two types: `permission_prompt` (interactive only) and `idle_prompt` |
+| `PermissionRequest` | YES | interactive only — fires exactly when a permission dialog is raised |
+| `PreToolUse` | YES | every tool call, **in every permission mode** |
 
 All five event names in the brief (`SessionStart`, `UserPromptSubmit`, `Notification`,
 `Stop`, `SessionEnd`) are correct — Claude Code did not reject any of them at startup.
@@ -114,6 +119,27 @@ An additional, unplanned data point surfaced along the way: a bare **"trust this
 dialog appeared once (on a session's very first launch in that pty) and did *not* generate a
 `Notification` event — it is a workspace-trust prompt handled entirely outside the hook
 system, not a tool-permission prompt. Do not conflate the two.
+
+**The second variant, `idle_prompt`, is now confirmed** (2026-08-14, v2.1.233). It fired ~70s
+after a turn ended awaiting input:
+
+```json
+{"hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}
+```
+
+`fleet-emit` already lists it in `IGNORED_NOTIFICATION_TYPES`, so the shipped behaviour was
+right; this is confirmation of a guess, not a fix.
+
+**`permission_prompt` is debounced by roughly six seconds.** Measured across three runs, it
+fired 6.01s, 6.02s and 6.03s after the corresponding `PermissionRequest` hook began — a fixed
+delay, not a function of how long anything took. It fires even when the request is resolved
+programmatically and no human ever sees a dialog.
+
+This matters to Row 1: `PermissionRequest` fires at t≈0 and `Notification` at t≈6, so amber
+currently arrives about six seconds later than the same information is available. Anything
+wanting a faster blocked signal should key on `PermissionRequest` — but note it is *narrower*
+than `Notification`, being a tool-permission event only, so it is an addition to the blocked
+signal rather than a replacement for it.
 
 ### 4. `Stop` — FIRED
 
@@ -209,6 +235,124 @@ exit paths, but note only two of presumably several possible values were observe
 Code's docs mention values like `"clear"`, `"logout"`, `"prompt_input_exit"`, `"other"` — only
 the latter two were confirmed here).
 
+## Permission-decision events
+
+Verified 2026-08-14 against v2.1.233 by the same project-scoped `--settings` method, driven
+through `expect` in a pty for the interactive cases. `FLEET_HOME` pointed at a throwaway
+directory throughout; no probe session reached the live deck.
+
+### `PermissionRequest` — fires only when a human would be asked
+
+It did **not** fire in headless `-p` mode, where the permission is silently declined with no
+dialog. It fires in an interactive session at the moment a permission dialog is raised.
+
+Verbatim payload:
+
+```json
+{"session_id":"c833a932-...","transcript_path":"...","cwd":"...","prompt_id":"ff3bcf0c-...",
+ "permission_mode":"default","effort":{"level":"high"},"hook_event_name":"PermissionRequest",
+ "tool_name":"WebFetch",
+ "tool_input":{"url":"https://example.com","prompt":"Return the full text content of this page."},
+ "permission_suggestions":[{"type":"addRules","destination":"localSettings",
+   "rules":[{"toolName":"WebFetch","ruleContent":"domain:example.com"}],"behavior":"allow"}]}
+```
+
+Two fields beyond the usual shape. `tool_input` is the **full** input, unredacted and
+untruncated. `permission_suggestions` is Claude Code's own proposal for a scoped rule that
+would stop this prompt recurring — so a consumer never has to invent a rule width for itself.
+
+**The output schema is not the documented `PreToolUse` one.** Claude Code's bundled hook
+documentation says `permissionDecision` is "PreToolUse only", and that is accurate: emitting
+`hookSpecificOutput.permissionDecision` from a `PermissionRequest` hook is silently ignored.
+Two probes were wasted on this before the real schema was read out of the bundle:
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PermissionRequest",
+  "decision":{"behavior":"allow","updatedInput":{},"updatedPermissions":[]}}}
+
+{"hookSpecificOutput":{"hookEventName":"PermissionRequest",
+  "decision":{"behavior":"deny","message":"...","interrupt":true}}}
+```
+
+`updatedInput`, `updatedPermissions`, `message` and `interrupt` are all optional.
+`deny.interrupt` halts the turn, and is preferable to a top-level `continue: false` because it
+is part of the same decision rather than a second mechanism layered on top.
+
+### A `PermissionRequest` hook may block, and the session waits
+
+A hook that slept six seconds and then returned `allow` caused the tool to execute with no
+human input. Confirmed in the transcript rather than on screen: `TOOL_USE WebFetch` followed
+by a non-error `TOOL_RESULT`.
+
+This is the one place flightdeck's "hooks must exit in milliseconds" rule can safely be
+broken, and the reason is narrow enough to state as a rule of its own: **the only hook that
+may block is one that fires when the agent is already blocked.** It adds no latency to a
+session that is by definition waiting on a human.
+
+Three properties make it safe to build on:
+
+- **The dialog renders immediately and races the hook.** It is on screen the whole time the
+  hook deliberates, and whichever answers first wins. An external approver is therefore an
+  *additional* input channel, never a lockout.
+- **Exceeding `timeout` falls through to the human.** With `timeout: 3` against a 12-second
+  hook, the hook process was killed, nothing was printed to the terminal, and the ordinary
+  dialog stayed answerable. Walking away cannot turn into an automatic denial.
+- **Hooks tighten but cannot loosen.** A hook `allow` is still subject to deny rules; the
+  bundle carries the string `PermissionRequest hook allowed with updatedInput, but rule
+  overrides:` for exactly that case.
+
+### `updatedPermissions` persists — but for a worktree, not where you expect
+
+`updatedPermissions` echoed back from the payload's own `permission_suggestions` was applied
+to the live permission context *and* written to disk. Persistence only happens for
+`destination` values of `localSettings`, `userSettings` or `projectSettings`; anything else
+(e.g. `session`) applies in memory for the rest of the session and is never saved.
+
+**The trap: a session running in a linked worktree writes `localSettings` to the canonical
+repo root, not to the worktree.** A probe with `cwd` inside `.claude/worktrees/rows-3-4`
+created no `.claude/` there at all — the rule landed in
+`<repo-root>/.claude/settings.local.json`. The bundle handles this deliberately, reasoning
+that a per-worktree copy "would become a stale, revocation-resurrecting legacy overlay".
+
+The consequence for a fleet is a safety property, not a detail: **remembering a permission for
+one worktree agent widens permissions for every agent in every worktree of that repository,
+including ones that do not exist yet.** Anything offering one-press "approve and remember"
+has to name the repository it is widening, not the agent.
+
+### `PreToolUse` gates every tool call in every permission mode
+
+Claude Code says so itself, in a string aimed at SDK users:
+
+> `canUseTool will not be invoked: permissionMode 'bypassPermissions' auto-approves every tool
+> call (except explicit deny rules) before the callback is consulted. To gate every tool call,
+> use a PreToolUse hook instead.`
+
+Confirmed live, headlessly, twice. A `PreToolUse` hook returning
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+  "permissionDecisionReason":"FLEET HALTED by operator. Do not retry, do not work around this. Stop and wait."}}
+```
+
+blocked the tool under both `--permission-mode bypassPermissions` and
+`--dangerously-skip-permissions`. The payload carries `permission_mode: "bypassPermissions"`,
+so a hook can tell which mode it is gating.
+
+Two qualifications belong attached to that result wherever it is quoted:
+
+- **A deny is not a pause.** The model receives a denial and reasons about it; it is free to
+  retry or route around. Both runs did produce stop-and-wait behaviour with the wording above
+  ("Not retrying. Waiting for your go-ahead."), but that is a model complying with a sentence,
+  not a mechanical stop. Anything advertised as *halting* an agent needs an interrupt too.
+- **Coverage is per-session and fixed at launch.** Claude Code snapshots its hook registry at
+  session start, so a fleet-wide gate covers only sessions that started with the hook already
+  registered. A session launched before install, or with an overriding `--settings`, is not
+  covered and cannot be made so while it lives.
+
+Matchers are additive: with both a `"matcher": "WebFetch"` group and an unmatched catch-all
+group registered, both ran for a WebFetch call. Multiple `PermissionRequest` groups run
+**concurrently**, and a group returning no decision abstains without blocking the others.
+
 ## Field names for Task 3 (quick reference)
 
 - Session id: **`session_id`** (top-level, string uuid) — present in every event.
@@ -226,13 +370,9 @@ The brief's assumed field names (`session_id`, `cwd`) are **confirmed correct ve
 The following could not be produced or confirmed by scripted automation and need a human at
 a live prompt to check:
 
-1. **Idle-nudge `Notification`.** Claude Code's documentation describes a second
-   `Notification` trigger — the terminal going idle (~60s) awaiting user input — separate
-   from a permission prompt. Only the `notification_type: "permission_prompt"` variant was
-   observed in this spike. A human should sit at an interactive session, let it idle after
-   Claude asks a question, and confirm (a) that `Notification` fires again, and (b) what
-   `notification_type` value (or absence of the field) distinguishes it from a permission
-   prompt.
+1. ~~**Idle-nudge `Notification`.**~~ **RESOLVED 2026-08-14.** It fires, ~70s after the turn
+   ends, carrying `notification_type: "idle_prompt"` and `message: "Claude is waiting for your
+   input"`. See "The second variant" under `Notification` above.
 2. **`SessionStart` `source` values other than `"startup"`.** The docs suggest `"resume"`
    (via `--resume`/`--continue`) and `"clear"` (via `/clear`) as other possible values. Not
    exercised here.

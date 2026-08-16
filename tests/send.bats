@@ -123,7 +123,7 @@ d=json.load(open(p)); d['state']='$1'; json.dump(d, open(p,'w'))"
   idle_session done
   "$BIN/fleet-send" test
   run cat "$OSA_LOG"
-  [[ "$output" == *"test.md"* && "$output" != *"fleet-fail"* ]]
+  [[ "$output" == *"test.md"* && "$output" != *"fleet-fail"* ]] || return 1
 }
 
 @test "WAKE: the entry is claimed before typing, so the drain cannot re-serve it" {
@@ -233,7 +233,7 @@ SH
   # file, not some other path -- otherwise the check above would be
   # testing the wrong file.
   run cat "$OSA_LOG"
-  [[ "$output" == *"$target"* ]]
+  [[ "$output" == *"$target"* ]] || return 1
 }
 
 @test "FIX 2: issue.md and commit.md resolve with no literal FLIGHTDECK_REPO token either" {
@@ -532,9 +532,9 @@ print(t['armMs'], t['verbArmSecs'])"
   idle_target blocked
   "$BIN/fleet-send" stop
   run cat "$OSA_LOG"
-  [[ "$output" == *"ASCII character 27"* ]]
+  [[ "$output" == *"ASCII character 27"* ]] || return 1
   rm -f "$OSA_LOG"
   "$BIN/fleet-send" confirm
   run cat "$OSA_LOG"
-  [[ "$output" != *"ASCII character 27"* ]]
+  [[ "$output" != *"ASCII character 27"* ]] || return 1
 }

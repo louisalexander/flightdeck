@@ -34,7 +34,42 @@ else
   rc=1
 fi
 
+printf '\n== bats assertion integrity ==\n'
+# On macOS bash 3.2, `set -e` does not trip on a non-final [[ ]] compound, so
+# `[[ 1 == 2 ]]` mid-test is silently inert and the assertion never fails.
+# Requiring an explicit `|| return 1` on every [[ ]] makes the check
+# environment-independent rather than depending on which bash bats found.
+bad=$(grep -n '\[\[' "$ROOT"/tests/*.bats | grep -v '|| return 1' || true)
+if [ -n "$bad" ]; then
+  printf 'inert assertions (add `|| return 1`):\n%s\n' "$bad"
+  rc=1
+else
+  printf 'clean\n'
+fi
+
 printf '\n== bats ==\n'
 bats "$ROOT/tests" || rc=1
+
+printf '\n== plugin render ==\n'
+# The render tests are the plugin's only automated coverage, and they include
+# the pip-versus-lifecycle-background collision regression -- the guard
+# against a bug that already shipped once. Ending this script at bats meant
+# they ran only when a human remembered the command.
+#
+# Guarded the way the shellcheck section above is guarded on having targets:
+# a machine without node, npm, or an installed plugin dependency tree SKIPS
+# rather than fails, because that is an unprepared environment and not a
+# broken renderer. The skip says so out loud -- a silently missing section is
+# how a suite quietly stops covering something.
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  printf 'node/npm not available -- skipped\n'
+elif [ ! -d "$ROOT/plugin/node_modules" ]; then
+  printf 'plugin/node_modules missing (run `npm install` in plugin/) -- skipped\n'
+elif ( cd "$ROOT/plugin" && npm run build >/dev/null 2>&1 && node --test src/render.test.mjs ); then
+  printf 'render: OK\n'
+else
+  printf 'render: FAILED\n'
+  rc=1
+fi
 
 exit "$rc"

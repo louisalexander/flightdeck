@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""HALT: stop the fleet from one key.
+
+Not a hook: may exit non-zero, because a halt that did not happen must be
+visible.
+
+Two mechanisms, deliberately unlike each other. The latch is a file, read
+by a pure-shell clause in the PreToolUse hook with no interpreter
+involved, so while it exists every NEW tool call is denied before it
+runs -- even if flightdeck's own Python is broken or its config is
+unparseable. (Checked by hand, outside this repo's automated tests: a
+PreToolUse deny blocks the call under both bypassPermissions and
+--dangerously-skip-permissions.) The latch says nothing about a tool call
+already running when it is written -- a long `Bash` keeps going unless
+ESC reaches it.
+
+The interrupt is ESC, sent only to sessions Row 1 already knows are
+`working`, and only when the session is an iTerm2 host with a
+well-formed id and osascript succeeds; anything else -- a non-iTerm2
+host, a malformed id, a failed osascript call -- is simply not
+interrupted.
+
+ESC is NOT sent to a blocked session. There, ESC is not an interrupt: it
+selects "No, and tell Claude what to do differently" and opens a text box,
+leaving a session in a state the operator did not choose and is not
+looking at. A blocked session is answered instead: latching writes a deny
++ interrupt decision for every live pending record (see
+_release_pending), because a request already sitting in
+PermissionRequest is downstream of the PreToolUse latch and would
+otherwise hang until fleet-decide times out.
+
+Honest about its own limits: the latch guarantees no NEW tool call
+reaches the machine while it is set. It does not reach back into a call
+already in flight, and it does not guarantee the agent stops -- the model
+receives a denial and reasons about it, free to retry the same call or
+try to route around the block. HALT stops the hands going forward. It
+does not stop a hand already moving, and it does not stop the head.
+"""
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+INTERRUPTIBLE_STATES = ("working",)
+OSASCRIPT_TIMEOUT_SECS = 20
+
+# Written to every agent currently blocked on a PermissionRequest at the
+# moment the latch goes on. Deliberately the same register as
+# bin/fleet-verdict's INTERRUPT_MESSAGE -- this IS an interrupt, arriving on
+# the one synchronous channel a blocked agent has.
+HALT_MESSAGE = (
+    "The fleet was halted from flightdeck by the operator. This call was "
+    "refused and no further tool call will run. Stop what you are doing, do "
+    "not retry, and wait for instruction."
+)
+
+# iTerm2 session ids are UUIDs: 8-4-4-4-12 hex, case-insensitive. Mirrors
+# bin/fleet-focus's UUID_RE exactly (not imported: fleet-focus is a
+# standalone script, not a module) -- looser acceptance here would be the
+# kind of drift that eventually gets copied somewhere it matters. \Z (not
+# $) anchors the end exactly -- $ matches before a trailing newline, which
+# would otherwise let "<valid-uuid>\n" slip past the guard.
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\Z"
+)
+
+ESC_SCRIPT = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{uuid}" then
+          tell s to write text (ASCII character 27) newline NO
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+'''
+
+
+def _sessions():
+    out = []
+    try:
+        entries = sorted(fleetlib.sessions_dir().iterdir())
+    except Exception:
+        return out
+    for entry in entries:
+        data = fleetlib.read_json(entry)
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def _interrupt(session):
+    uuid = session.get("iterm_session") or ""
+    # Reject anything not shaped like a real iTerm2 session id rather than
+    # escaping it: the value is interpolated into AppleScript, and a
+    # charset with no metacharacters leaves nothing to reason about. Same
+    # rule, same pattern, as bin/fleet-focus.
+    if not UUID_RE.match(uuid):
+        return False
+    binary = os.environ.get("FLEET_OSASCRIPT") or "osascript"
+    try:
+        proc = subprocess.run([binary, "-e", ESC_SCRIPT.format(uuid=uuid)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=OSASCRIPT_TIMEOUT_SECS)
+        return proc.returncode == 0
+    except Exception as err:
+        fleetlib.log("halt: osascript failed for {}: {}".format(uuid, err))
+        return False
+
+
+def _release_pending():
+    """Answers every live pending request with a deny + interrupt.
+
+    The latch alone does not reach these. A PermissionRequest is DOWNSTREAM
+    of the PreToolUse gate -- that call already passed the shell clause,
+    before the latch existed -- so the one agent the operator was looking at
+    when they hit the brake would otherwise sit blocked until fleet-decide
+    times out (up to two minutes), then fall through to its terminal dialog
+    with the answer still unmade. Actively releasing it is both halves of
+    the promise: the call does not run, and the agent is told why now.
+
+    Uses the same request_id-carrying decision shape bin/fleet-verdict
+    writes, read out of each pending record -- fleet-decide discards any
+    decision whose request_id does not match the request currently staged,
+    so a decision without it would be silently thrown away and the agent
+    would stay blocked anyway.
+
+    Best-effort per record: one unwritable decision must not stop the rest
+    of the fleet being released, and must not fail the halt itself -- the
+    latch is already on by the time this runs.
+    """
+    released = 0
+    for record in fleetlib.read_pending_all():
+        session_id = record.get("session_id")
+        request_id = record.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            fleetlib.log("halt: pending record for {} has no request_id to answer".format(
+                session_id))
+            continue
+        try:
+            fleetlib.write_json_atomic(fleetlib.decision_path(session_id), {
+                "behavior": "deny",
+                "message": HALT_MESSAGE,
+                "interrupt": True,
+                "request_id": request_id,
+            })
+            released += 1
+        except Exception as err:
+            fleetlib.log("halt: could not release {}: {}".format(session_id, err))
+    return released
+
+
+def _reconcile():
+    if os.environ.get("FLEET_SKIP_RECONCILE") == "1":
+        return
+    try:
+        subprocess.run([sys.executable,
+                        str(Path(__file__).resolve().parent / "fleet-reconcile")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except Exception:
+        pass
+
+
+def run(argv):
+    # Only these two exact shapes are recognised. A typo like "--of" must
+    # not silently fall through to the latch-writing branch below: that
+    # would halt the fleet on a misfire nobody asked for. Failing safe
+    # (fail-closed on latch, fail-open on --off) still has to fail LOUDLY.
+    if argv not in ([], ["--off"]):
+        fleetlib.log("halt: refusing unrecognised arguments {!r}".format(argv))
+        return 1
+
+    if "--off" in argv:
+        try:
+            fleetlib.halt_path().unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as err:
+            fleetlib.log("halt: could not clear latch: {}".format(err))
+            return 1
+        fleetlib.log("halt: cleared")
+        _reconcile()
+        return 0
+
+    try:
+        # write_text_atomic rather than a bare touch(): the shell gate
+        # treats the latch's mere existence as load-bearing, so even the
+        # very first write must never be observable half-done.
+        fleetlib.write_text_atomic(fleetlib.halt_path(), "")
+    except Exception as err:
+        fleetlib.log("halt: could not write latch: {}".format(err))
+        return 1
+
+    # Released BEFORE the ESC sweep: releasing is a file write per blocked
+    # agent and the sweep is an AppleScript round trip per working one (up to
+    # OSASCRIPT_TIMEOUT_SECS each), and a blocked agent is the one already
+    # waiting on a human.
+    released = _release_pending()
+
+    interrupted = 0
+    for session in _sessions():
+        if session.get("state") in INTERRUPTIBLE_STATES and _interrupt(session):
+            interrupted += 1
+    fleetlib.log("halt: latched, released {} blocked request(s), interrupted {} "
+                 "working session(s)".format(released, interrupted))
+    _reconcile()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(run(sys.argv[1:]))
+    except Exception as err:            # noqa: BLE001
+        fleetlib.log("halt: unhandled {!r}".format(err))
+        sys.exit(1)

@@ -1,4 +1,6 @@
 import assert from "node:assert";
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { renderSvg, toDataUri } from "../com.louisalexander.flightdeck.sdPlugin/bin/render.js";
 import {
   tileViewBox, splashTileSvg, nightTileSvg, bootConfig, isBooting,
@@ -247,6 +249,54 @@ assert.ok(
   "an armed key shows no focus border"
 );
 
+// --- Row 1 bypass pip and halted hatch -----------------------------------
+
+test("a bypassed session gets a quiet corner pip", () => {
+  const svg = renderSvg(slot, cfg, false, "bypassPermissions", false);
+  assert.match(svg, /<circle/);
+});
+
+test("a default-mode session gets no pip", () => {
+  const plain = renderSvg(slot, cfg, false, "default", false);
+  const bypassed = renderSvg(slot, cfg, false, "bypassPermissions", false);
+  assert.notEqual(plain, bypassed);
+});
+
+test("an unknown mode gets no pip, since we must not claim it is guarded", () => {
+  const unknown = renderSvg(slot, cfg, false, "", false);
+  const plain = renderSvg(slot, cfg, false, "default", false);
+  assert.equal(unknown, plain);
+});
+
+test("a halted fleet hatches every key", () => {
+  const svg = renderSvg(slot, cfg, false, "default", true);
+  assert.match(svg, /pattern|hatch/i);
+});
+
+// A flat-colour pip once shipped as #F5A623 -- byte-identical to the
+// `blocked` background in config/fleet.json, so it composited away on
+// exactly the key an operator scanning for "no brakes" agents would most
+// need it visible on (blocked fires under bypassPermissions same as any
+// other mode). Reads real backgrounds from config/fleet.json, not a
+// hardcoded list, so a future state addition is checked against the pip
+// automatically rather than trusting whoever adds it to remember this bug.
+test("the bypass pip never matches any lifecycle background colour", () => {
+  const fleetConfigPath = new URL("../../config/fleet.json", import.meta.url);
+  const fleetConfig = JSON.parse(readFileSync(fleetConfigPath, "utf8"));
+  const backgrounds = new Set(
+    Object.values(fleetConfig.states).map((s) => String(s.color).toUpperCase())
+  );
+  const svg = renderSvg(slot, cfg, false, "bypassPermissions", false);
+  const pipCircles = [...svg.matchAll(/<circle cx="130" cy="14"[^>]*fill="(#[0-9A-Fa-f]{6})"/g)];
+  assert.ok(pipCircles.length > 0, "the pip actually renders at least one circle");
+  for (const [, color] of pipCircles) {
+    assert.ok(
+      !backgrounds.has(color.toUpperCase()),
+      `pip colour ${color} collides with a lifecycle background from config/fleet.json`
+    );
+  }
+});
+
 // --- Row 2 command keys -------------------------------------------------
 import { renderCommandSvg } from "../com.louisalexander.flightdeck.sdPlugin/bin/command.js";
 
@@ -290,3 +340,155 @@ console.log("render tests passed");
   }
   assert.notStrictEqual(armed, refused, "armed is not refused -- opposite meanings");
 }
+
+// --- Row 3 verdict keys --------------------------------------------------
+// Import from the bundle rollup actually emits, matching how renderSvg and
+// renderCommandSvg are imported above -- there is no separate dist/ output.
+import { renderVerdictSvg, renderDetailSvg, renderDetailFeedback, fitRule, verdictLabel } from "../com.louisalexander.flightdeck.sdPlugin/bin/verdict.js";
+
+test("a verdict key at rest keeps its label, dimmed", () => {
+  const svg = renderVerdictSvg("APPROVE", "normal", "", false);
+  assert.match(svg, /APPROVE/);
+  assert.match(svg, /#5A6675/);   // INK_DIM -- legible, not blank
+});
+
+test("a verdict key with a target is bright", () => {
+  const svg = renderVerdictSvg("APPROVE", "normal", "", true);
+  assert.match(svg, /#C9D4E2/);
+});
+
+test("a high tier borrows the attention amber, never a new colour", () => {
+  const svg = renderVerdictSvg("APPROVE", "high", "", true);
+  assert.match(svg, /#F5A623/);
+});
+
+test("armed says CONFIRM?, matching Row 2", () => {
+  assert.match(renderVerdictSvg("REMEMBER", "low", "armed", true), /CONFIRM\?/);
+});
+
+test("detail at rest shows its label and no content lines", () => {
+  const svg = renderDetailSvg(null);
+  assert.match(svg, /DETAIL/);
+  assert.doesNotMatch(svg, /Bash/);
+});
+
+test("detail names the agent and the tool", () => {
+  const svg = renderDetailSvg({ session_id: "S1", agent: "flightdeck", tool: "Bash", tier: "high", repeats: 1 });
+  assert.match(svg, /flightdeck/);
+  assert.match(svg, /Bash/);
+});
+
+test("detail shows a repeat count only when it is above one", () => {
+  const once = renderDetailSvg({ session_id: "S1", agent: "a", tool: "Bash", tier: "normal", repeats: 1 });
+  const many = renderDetailSvg({ session_id: "S1", agent: "a", tool: "Bash", tier: "normal", repeats: 4 });
+  assert.doesNotMatch(once, /×/);
+  assert.match(many, /×4/);
+});
+
+test("detail never renders tool input", () => {
+  const svg = renderDetailSvg({
+    session_id: "S1", agent: "a", tool: "Bash", tier: "high", repeats: 1,
+    input_summary: "rm -rf /",
+  });
+  assert.doesNotMatch(svg, /rm -rf/);
+});
+
+// A failed DETAIL press (no iterm_session recorded for the target, or
+// fleet-focus itself failing/timing out) must not be silent -- see
+// bin/fleet-verdict's `_focus`, which genuinely returns REFUSED on both
+// paths. renderDetailSvg alone has no feedback channel to show that, so
+// plugin.ts's Verdict action routes a non-delivered outcome through this
+// function instead, which must actually change what is drawn.
+test("a refused DETAIL press is not silent", () => {
+  const idle = renderDetailFeedback(null, "");
+  const refused = renderDetailFeedback(null, "refused");
+  assert.notStrictEqual(idle, refused);
+  assert.match(refused, /DETAIL/);
+});
+
+test("a delivered DETAIL outcome falls through to the plain classification", () => {
+  const target = { session_id: "S1", agent: "flightdeck", tool: "Bash", tier: "normal", repeats: 1 };
+  assert.strictEqual(renderDetailFeedback(target, ""), renderDetailSvg(target));
+});
+
+// --- the armed REMEMBER face --------------------------------------------
+// The single most consequential press in the design: the rule persists to
+// the CANONICAL repo root and widens every agent in every worktree of that
+// repository, including ones that do not exist yet. Naming the repository
+// and the rule on the confirmation is the stated mitigation, promised by
+// both the README and the Rows 3-4 design. It shipped as a bare "CONFIRM?"
+// because bin/fleet-reconcile never published the rule at all.
+
+const SCOPE = { repo: "flightdeck", rule: "Bash(git push:*)" };
+
+test("the armed REMEMBER face names the repository and the rule", () => {
+  const svg = renderVerdictSvg("REMEMBER", "high", "armed", true, SCOPE);
+  assert.match(svg, /flightdeck/);
+  assert.match(svg, /git push/);
+  assert.match(svg, /CONFIRM\?/);
+});
+
+test("the armed REMEMBER face never names the agent", () => {
+  // The agent is the one thing this press is NOT scoped to, so it is the one
+  // thing that must not appear on the confirmation.
+  const svg = renderVerdictSvg("REMEMBER", "high", "armed", true,
+    { repo: "flightdeck", rule: "Bash(git push:*)" });
+  assert.doesNotMatch(svg, /REMEMBER/);
+});
+
+test("a long rule is shortened rather than overflowing the key", () => {
+  const long = "Bash(git push --force --set-upstream origin main:*)";
+  const svg = renderVerdictSvg("REMEMBER", "high", "armed", true, { repo: "flightdeck", rule: long });
+  assert.doesNotMatch(svg, /--set-upstream/, "the full rule is not drawn whole");
+  for (const [, text] of svg.matchAll(/>([^<>]+)<\/text>/g)) {
+    assert.ok(text.length <= 22, `a line stays inside the key's budget: ${text}`);
+  }
+});
+
+test("shortening a rule keeps both ends, because the tail is what distinguishes it", () => {
+  const a = fitRule("Bash(git push --force:*)", 20);
+  const b = fitRule("Bash(git push --dry-run:*)", 20);
+  assert.notStrictEqual(a, b, "two rules sharing a long prefix must not shorten identically");
+  assert.ok(a.startsWith("Bash("), "the head survives");
+  assert.ok(a.endsWith(":*)"), "the tail survives -- that is where a rule's scope lives");
+  assert.strictEqual(fitRule("Bash(ls:*)", 20), "Bash(ls:*)", "a short rule is untouched");
+});
+
+test("without a known scope the armed face falls back to the plain CONFIRM? key", () => {
+  // REMEMBER refuses without a suggestion anyway; an armed face that cannot
+  // name the rule must say nothing rather than invent something.
+  const bare = renderVerdictSvg("REMEMBER", "high", "armed", true, { repo: "", rule: "" });
+  assert.strictEqual(bare, renderVerdictSvg("REMEMBER", "high", "armed", true));
+  assert.match(bare, /CONFIRM\?/);
+});
+
+test("the scope only ever appears on the armed face", () => {
+  for (const feedback of ["", "delivered", "refused"]) {
+    const svg = renderVerdictSvg("REMEMBER", "high", feedback, true, SCOPE);
+    assert.doesNotMatch(svg, /git push/, `${feedback || "idle"} must not name the rule`);
+  }
+});
+
+// --- steer keys are told apart ------------------------------------------
+// Row 3 keys 5 and 7 both carry verdict: "steer" and differ only in a `verb`
+// setting nothing displayed, so they rendered pixel-identically. Reaching for
+// one and hitting the other sends a different denial to a blocked agent with
+// no visible difference before the press or after it.
+
+test("a steer key is labelled by its verb, so two steer keys differ", () => {
+  const justify = renderVerdictSvg(verdictLabel("steer", "justify"), "normal", "", true);
+  const otherway = renderVerdictSvg(verdictLabel("steer", "otherway"), "normal", "", true);
+  assert.match(justify, /JUSTIFY/);
+  assert.match(otherway, /OTHERWAY/);
+  assert.notStrictEqual(justify, otherway, "the two steer keys must not render identically");
+});
+
+test("a steer key with no verb chosen still says what it is", () => {
+  assert.strictEqual(verdictLabel("steer", ""), "STEER");
+});
+
+test("a non-steer key ignores any verb setting left on it", () => {
+  // The property inspector keeps one `verb` control for all eight keys, so a
+  // stale verb can sit on a key later rebound to DENY. It must not relabel it.
+  assert.strictEqual(verdictLabel("deny", "justify"), "DENY");
+});

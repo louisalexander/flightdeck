@@ -16,7 +16,7 @@ practice every other key is untouched).
 
 "hooks" needs different treatment: hooks.<Event> is a JSON ARRAY, and a
 naive dict-merge replaces arrays wholesale. If any other plugin had
-already registered a hook on one of the six events flightdeck manages,
+already registered a hook on one of the seven events flightdeck manages,
 a wholesale replace would silently delete it. So per event:
   - every existing entry that is NOT ours survives untouched
   - any existing entry that IS ours is dropped, so re-running replaces
@@ -24,14 +24,22 @@ a wholesale replace would silently delete it. So per event:
   - our new entry is appended
 The array is never replaced wholesale.
 
-"Ours" is identified by a command containing "/bin/fleet-emit" -- NOT
-by the current invocation's full repo path. This is deliberate: if the
-checkout moves (a second machine, or the folder gets relocated, as
-already happened once in this project), a path-anchored marker would
+"Ours" is identified by a command containing one of OWN_MARKERS --
+"/bin/fleet-emit" (six events) or "/bin/fleet-decide" (PermissionRequest)
+-- NOT by the current invocation's full repo path. This is deliberate:
+if the checkout moves (a second machine, or the folder gets relocated,
+as already happened once in this project), a path-anchored marker would
 stop matching the old entry, which would then be treated as a foreign
 hook and preserved forever while a new one piles up beside it on every
 run. Matching on the path-independent suffix means a relocated checkout
 cleanly REPLACES its own old entry instead of accumulating duplicates.
+Two markers rather than one: PermissionRequest's command names
+fleet-decide, not fleet-emit, so a single "/bin/fleet-emit" marker would
+never recognise that entry as ours on a second run -- is_ours() would
+return False for it every time, and the per-event "drop ours, append
+new" rule would degrade into "keep everything, append new", duplicating
+the PermissionRequest hook (and therefore the fleet-decide process) once
+per install run, forever.
 (bin/fleet-doctor separately -- and correctly -- checks that the
 surviving entry points at ITS OWN checkout; that stricter check is
 what a stale-pointer report should look like, and this looser merge
@@ -66,8 +74,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleetlib  # noqa: E402
 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd",
-               "PreToolUse")
-MARKER = "/bin/fleet-emit"
+               "PreToolUse", "PermissionRequest")
+# Two markers, not one: fleet-emit covers the six event hooks, fleet-decide
+# covers PermissionRequest. See the module docstring for the duplication
+# bug a single "/bin/fleet-emit" marker would silently reintroduce.
+OWN_MARKERS = ("/bin/fleet-emit", "/bin/fleet-decide")
 
 
 class VerificationError(Exception):
@@ -78,7 +89,8 @@ def is_ours(entry):
     if not isinstance(entry, dict):
         return False
     for h in entry.get("hooks", []) or []:
-        if isinstance(h, dict) and MARKER in (h.get("command") or ""):
+        command = h.get("command") or "" if isinstance(h, dict) else ""
+        if any(marker in command for marker in OWN_MARKERS):
             return True
     return False
 
@@ -192,8 +204,8 @@ def main():
 
     kept_keys = len(original) - (1 if "hooks" in original else 0)
     print("verified: {} pre-existing top-level key(s) intact; "
-          "third-party hook entries preserved on all 6 events; "
-          "flightdeck hook present exactly once per event".format(kept_keys))
+          "third-party hook entries preserved on all {} events; "
+          "flightdeck hook present exactly once per event".format(kept_keys, len(HOOK_EVENTS)))
     return 0
 
 

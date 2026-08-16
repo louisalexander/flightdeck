@@ -1,4 +1,5 @@
 config/fleet.local.json
+config/risk.local.json
 plugin/node_modules/
 plugin/*.sdPlugin/bin/
 bin/__pycache__/

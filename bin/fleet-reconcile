@@ -46,7 +46,7 @@ def previous_assignment():
 def empty_slot(index):
     return {"index": index, "state": "empty", "label_top": "", "label_bottom": "",
             "session_id": "", "host": "", "iterm_session": "", "cwd": "", "app": "",
-            "focused": False}
+            "focused": False, "permission_mode": ""}
 
 
 def pinned_slot(index, pin):
@@ -55,12 +55,16 @@ def pinned_slot(index, pin):
             "label_bottom": pin.get("label_bottom", ""),
             "session_id": "", "host": pin.get("host", "pinned-app"),
             "iterm_session": "", "cwd": "", "app": pin.get("app", ""),
-            "focused": False}
+            "focused": False, "permission_mode": ""}
 
 
 def session_slot(index, session, max_chars, prefixes, focus_id=""):
     title = (session.get("title") or "").strip()
     bottom = title if title else (session.get("branch") or "")
+    # Row 1's mode annunciation: whatever fleet-emit last recorded for this
+    # session, or "" (unknown) if it never has -- see fleet-emit's own
+    # comment on why absence must never be read as "default".
+    mode = session.get("permission_mode")
     return {"index": index,
             "state": session.get("state", "idle"),
             "label_top": fleetlib.shorten(session.get("repo", ""), max_chars, prefixes),
@@ -70,7 +74,8 @@ def session_slot(index, session, max_chars, prefixes, focus_id=""):
             "iterm_session": session.get("iterm_session", ""),
             "cwd": session.get("cwd", ""),
             "app": "",
-            "focused": bool(focus_id) and session.get("session_id") == focus_id}
+            "focused": bool(focus_id) and session.get("session_id") == focus_id,
+            "permission_mode": mode if isinstance(mode, str) else ""}
 
 
 def run_renderers(config, live):
@@ -119,6 +124,54 @@ def run_renderers(config, live):
                            timeout=RENDERER_TIMEOUT_SECS)
         except Exception as err:
             fleetlib.log("reconcile: renderer {} failed: {}".format(command, err))
+
+
+def rule_label(suggestion):
+    """Claude Code's suggested rule as one line, e.g. `Bash(git push:*)`.
+
+    This is what REMEMBER's armed face shows next to the repository name,
+    and it is the whole content of the mitigation for the worktree trap:
+    the operator is one press from a rule that widens every worktree of
+    that repository, so the confirmation has to say WHICH rule. The face
+    is specced in docs (README, the Rows 3-4 design) and was previously
+    undeliverable because this field never reached slots.json at all.
+
+    Formatted here rather than in the plugin, which stays a renderer and
+    holds no knowledge of what a permission suggestion looks like. Only
+    the rules are rendered -- never `destination` or `behavior`, which are
+    the same on every suggestion Claude Code offers and would spend the
+    key's two legible lines on nothing.
+
+    Returns "" for anything unrecognised: REMEMBER refuses without a
+    suggestion anyway, and an armed face that cannot name the rule must
+    say nothing rather than invent something.
+    """
+    if not isinstance(suggestion, dict):
+        return ""
+    rules = suggestion.get("rules")
+    if not isinstance(rules, list):
+        return ""
+    rendered = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        tool = rule.get("toolName")
+        content = rule.get("ruleContent")
+        if not isinstance(tool, str) or not tool:
+            continue
+        if isinstance(content, str) and content:
+            rendered.append("{}({})".format(tool, content))
+        else:
+            rendered.append(tool)
+    if not rendered:
+        return ""
+    # More than one rule in a single suggestion has not been observed, but
+    # the field is a list: name the first and COUNT the rest rather than
+    # concatenating, so the key can never imply the press is narrower than
+    # it is.
+    if len(rendered) > 1:
+        return "{} +{}".format(rendered[0], len(rendered) - 1)
+    return rendered[0]
 
 
 def main():
@@ -172,8 +225,52 @@ def main():
         else:
             slots.append(empty_slot(index))
 
+    # One file, one watch. The plugin already watches slots.json, so
+    # everything it must render travels there rather than teaching it a
+    # second source. input_summary is deliberately excluded below: no key
+    # ever renders tool input, and putting it here is exactly how it would
+    # leak onto a key later -- the pending record already carries it for
+    # the log and terminal only.
+    halted = fleetlib.halt_path().exists()
+
+    verdict = None
+    target = fleetlib.resolve_target()
+    if target:
+        record = fleetlib.read_json(fleetlib.pending_path(target))
+        if isinstance(record, dict):
+            # DETAIL's identity line must read the same as the Row 1 key for
+            # the same agent -- that is the whole point of "show me the one I
+            # am about to act on". Row 1's label comes from the SESSION file's
+            # repo (bin/fleet-emit, --show-toplevel), which for a worktree
+            # session is the worktree's own name, while the pending record's
+            # repo is now deliberately the CANONICAL repository for REMEMBER's
+            # armed face. Those two answers differ for exactly the sessions
+            # this fleet runs, so read the identity from the session and fall
+            # back to the record only when there is no session file.
+            session = by_id.get(target) or {}
+            agent = session.get("repo") or record.get("repo") or ""
+            verdict = {
+                "session_id": target,
+                # The agent's identity, shortened by the same rule Row 1 uses.
+                "agent": fleetlib.shorten(agent, 11),
+                "tool": record.get("tool") or "",
+                "tier": record.get("tier") or "normal",
+                "repeats": record.get("repeats") if isinstance(record.get("repeats"), int) else 1,
+                # The two fields REMEMBER's armed face needs. `repo` is the
+                # CANONICAL repository (bin/fleet-decide derives it from
+                # --git-common-dir, never the worktree), carried unshortened
+                # so the renderer -- which knows the font and the key width --
+                # decides how to fit it; `agent` above stays shortened because
+                # DETAIL's classification line has always been drawn that way.
+                # The agent is deliberately NOT on the armed face: it is the
+                # one scope this press is not limited to.
+                "repo": record.get("repo") or "",
+                "rule": rule_label(record.get("suggestion")),
+            }
+
     fleetlib.write_json_atomic(fleetlib.slots_path(), {
         "ts": int(time.time()), "overflow": len(pending), "slots": slots,
+        "halted": halted, "verdict": verdict,
     })
     if pending:
         fleetlib.log("reconcile: {} session(s) unslotted (overflow)".format(len(pending)))
