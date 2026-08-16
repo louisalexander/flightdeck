@@ -86,6 +86,53 @@ class ShortenTests(unittest.TestCase):
         self.assertEqual(fleetlib.shorten("worktreeish-plan"), "worktr-plan")
 
 
+class CleanTitleTests(unittest.TestCase):
+    """iTerm2 session name -> task title.
+
+    Shapes observed on a live probe and recorded in the design spec
+    (2026-08-13-streamdeck-fleet-design.md:107-109).
+    """
+
+    def test_strips_a_busy_glyph_and_the_trailing_process_name(self):
+        self.assertEqual(
+            fleetlib.clean_title("◑ Set up Stream Deck XL as AI agent (node)"),
+            "Set up Stream Deck XL as AI agent")
+
+    def test_strips_a_ready_glyph(self):
+        self.assertEqual(
+            fleetlib.clean_title("✳ break-state-exit-handling (node)"),
+            "break-state-exit-handling")
+
+    def test_an_unknown_glyph_is_stripped_by_class_not_by_lookup(self):
+        # The spec calls the glyph vocabulary unversioned and liable to
+        # change without notice, so a glyph nobody has seen must still go.
+        self.assertEqual(fleetlib.clean_title("⚄ rebuild the index (node)"),
+                         "rebuild the index")
+
+    def test_a_name_with_no_glyph_survives_intact(self):
+        self.assertEqual(fleetlib.clean_title("plain session name"),
+                         "plain session name")
+
+    def test_a_name_with_no_trailing_process_survives(self):
+        self.assertEqual(fleetlib.clean_title("◑ mid-flight"), "mid-flight")
+
+    def test_a_leading_digit_is_not_mistaken_for_a_glyph(self):
+        self.assertEqual(fleetlib.clean_title("3-way merge (node)"), "3-way merge")
+
+    def test_a_name_that_is_only_a_glyph_yields_empty(self):
+        self.assertEqual(fleetlib.clean_title("◑"), "")
+
+    def test_empty_and_none_yield_empty(self):
+        self.assertEqual(fleetlib.clean_title(""), "")
+        self.assertEqual(fleetlib.clean_title(None), "")
+
+    def test_only_a_trailing_node_marker_is_stripped_not_any_parenthetical(self):
+        # "(node)" is iTerm2 reporting the foreground process. A parenthetical
+        # the user actually typed is part of the title.
+        self.assertEqual(fleetlib.clean_title("◑ fix the parser (again) (node)"),
+                         "fix the parser (again)")
+
+
 class DeepMergeTests(unittest.TestCase):
     """New direct coverage: config.bats exercises deep_merge only
     indirectly, through the fleet-config CLI. These call the function.

@@ -359,6 +359,30 @@ def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
             last = last[:-1]
     return (first + "-" + last)[:max_chars]
 
+
+# iTerm2 names a Claude Code session "<glyph> <task title> (node)", e.g.
+# "◑ Set up Stream Deck XL as AI agent (node)".
+#
+# The leading glyph is stripped BY CHARACTER CLASS, not by matching a list
+# of known glyphs. The design spec calls the glyph vocabulary unversioned
+# and liable to change without notice, so a glyph nobody has seen yet must
+# still be stripped -- the failure mode of a lookup table is a glyph painted
+# onto a 96px key, which is exactly what the SVG geometry elsewhere in this
+# project exists to avoid.
+LEADING_GLYPH_RE = re.compile(r"^[^0-9A-Za-z]+")
+
+# Anchored to the very end: "(node)" is iTerm2 reporting the foreground
+# process, but a parenthetical the operator typed is part of their title.
+TRAILING_PROC_RE = re.compile(r"\s*\(node\)\s*\Z")
+
+def clean_title(raw):
+    """An iTerm2 session name reduced to the task title, or "" if unusable."""
+    text = (raw or "").strip()
+    text = TRAILING_PROC_RE.sub("", text)
+    text = LEADING_GLYPH_RE.sub("", text)
+    return text.strip()
+
+
 SLUG_MAX_CHARS = 32
 
 def slugify(text, max_chars=SLUG_MAX_CHARS):
