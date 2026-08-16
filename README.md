@@ -13,7 +13,9 @@ colour is lifecycle state, read in peripheral vision before it's read as
 text. A press focuses that session's iTerm2 window. A long-press, guarded,
 tears it down.
 
-This is v1: Row 1 only. It is installed and running on real hardware.
+This is v1: Rows 1 through 3 are built and running on real hardware —
+annunciator, commands, and verdicts. Row 4 (GATE, SPEND, DISPATCH) is not; see
+*Out of scope for v1*.
 
 ## The state table
 
@@ -77,13 +79,15 @@ Stream Deck plugin  (paints 8 keys, dispatches key presses)
 osascript (iTerm2) / open -a (pinned app)
 ```
 
-The plugin is deliberately dumb: it watches one JSON file, paints colour and
-label, and on press shells out to a script. It ships exactly one action
-type, `Fleet Slot`, parameterised by a slot index. Every rule that's likely
-to change — what counts as blocked, how slots get assigned, what teardown
-means, how a host gets focused — lives in Python scripts under `bin/` that
-you edit and run directly from a terminal. Nothing there requires rebuilding
-or reinstalling the plugin.
+The plugin is deliberately dumb: each action type watches the fleet's state
+under `~/.fleet`, paints colour and label, and — for the three you press —
+shells out to a script. It ships four action types, each parameterised by
+whatever its row needs rather than by one fixed shape: a slot index for Row
+1, a verb for Row 2, a verdict (plus, for STEER, a verb) for Row 3. Every
+rule that's likely to change — what counts as blocked, how slots get
+assigned, what teardown means, how a host gets focused — lives in Python
+scripts under `bin/` that you edit and run directly from a terminal.
+Nothing there requires rebuilding or reinstalling the plugin.
 
 Writes are event-driven, cleanup is polled: a hook fires on a real state
 transition, so a key turns amber the instant an agent blocks, with no
@@ -97,12 +101,13 @@ to catch crashed sessions whose `SessionEnd` never ran.
 ./bin/fleet-doctor
 ```
 
-`install.sh` pins the Python interpreter, merges the five hooks into
+`install.sh` pins the Python interpreter, merges the seven hooks into
 `~/.claude/settings.json`, loads the launchd reaper, and builds and links
 the plugin into Stream Deck. `fleet-doctor` then verifies every moving part
-— interpreter, hooks, reaper, plugin, Stream Deck running, and iTerm2
-automation permission, the classic silent killer macOS denies with no
-dialog.
+— interpreter, hooks (including the `PermissionRequest` one Row 3 depends
+on, and the halt clause's ordering), whether the fleet is currently
+halted, reaper, plugin, Stream Deck running, and iTerm2 automation
+permission, the classic silent killer macOS denies with no dialog.
 
 Once it's installed, drag the `Fleet Slot` action onto Row 1 in the Elgato
 app. Each key defaults to its own **column**, so dragging the action across
@@ -148,7 +153,142 @@ reversible with `git worktree add`; branch deletion isn't. Force-removal
 exists only as a script run deliberately in a terminal where its output is
 readable — never reachable from a key.
 
-## Row 3: deep links
+## Row 3: verdict keys
+
+Row 3 answers the permission prompt Claude Code is already showing, from
+the deck, without a context switch to the terminal. `bin/fleet-decide` sits
+on the `PermissionRequest` hook and blocks — up to `timings.decideTimeoutSecs`
+(120s) — until a decision is written or its own timeout notices first. It's
+the one hook in flightdeck allowed to do that; see *Why the deciding hook
+may block* below for why that's safe.
+
+The row is auto-targeted: it answers for **the selected session if it has a
+pending decision, otherwise the oldest pending decision** — no separate
+targeting press for the common case of one amber key. Disambiguating between
+several pending requests is a Row 1 press, which you'd have to make anyway to
+know which agent is which.
+
+| Key | Action | Sends |
+|---|---|---|
+| 1 | DETAIL | nothing — focuses and selects the session, exactly like a Row 1 press |
+| 2 | APPROVE | allow — arms first when the tier is `high` |
+| 3 | REMEMBER | allow + Claude Code's own suggested rule — always arms |
+| 4 | DENY | deny, with a stock message |
+| 5 | STEER — `justify` | deny: explain what this does and why, then wait |
+| 6 | INTERRUPT | deny + `interrupt: true` — stop, don't retry |
+| 7 | STEER — `otherway` | deny: reach the goal without that command |
+| 8 | *(unbound — `dryrun` ships in `config/verbs/`, bind it if wanted)* | |
+
+**Getting the row onto the deck is per-key, unlike Row 1.** Drag the
+`Verdict` action across Row 3's eight keys, then set each key's verdict in
+its property inspector — it defaults to `(none)`, which does nothing when
+pressed. Keys 5 and 7 (STEER) also need their verb dropdown set to
+`justify` or `otherway`; key 8 is left unbound above but can take `dryrun`
+the same way. A steer key labels itself with its verb (`JUSTIFY`,
+`OTHERWAY`) rather than the word STEER, the way a Row 2 key labels itself
+with its verb — two steer keys that read the same send different denials
+with nothing on the panel to tell them apart.
+
+Risk tier comes from [`config/risk.json`](config/risk.json) — a rule table,
+not a model, so a `high` classification (`rm -rf`, `git push --force`,
+`git reset --hard`, `sudo`, `dd if=`, a pipe into `sh`, …) is predictable and
+testable against fixtures. A tier only ever adds friction on top of a prompt
+the operator is already being shown; it never removes one and never grants
+anything, so a pattern missing from the table degrades to today's behaviour,
+never to an unguarded action.
+
+**DETAIL never shows the request.** No key renders tool input — at 96px
+`rm -rf ./build` and `rm -rf ./ build` truncate identically, so a truncated
+command reads as information while being ambiguous exactly where it
+matters. DETAIL carries only a classification (agent, tool, tier, repeat
+count); the complete request is one press away, already drawn in full by
+Claude Code in the terminal it's blocked in.
+
+### The worktree trap under REMEMBER
+
+`updatedPermissions` — the rule REMEMBER writes — persists to the
+**canonical repo root's** `.claude/settings.local.json`, never to the
+worktree the agent is actually running in. Verified empirically: a probe
+run with `cwd` inside a linked worktree created no `.claude/` there at
+all.
+
+That makes REMEMBER's blast radius bigger than the session that pressed
+it: **one press widens permissions for every agent in every worktree of
+that repository, including ones that do not exist yet.** No tier says
+that — a `low`-tier REMEMBER is exactly as far-reaching as a `high`-tier
+one — so REMEMBER always arms, regardless of tier, and its armed face
+names the repository and the rule rather than the agent:
+
+```
+flightdeck
+Bash(git push:*)
+CONFIRM?
+```
+
+The agent is the one thing this press is not scoped to, so it's the one
+thing that must not appear on the confirmation. There is no undo on the
+deck; removing a remembered rule is a text edit to that file.
+
+### Why the deciding hook may block
+
+`fleet-decide` is the one hook in this project allowed to sit — every
+other hook must exit in milliseconds because it runs on a live agent's
+critical path, and this is the exception because it only ever fires once
+the agent is already stopped, waiting on a human either way.
+
+**Every way it can fail degrades to Claude Code's own dialog, still
+answerable.** An unplugged deck, a crashed plugin, a bug in `fleet-decide`
+throwing partway through, an operator who simply walked away — none of
+them block the agent any further than not having flightdeck installed at
+all would have, because `fleet-decide` emits *nothing* on timeout rather
+than a denial. The ordinary permission dialog stays exactly where it would
+have been. The dialog and the deck race for the same answer and whichever
+responds first wins; answering in the terminal while the deck is still
+waiting is a normal outcome of that race, not a failure of either path.
+
+## HALT
+
+`bin/fleet-halt` is the emergency brake. Today it's a script, run from a
+terminal — `bin/fleet-halt --off` clears it. A dedicated Stream Deck key
+for it arrives with Row 4; the design called for one calling this script
+directly, needing no custom plugin action. **Do not improvise a binding
+for it now.** Stream Deck's built-in *Open* action shells out to macOS
+`open`, and `bin/fleet-halt` is a shebang'd Python file with no
+`.command` extension — `open` on it launches a text editor instead of
+running it, which is the worst failure this feature can have: an operator
+reaches for the brake mid-incident and gets TextEdit.
+
+**HALT's exact guarantee: no NEW tool call reaches your machine while the
+latch is set. It does not guarantee the agent stops.** The latch is a
+file, read by pure shell spliced onto the front of the `PreToolUse` hook —
+no Python, no config parsing, nothing flightdeck's own tooling could break
+— so every *new* tool call is denied before it runs, even under
+`bypassPermissions` or `--dangerously-skip-permissions` (checked by hand,
+twice). But a denial is something the model *receives and reasons about*:
+it is free to retry the identical call or try to route around the
+refusal, and work already in flight when the latch lands keeps running
+unless the accompanying ESC actually lands on it. HALT stops the hands
+going forward. It does not stop a hand already moving, and it does not
+stop the head.
+
+The second half of HALT is that ESC: sent only to sessions Row 1 already
+knows are `working`, and only over a real iTerm2 host with a well-formed
+session id. It is never sent to a `blocked` session — there, ESC selects
+"No, and tell Claude what to do differently" and opens a text box, which
+is not an interrupt and not a state the operator asked for.
+
+A blocked session is *answered* instead. A permission request is
+downstream of `PreToolUse`: that call already passed the shell latch,
+before the latch existed, so the latch cannot reach the one call the
+operator is most likely staring at when they hit the brake. Halting
+therefore writes a deny + interrupt for every request currently pending,
+releasing those agents now rather than leaving them blocked until the
+deciding hook times out — and Row 3's two allow keys, APPROVE and
+REMEMBER, refuse outright while the latch is set. DENY, INTERRUPT and the
+steers keep working: they are the safe direction, and an operator who has
+just hit the brake may well want to send one.
+
+### Deep links
 
 `claude-cli://` is a custom URL scheme Claude Code registers with the OS.
 Opening one launches a new terminal session with a prompt sitting inert in
@@ -156,10 +296,13 @@ the input box — nothing executes until it's read and Enter is pressed.
 Because a spawned session gets a normal `ITERM_SESSION_ID`, it fires the
 usual hooks and shows up in Row 1 automatically, with no integration code.
 
-All of Row 3 is just this URL wired to Stream Deck's built-in *Website*
-action — no plugin code needed, since a static-image row is configuration,
-not software. GitHub strips the `claude-cli:` scheme from rendered
-Markdown, so the format is fenced here rather than shown as a live link:
+Wired to Stream Deck's built-in *Website* action — no plugin code needed,
+since a static-image key is configuration, not software. Not bound to a
+particular row today: a future DISPATCH key (Row 4, not built) would
+generate these programmatically from an issue queue, but a hand-configured
+one is a standalone, general-purpose capability. GitHub strips the
+`claude-cli:` scheme from rendered Markdown, so the format is fenced here
+rather than shown as a live link:
 
 ```
 claude-cli://open?q=<url-encoded-prompt>&cwd=/absolute/path
@@ -179,6 +322,9 @@ templated from issue titles, CI output, branch names, or model output.
   the Obsidian vault path, and renderers. Copied from
   [`config/fleet.local.example.json`](config/fleet.local.example.json) by
   `install.sh` if it doesn't already exist.
+- [`config/risk.json`](config/risk.json) — committed: the Row 3 tier rules.
+  `config/risk.local.json`, gitignored, layers machine-specific rules on
+  top, same pattern as `fleet.local.json`.
 
 A pinned slot is declared in local config and is **never auto-assigned** —
 so each pin permanently reduces fleet capacity by one agent.
@@ -191,6 +337,10 @@ the agent receives — resolved by [`bin/fleet-verbs`](bin/fleet-verbs).
 `$FLEET_HOME/verbs/<id>.md` wins over the shipped
 [`config/verbs/<id>.md`](config/verbs) **per verb**, so overriding one
 doesn't mean maintaining copies of the rest.
+
+Getting it onto the deck is per-key, the same as Row 3: drag the `Command`
+action onto each Row 2 key and pick its verb in the property inspector —
+it also defaults to `(none)`.
 
 Everything shipped in `config/verbs` is dependency-free: it assumes a shell,
 a git checkout, and nothing else. Prompts that depend on a particular
@@ -239,9 +389,14 @@ immediately.
 ## Design decisions
 
 **Hooks, not polling.** A key turns amber the instant `Notification` fires,
-with none of the latency a poll loop would add. `PreToolUse` and
-`PostToolUse` are deliberately unused — they fire on every tool call, and
-the fleet must stay invisible to the thing it's watching.
+with none of the latency a poll loop would add. `PostToolUse` is
+deliberately unused — it fires on every tool call, and the fleet must stay
+invisible to the thing it's watching. `PreToolUse` *is* used — it's what
+carries the halt clause and the `Resumed` guard, see *HALT* above — but
+only through a pure-shell `test -e` per clause, paying for an interpreter
+only on a real transition (a resume) or never at all (a latched halt
+denies from shell alone). That is what keeps "stay invisible" true on this
+hook rather than abandoning it.
 
 **`bin/` is Python, not bash.** launchd's `PATH` is unset and resolves to
 `/usr/bin:/bin:/usr/sbin:/sbin`, a different interpreter than an interactive
@@ -263,17 +418,21 @@ even when the underlying data is perfectly correct.
 ```
 
 Runs shellcheck over the shell bootstrap, a Python syntax gate over `bin/`,
-and the bats suite. Currently 97 bats tests, all passing — covering hook
-emission, slot reconciliation (stickiness, reaping, overflow, pinned-slot
-exclusion), press dispatch and the arm/confirm state machine, the settings
-merge, and the teardown guard against fixture worktrees (dirty, unpushed,
-clean — asserting only the clean one is ever removed).
+and the bats suite — `./tests/run.sh` reports the current total and every
+result. Coverage includes hook emission, slot reconciliation (stickiness,
+reaping, overflow, pinned-slot exclusion), press dispatch and the
+arm/confirm state machine, the settings merge, the teardown guard against
+fixture worktrees (dirty, unpushed, clean — asserting only the clean one
+is ever removed), `fleet-decide`'s pending/decision lifecycle, and the
+halt guard.
 
 `fleet-focus` requires a live iTerm2 and is verified by hand; it's isolated
 in its own script for exactly that reason.
 
 ## Out of scope for v1
 
-Rows 2 (per-session commands), and 4 (system) are not built. Row 3 needs no
-plugin code, as above, and is configured by hand in the Elgato app once Row
-1 works.
+Row 4 (GATE, SPEND, DISPATCH) is not built. HALT — its fourth key in the
+original design — ships today as a script (`bin/fleet-halt`, see above)
+rather than a dedicated Stream Deck action: run it from a terminal until
+Row 4's key exists. Rows 1 through 3 are built and running on real
+hardware.

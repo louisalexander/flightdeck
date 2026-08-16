@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""Claude Code PermissionRequest hook. Offers the decision to the deck.
+
+MUST ALWAYS EXIT 0, like bin/fleet-emit.
+
+This is the one hook in flightdeck allowed to block. Every other hook must
+exit in milliseconds because it sits on a live agent's critical path; this
+one only ever runs when the agent is already waiting on a human, so it adds
+no latency to anything. Stated as a rule: the only hook that may block is
+one that fires when the agent is already blocked.
+
+The load-bearing behaviour is what happens when nothing answers. Emitting
+NOTHING leaves Claude Code's own permission dialog on screen and
+answerable, so an unplugged deck, a crashed plugin, a bug in this file or
+an operator who walked away all degrade to exactly the behaviour of not
+having flightdeck installed. Never emit a deny on timeout.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleetlib  # noqa: E402
+
+DEFAULT_TIMEOUT_SECS = 120
+DEFAULT_POLL_SECS = 0.15
+SUMMARY_MAX_CHARS = 300
+
+
+class _Terminated(BaseException):
+    """Raised from a SIGTERM handler so the wait loop unwinds through
+    try/finally instead of dying where it stands.
+
+    SIGTERM has no default Python handler -- unlike SIGINT, which the
+    interpreter already turns into a KeyboardInterrupt -- so without this,
+    a `kill` sent while this hook is blocked in the poll loop terminates
+    the process immediately, before any `finally` clause runs, and the
+    staged pending record is leaked. Deriving from BaseException, not
+    Exception, matches the widened guard in __main__ below: this must
+    survive to be caught there, not be swallowed by some inner `except
+    Exception`.
+    """
+
+
+def _handle_sigterm(signum, frame):
+    raise _Terminated()
+
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
+
+
+def _float_env(name, fallback):
+    try:
+        return float(os.environ[name])
+    except Exception:
+        return fallback
+
+
+def _timeout_secs(config):
+    env = _float_env("FLEET_DECIDE_TIMEOUT_SECS", None)
+    if env is not None:
+        # A deliberate per-invocation TEST override, not a fleet-wide
+        # setting -- intentionally NOT clamped below. Nothing stops a test
+        # asking this process to wait past the ceiling on purpose.
+        return env
+    timings = config.get("timings") if isinstance(config, dict) else None
+    if isinstance(timings, dict):
+        value = timings.get("decideTimeoutSecs")
+        if isinstance(value, (int, float)) and value > 0:
+            # Clamped to fleetlib.DECIDE_TIMEOUT_CEILING_SECS: a configured
+            # wait longer than Claude Code's own PermissionRequest hook
+            # timeout (fleetlib.HOOK_TIMEOUT_SECS) gets this process
+            # SIGKILLed mid-wait, which skips the `finally` that clears the
+            # pending record -- the exact leak this file was hardened
+            # against twice already. Referencing fleetlib's constant here
+            # (rather than a second hand-synced copy) is possible because,
+            # unlike DEFAULT_TIMEOUT_SECS above, this constant was
+            # introduced after fleet-decide already imported fleetlib.
+            return min(float(value), float(fleetlib.DECIDE_TIMEOUT_CEILING_SECS))
+    return DEFAULT_TIMEOUT_SECS
+
+
+def _summarise(tool_input):
+    """A single-line rendering of the input, for the log and terminal only.
+
+    Explicitly NOT a render source: no key ever shows tool input. At 96px
+    `rm -rf ./build` and `rm -rf ./ build` truncate identically, so a
+    truncated command reads as information while being ambiguous exactly
+    where it matters.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "file_path", "url", "pattern", "path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:SUMMARY_MAX_CHARS]
+    try:
+        return json.dumps(tool_input, separators=(",", ":"))[:SUMMARY_MAX_CHARS]
+    except Exception:
+        return ""
+
+
+def _first_suggestion(payload):
+    """Claude Code's own scoped-rule proposal, or None.
+
+    Passed through verbatim and never synthesised. If Claude Code offers no
+    rule, REMEMBER refuses rather than inventing one -- the width of a
+    permission rule is the whole safety story and is not ours to guess.
+    """
+    suggestions = payload.get("permission_suggestions")
+    if isinstance(suggestions, list):
+        for item in suggestions:
+            if isinstance(item, dict) and item.get("type") in ("addRules", "replaceRules"):
+                return item
+    return None
+
+
+def _emit(decision):
+    # Compact separators, matching fleetlib.write_json_atomic's convention --
+    # this is machine output for Claude Code, not something a human edits.
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": decision,
+        }
+    }, separators=(",", ":")))
+
+
+def _normalise(decision):
+    """A claimed decision file, reduced to the schema Claude Code accepts.
+
+    Verified against Claude Code v2.1.233:
+      allow { updatedInput?, updatedPermissions? }
+      deny  { message?, interrupt? }
+    `permissionDecision` -- the documented PreToolUse field -- is silently
+    ignored on this event, so it must not appear here.
+    """
+    if not isinstance(decision, dict):
+        return None
+    behavior = decision.get("behavior")
+    if behavior == "allow":
+        out = {"behavior": "allow"}
+        updated = decision.get("updatedPermissions")
+        if isinstance(updated, list) and updated:
+            out["updatedPermissions"] = updated
+        return out
+    if behavior == "deny":
+        out = {"behavior": "deny"}
+        message = decision.get("message")
+        if isinstance(message, str) and message.strip():
+            out["message"] = message
+        if decision.get("interrupt") is True:
+            out["interrupt"] = True
+        return out
+    return None
+
+
+def run():
+    # The clock the timeout is measured against starts HERE, not when the
+    # wait loop finally begins. Everything between the two is bounded but
+    # not free: git rev-parse (<=2s), the pending write, the blocked marker
+    # and a _reconcile() subprocess (<=10s). Measuring the timeout from the
+    # start of the WAIT made the worst-case process lifetime
+    # 120 + 12 = ~132s against a deployed hook timeout of
+    # fleetlib.HOOK_TIMEOUT_SECS (130) -- so Claude Code would SIGKILL this
+    # process, the `finally` below would never run, and the pending record
+    # would leak. resolve_target() always hands Row 3 the OLDEST pending
+    # record, so one leak hijacks every future press onto a dead session
+    # for the whole TTL. That is the leak three earlier fix rounds were
+    # spent closing; the ceiling has to bound the process, not just the
+    # sleep inside it.
+    start = time.time()
+    try:
+        payload = json.loads(sys.stdin.read())
+        if not isinstance(payload, dict):
+            raise ValueError("payload is not an object")
+    except Exception:
+        fleetlib.log("decide: unparseable payload")
+        return
+
+    session_id = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not session_id:
+        fleetlib.log("decide: no session id")
+        return
+
+    tool_name = payload.get("tool_name") or ""
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    config = fleetlib.load_config()
+    tier = fleetlib.score_risk(tool_name, tool_input, fleetlib.load_risk_rules())
+    digest = fleetlib.input_digest(tool_name, tool_input)
+    now = int(time.time())
+
+    cwd = payload.get("cwd") or ""
+    # The CANONICAL repository, not the worktree -- see
+    # fleetlib.canonical_repo_name, which also explains the 2s bound. This
+    # field is what REMEMBER's armed face names, and a remembered rule lands
+    # in the canonical repo root where it widens every worktree of it, so
+    # naming the worktree here would name the one scope the press is not
+    # limited to.
+    repo = fleetlib.canonical_repo_name(cwd)
+
+    # The identity of THIS request, so a decision can be checked against it
+    # rather than merely against the session id. Minted fresh here with
+    # uuid4 -- NOT payload.get("prompt_id"). prompt_id is unique per TURN
+    # (docs/hook-contract.md), and a single turn can raise several
+    # PermissionRequests for several tool calls, all sharing one prompt_id;
+    # round-2 review (N2) reproduced a decision meant for an earlier call in
+    # the same turn being accepted as the answer to a later, unrelated one.
+    # Nothing outside this process needs to predict the id -- fleet-verdict
+    # reads it back out of the pending record it stages below -- so a random
+    # one is strictly stronger with no cost, and there is no weaker fallback
+    # to fall back to. prompt_id is still recorded in the pending record
+    # below as a plain debugging field, never as the identity check itself.
+    request_id = uuid.uuid4().hex
+
+    # A denied agent may retry the identical call immediately, which would
+    # otherwise produce a fresh prompt per press forever. Counting repeats
+    # turns a silent loop into something legible on the DETAIL key.
+    existing = fleetlib.read_json(fleetlib.pending_path(session_id))
+    repeats = 1
+    if isinstance(existing, dict) and existing.get("input_digest") == digest:
+        previous = existing.get("repeats")
+        repeats = (previous if isinstance(previous, int) else 1) + 1
+
+    record = {
+        "session_id": session_id,
+        "tool": tool_name,
+        "input_digest": digest,
+        "request_id": request_id,
+        # Debugging only -- never the identity check. See the comment on
+        # request_id above for why prompt_id itself cannot be that.
+        "prompt_id": payload.get("prompt_id") if isinstance(payload.get("prompt_id"), str) else "",
+        "input_summary": _summarise(tool_input),
+        "tier": tier,
+        "suggestion": _first_suggestion(payload),
+        "repo": repo,
+        "cwd": cwd,
+        "repeats": repeats,
+        "requested_at": now,
+    }
+    try:
+        fleetlib.write_json_atomic(fleetlib.pending_path(session_id), record)
+    except Exception as err:
+        fleetlib.log("decide: could not stage pending: {}".format(err))
+        return
+
+    # Everything from here to the decision being resolved runs inside one
+    # try/finally so the pending record is cleared on every exit path --
+    # including SIGTERM/SIGINT unwinding through this frame, not just a
+    # normal return. fleetlib.resolve_target() always hands Row 3 the
+    # OLDEST pending record, so a leaked one would be oldest forever and
+    # permanently hijack every future press onto a session nobody asked
+    # about (see C2, row-3-verdict-and-halt review).
+    decision = None
+    try:
+        # Amber now rather than in six seconds: PermissionRequest fires at
+        # once where Notification/permission_prompt is debounced ~6s.
+        fleetlib.create_blocked_marker(session_id)
+        _touch_session_blocked(session_id, now)
+        _reconcile()
+
+        # A decision can already be sitting in decisions/ by the time we get
+        # here, and it can be entirely legitimate: the pending record was
+        # staged (and so resolve_target() already resolves to this session)
+        # before create_blocked_marker, _touch_session_blocked and the
+        # _reconcile() subprocess above ran, and a Row 3 press landing
+        # anywhere in that window -- realistically hundreds of ms, up to
+        # 10s if a renderer hangs -- produces a correctly request_id-stamped
+        # decision before the wait loop below ever starts polling. Round-2
+        # review (N1): discarding it unconditionally here threw away a real
+        # press with nothing but a log line to show for it.
+        # fleetlib.claim_matching_decision claims it either way but only
+        # HANDS IT BACK on a match, discarding (and logging) anything else
+        # -- the same primitive the wait loop below polls with, so this
+        # site and that one cannot disagree about what counts as a match.
+        decision = fleetlib.claim_matching_decision(session_id, request_id)
+
+        if decision is None:
+            # An ABSOLUTE deadline off `start`, not a duration off now: see
+            # the comment at the top of run().
+            decision = _wait_for_decision(
+                session_id, start + _timeout_secs(config), request_id)
+    finally:
+        try:
+            fleetlib.pending_path(session_id).unlink()
+        except Exception:
+            pass
+        _reconcile()
+
+    if decision is None:
+        # Timeout. Emit nothing at all -- the dialog is still on screen.
+        return
+    normalised = _normalise(decision)
+    if normalised is None:
+        fleetlib.log("decide: discarding malformed decision for {}".format(session_id))
+        return
+    _emit(normalised)
+
+
+def _wait_for_decision(session_id, deadline, request_id):
+    """Polls until `deadline` -- an absolute time.time() value, deliberately.
+
+    Taking a duration here and adding it to now() would restart the clock
+    after staging, which is exactly the bug this signature prevents: the
+    ceiling must bound the whole process against Claude Code's own hook
+    timeout, not just the sleeping part of it. A deadline already in the
+    past still gets one final claim attempt below, so a decision that
+    landed during staging is never lost to the clock.
+    """
+    poll = _float_env("FLEET_DECIDE_POLL_SECS", DEFAULT_POLL_SECS)
+    while time.time() < deadline:
+        claimed = fleetlib.claim_matching_decision(session_id, request_id)
+        if claimed is not None:
+            return claimed
+        time.sleep(poll)
+    return fleetlib.claim_matching_decision(session_id, request_id)
+
+
+def _touch_session_blocked(session_id, now):
+    target = fleetlib.sessions_dir() / "{}.json".format(session_id)
+    existing = fleetlib.read_json(target)
+    if not isinstance(existing, dict):
+        return
+    existing["state"] = "blocked"
+    existing["ts"] = now
+    try:
+        fleetlib.write_json_atomic(target, existing)
+    except Exception:
+        pass
+
+
+def _reconcile():
+    if os.environ.get("FLEET_SKIP_RECONCILE") == "1":
+        return
+    import subprocess
+    try:
+        subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent / "fleet-reconcile")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    try:
+        run()
+    except BaseException as err:        # noqa: BLE001 -- the exit-0 guarantee
+        # BaseException, not Exception, deliberately departing from
+        # fleet-emit's guard. fleet-emit lives for milliseconds; this hook
+        # lives for up to two minutes with a permission dialog on screen, so
+        # it is the hook a user actually Ctrl-Cs, and the one Claude Code
+        # itself kills via its documented `timeout: 130` if this process
+        # never returns. Both arrive as KeyboardInterrupt/SystemExit (and
+        # SIGTERM as the _Terminated raised above), none of which
+        # `except Exception` catches -- an uncaught KeyboardInterrupt prints
+        # a traceback to stderr and exits -2, breaking the exit-0 contract
+        # on exactly the exit path this hook is most likely to take. Copying
+        # fleet-emit's narrower guard here would silently reopen that hole.
+        try:
+            fleetlib.log("decide: unhandled {!r}".format(err))
+        except Exception:
+            pass
+    try:
+        # The one path that writes to stdout. The hook contract says the
+        # terminal dialog races this hook and either can win, so a consumer
+        # that has already closed its end of the pipe (Claude Code went
+        # with the dialog) is a normal, documented outcome here -- not a
+        # bug. Flushing explicitly, inside this guarded region, means a
+        # BrokenPipeError from that surfaces here rather than during
+        # interpreter shutdown.
+        sys.stdout.flush()
+    except Exception:
+        pass
+    # os._exit rather than sys.exit: sys.exit(0) still runs the interpreter's
+    # normal shutdown sequence, which flushes stdout again -- and if the
+    # reader is gone, that second flush raises BrokenPipeError from
+    # site.py's atexit handling, which Python reports as "Exception ignored"
+    # and turns into exit code 120, breaking the exit-0 contract on
+    # precisely the path a race with the dialog is expected to take.
+    # os._exit(0) skips that shutdown entirely and always exits 0.
+    os._exit(0)

@@ -1,0 +1,21 @@
+{
+  "high": [
+    { "tool": "Bash", "match": "rm\\s+-[a-z]*[rf]" },
+    { "tool": "Bash", "match": "push\\s+.*--force" },
+    { "tool": "Bash", "match": "curl.*\\|\\s*(ba)?sh" },
+    { "tool": "Bash", "match": "wget.*\\|\\s*(ba)?sh" },
+    { "tool": "Bash", "match": "\\bgit\\s+reset\\s+--hard\\b" },
+    { "tool": "Bash", "match": "\\bgit\\s+clean\\s+-[a-z]*f" },
+    { "tool": "Bash", "match": "\\bchmod\\s+-R\\b" },
+    { "tool": "Bash", "match": "\\bsudo\\b" },
+    { "tool": "Bash", "match": "\\bdd\\s+if=" },
+    { "tool": "Bash", "match": "/dev/(disk|rdisk)" }
+  ],
+  "low": [
+    { "tool": "Read" },
+    { "tool": "Grep" },
+    { "tool": "Glob" },
+    { "tool": "ToolSearch" },
+    { "tool": "TodoWrite" }
+  ]
+}

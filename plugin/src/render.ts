@@ -19,7 +19,10 @@ function esc(text: string): string {
  * Three layers only: state background, one lifecycle glyph, two identity
  * lines anchored near the bottom. No chrome.
  */
-export function renderSvg(slot: Slot, cfg: Config, armed: boolean): string {
+export function renderSvg(
+  slot: Slot, cfg: Config, armed: boolean,
+  permissionMode: string = "", halted: boolean = false,
+): string {
   const states = (cfg && typeof cfg.states === "object" && cfg.states) || {};
   const style: StateStyle = armed
     ? (states as Record<string, StateStyle>)["armed"] ?? FALLBACK
@@ -54,6 +57,46 @@ export function renderSvg(slot: Slot, cfg: Config, armed: boolean): string {
       `stroke="#FFFFFF" stroke-width="4" stroke-opacity="0.92"/>`
     : "";
 
+  // Opaque and two-tone, not quiet: it has to read on every one of the
+  // seven lifecycle backgrounds (blocked, working, done, idle, failed,
+  // empty, armed), and a single flat colour cannot do that -- #F5A623 (the
+  // original single-tone pip) was BYTE-IDENTICAL to the `blocked` background
+  // in config/fleet.json, invisible on exactly the key where an operator
+  // scanning for "no brakes" agents would most need to see it, since
+  // Notification fires regardless of permission mode and idle-input/
+  // plan-mode prompts still fire under bypassPermissions. A dark ring
+  // around a light dot survives every state background: the ring carries
+  // legibility on light fills where the dot alone could not -- `blocked`
+  // is the case that bit us -- and the dot carries it on dark ones (idle,
+  // failed, empty, armed) where the ring alone could not. See "the bypass
+  // pip never matches any lifecycle background colour" in render.test.mjs
+  // for the regression this guards.
+  //
+  // What stays deliberately restrained is its size and corner placement,
+  // not its opacity: a bypassed agent is a standing condition, often a
+  // chosen one, and a pip that took more of the key would compete with
+  // amber -- the one channel on this panel allowed to pull the eye. It
+  // says "this one has no brakes" to an operator who looks; it does not
+  // try to make them look.
+  //
+  // An unknown mode draws no pip. Absence must never be read as "default":
+  // that would tell the operator a session is guarded when we simply have
+  // not heard from it yet, which is the wrong direction to err.
+  const pip = permissionMode === "bypassPermissions"
+    ? `<circle cx="130" cy="14" r="7" fill="#0A0E13"/>`
+      + `<circle cx="130" cy="14" r="3.5" fill="#FFFFFF"/>`
+    : "";
+
+  // A halt is a fact about every agent, not one slot's state, so it hatches
+  // the whole key rather than living in a corner like the pip -- an event,
+  // where the pip is a standing condition. If Row 1 kept painting blue and
+  // green there would be no way to tell nothing can run.
+  const hatch = halted
+    ? `<defs><pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" `
+      + `patternTransform="rotate(45)"><rect width="3" height="8" fill="#000000" fill-opacity="0.55"/></pattern></defs>`
+      + `<rect width="144" height="144" fill="url(#hatch)"/>`
+    : "";
+
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">',
     `<rect width="144" height="144" fill="${color}"/>`,
@@ -61,6 +104,8 @@ export function renderSvg(slot: Slot, cfg: Config, armed: boolean): string {
     topText,
     bottomText,
     focusBorder,
+    pip,
+    hatch,
     "</svg>"
   ].join("");
 }

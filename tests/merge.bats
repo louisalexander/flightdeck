@@ -114,7 +114,7 @@ EOF
   before_sha="$(shasum "$TARGET")"
   run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"restored"* ]]
+  [[ "$output" == *"restored"* ]] || return 1
   after_sha="$(shasum "$TARGET")"
   [ "$before_sha" = "$after_sha" ]
 }
@@ -131,7 +131,7 @@ EOF
   run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
   unset FLEET_MERGE_HOOKS_FORCE_WRITE_FAILURE
   [ "$status" -eq 1 ]
-  [[ "$output" == *"restored"* ]]
+  [[ "$output" == *"restored"* ]] || return 1
   after_target_sha="$(shasum "$TARGET" | awk '{print $1}')"
   after_backup_sha="$(shasum "$BACKUP" | awk '{print $1}')"
   [ "$after_backup_sha" = "${before_backup_sha%% *}" ]
@@ -157,8 +157,8 @@ EOF
   [ "$(count_ours SessionStart)" -eq 1 ]
 
   surviving="$(python3 -c "import json; d=json.load(open('$TARGET')); print(d['hooks']['SessionStart'][0]['hooks'][0]['command'])")"
-  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]]
-  [[ "$surviving" != *"$OLD_REPO"* ]]
+  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]] || return 1
+  [[ "$surviving" != *"$OLD_REPO"* ]] || return 1
 }
 
 @test "MERGE: a genuinely foreign hook survives alongside a relocated-and-replaced flightdeck entry" {
@@ -193,6 +193,99 @@ d = json.load(open('$TARGET'))
 cmds = [h['command'] for e in d['hooks']['Stop'] for h in e['hooks'] if '/bin/fleet-emit' in h['command']]
 print(cmds[0])
 ")"
-  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]]
-  [[ "$surviving" != *"$OLD_REPO"* ]]
+  [[ "$surviving" == *"$REPO/bin/fleet-emit"* ]] || return 1
+  [[ "$surviving" != *"$OLD_REPO"* ]] || return 1
+}
+
+# PermissionRequest is what actually runs bin/fleet-decide -- without this
+# entry surviving the merge, Row 3's whole verdict flow is inert even
+# though fleet-decide itself works fine when invoked by hand.
+
+@test "MERGE: the merged settings carry a PermissionRequest hook naming fleet-decide, timed out AFTER fleet-decide's own wait" {
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  py() { python3 -c "import json; d=json.load(open('$TARGET')); print($1)"; }
+
+  [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 1 ]
+  [[ "$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]')" == *"/bin/fleet-decide"* ]] || return 1
+
+  # The relationship, not just a number: fleet-decide blocks for up to
+  # timings.decideTimeoutSecs (120s by default) before returning having
+  # emitted nothing. If Claude Code's own hook timeout fired FIRST, the
+  # killed process would leak its pending record -- the exact leak
+  # fleet-decide's own two hardening rounds were about. Reading
+  # fleetlib's default here (not hardcoding 120) means tuning that
+  # default without also widening this hook's timeout fails this test,
+  # rather than silently reintroducing the leak.
+  decide_default="$(python3 -c "
+import sys; sys.path.insert(0, '$BIN')
+import fleetlib
+print(fleetlib.DECIDE_TIMEOUT_DEFAULT_SECS)
+")"
+  hook_timeout="$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"]')"
+  [ "$hook_timeout" -gt "$decide_default" ]
+
+  # NEW-2 (round-2 review): the check above alone passed only because
+  # HOOK_TIMEOUT_SECS (130) minus DECIDE_TIMEOUT_CEILING_MARGIN_SECS (10)
+  # happens to equal DECIDE_TIMEOUT_DEFAULT_SECS (120) -- coincidence, not
+  # coverage. Bumping fleetlib.HOOK_TIMEOUT_SECS to 200 without touching
+  # this hook's deployed "timeout" widens the ceiling to 190, silently
+  # disables the clamp fleetlib._decide_timeout_secs enforces, and
+  # reopens the SIGKILL/pending-leak path -- while the check above stays
+  # green (190 > 120 still holds). Asserting against
+  # fleetlib.DECIDE_TIMEOUT_CEILING_SECS directly (never hardcoded) closes
+  # that gap: the deployed hook timeout must outlive the actual clamp
+  # ceiling, not just the unclamped default.
+  decide_ceiling="$(python3 -c "
+import sys; sys.path.insert(0, '$BIN')
+import fleetlib
+print(fleetlib.DECIDE_TIMEOUT_CEILING_SECS)
+")"
+  [ "$hook_timeout" -gt "$decide_ceiling" ]
+}
+
+@test "MERGE: a second run does not duplicate the PermissionRequest hook" {
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  cp "$TARGET" "$BACKUP"
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  py() { python3 -c "import json; d=json.load(open('$TARGET')); print($1)"; }
+  [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 1 ]
+}
+
+@test "MERGE: the halt clause survives the merge ahead of the resumed guard" {
+  # fleet-doctor's "halt clause precedes the resumed guard" check reads this
+  # same merged command string -- if a future edit to the snippet reordered
+  # the two clauses, the halt latch would stop taking priority over the
+  # Resumed guard (see tests/halt.bats B1) with nothing here to catch it.
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  python3 -c "
+import json
+cmd = json.load(open('$TARGET'))['hooks']['PreToolUse'][0]['hooks'][0]['command']
+assert cmd.index('/halt') < cmd.index('/blocked/'), 'halt clause must come first'
+"
+}
+
+@test "MERGE: a foreign PermissionRequest hook survives alongside ours" {
+  cat >"$TARGET" <<EOF
+{
+  "hooks": {
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/opt/other-plugin/decide.sh" }] }]
+  }
+}
+EOF
+  cp "$TARGET" "$BACKUP"
+
+  run "$BIN/fleet-merge-hooks" "$TARGET" "$SNIPPET" "$BACKUP"
+  [ "$status" -eq 0 ]
+
+  py() { python3 -c "import json; d=json.load(open('$TARGET')); print($1)"; }
+  [ "$(py 'len(d["hooks"]["PermissionRequest"])')" -eq 2 ]
+  [ "$(py 'd["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]')" = "/opt/other-plugin/decide.sh" ]
 }

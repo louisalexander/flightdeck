@@ -24,7 +24,12 @@ sf() {
   python3 -c "import json,sys;d=json.load(open('$FLEET_HOME/slots.json'));\
 print([s for s in d['slots'] if s['index']==$1][0]['$2'])"
 }
-top() { python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));print(d['$1'])"; }
+# json.dumps (not a bare print) so a dict/bool/null value round-trips
+# exactly, quotes and all -- callers that pattern-match on the rendered
+# JSON (e.g. the verdict tests below) depend on that. .get() rather than
+# [$1] so a genuinely absent key reads as the string "null", not a
+# KeyError, matching what a caller comparing against "null" expects.
+top() { python3 -c "import json;d=json.load(open('$FLEET_HOME/slots.json'));print(json.dumps(d.get('$1')))"; }
 
 @test "sessions claim the lowest free slot and the file always has 8 entries" {
   mksession A working flightdeck main
@@ -327,4 +332,120 @@ json.dump({"session_id":"B","state":"working","repo":"flightdeck",
 PY
   "$BIN/fleet-reconcile"
   [ "$(sf 0 label_bottom)" = "live-wins" ]
+# --- halt, verdict and permission_mode publishing --------------------------
+#
+# The plugin watches slots.json and nothing else -- one file, one watch. So
+# the halt latch, the currently-targeted permission request, and each slot's
+# permission mode all travel there rather than teaching the plugin a second
+# source to poll.
+#
+# Uses the single `top()` helper defined near the top of this file
+# (extended, not duplicated, so the pre-existing `top overflow` callers
+# below cannot silently start reading a shadowed definition -- see the
+# 2026-08-15 fix-round-1 report entry).
+
+@test "halted is false when no latch exists" {
+  "$BIN/fleet-reconcile"
+  [ "$(top halted)" = "false" ]
+}
+
+@test "halted is true when the latch exists" {
+  touch "$FLEET_HOME/halt"
+  "$BIN/fleet-reconcile"
+  [ "$(top halted)" = "true" ]
+}
+
+@test "verdict is null when nothing is pending" {
+  "$BIN/fleet-reconcile"
+  [ "$(top verdict)" = "null" ]
+}
+
+@test "verdict names the targeted session, tool and tier" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','suggestion':None,'repo':'flightdeck','cwd':'/tmp',
+           'repeats':3,'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [[ "$(top verdict)" == *'"tool": "Bash"'* ]] || return 1
+  [[ "$(top verdict)" == *'"tier": "high"'* ]] || return 1
+  [[ "$(top verdict)" == *'"repeats": 3'* ]] || return 1
+}
+
+# REMEMBER's armed face names the repository and the rule -- the stated
+# mitigation for the worktree trap, and undeliverable until slots.json
+# carried the rule at all. `repo` is the CANONICAL repository (fleet-decide
+# derives it from --git-common-dir); the AGENT is deliberately absent from
+# that face, since it is the one scope the press is not limited to.
+@test "verdict publishes the repository and the rule the armed REMEMBER face needs" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','repo':'flightdeck','cwd':'/tmp','repeats':1,
+           'suggestion':{'type':'addRules','destination':'localSettings','behavior':'allow',
+                         'rules':[{'toolName':'Bash','ruleContent':'git push:*'}]},
+           'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [[ "$(top verdict)" == *'"repo": "flightdeck"'* ]] || return 1
+  [[ "$(top verdict)" == *'"rule": "Bash(git push:*)"'* ]] || return 1
+}
+
+# DETAIL's identity line must read the same as the Row 1 key for the same
+# agent. The pending record's repo is the CANONICAL repository (for
+# REMEMBER's armed face); Row 1's label is the session's own repo, which for
+# a worktree session is the worktree. They differ for exactly the sessions
+# this fleet runs, so the two channels are read from their own sources.
+@test "verdict's agent line matches Row 1, while repo names the canonical repository" {
+  mksession S1 blocked rows-3-4 wt
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','suggestion':None,'repo':'flightdeck','cwd':'/tmp','repeats':1,
+           'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 label_top)" = "rows-3-4" ]
+  [[ "$(top verdict)" == *'"agent": "rows-3-4"'* ]] || return 1
+  [[ "$(top verdict)" == *'"repo": "flightdeck"'* ]] || return 1
+}
+
+@test "verdict publishes an empty rule when Claude Code offered no suggestion" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'x',
+           'tier':'high','suggestion':None,'repo':'flightdeck','cwd':'/tmp','repeats':1,
+           'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [[ "$(top verdict)" == *'"rule": ""'* ]] || return 1
+}
+
+@test "verdict never carries input_summary onto slots.json" {
+  mkdir -p "$FLEET_HOME/pending"
+  python3 -c "
+import json
+json.dump({'session_id':'S1','tool':'Bash','input_digest':'d','input_summary':'rm -rf /secret',
+           'tier':'high','suggestion':None,'repo':'flightdeck','cwd':'/tmp',
+           'repeats':1,'requested_at':int(__import__('time').time())}, open('$FLEET_HOME/pending/S1.json','w'))"
+  "$BIN/fleet-reconcile"
+  [[ "$(top verdict)" != *'input_summary'* ]] || return 1
+  [[ "$(top verdict)" != *'rm -rf'* ]] || return 1
+}
+
+@test "a slot carries its session's permission_mode" {
+  mksession A working flightdeck main
+  python3 -c "
+import json
+p='$FLEET_HOME/sessions/A.json'
+d=json.load(open(p)); d['permission_mode']='bypassPermissions'; json.dump(d, open(p,'w'))"
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 permission_mode)" = "bypassPermissions" ]
+}
+
+@test "a slot with no known permission_mode defaults to empty" {
+  mksession A working flightdeck main
+  "$BIN/fleet-reconcile"
+  [ "$(sf 0 permission_mode)" = "" ]
 }
