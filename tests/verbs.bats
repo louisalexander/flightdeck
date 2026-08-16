@@ -167,8 +167,8 @@ MD
   # operator asked for -- so landing it on main is worse here than it
   # would be for COMMIT, which at least says "commit" on the key.
   run "$BIN/fleet-verbs" show fork
-  [[ "$output" == *"default branch"* ]]
-  [[ "$output" == *"branch first"* ]]
+  [[ "$output" == *"default branch"* ]] || return 1
+  [[ "$output" == *"branch first"* ]] || return 1
 }
 
 @test "FORK's branch-first rule sits with the commit step, not at the end" {
