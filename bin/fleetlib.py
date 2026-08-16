@@ -608,7 +608,16 @@ def load_config():
 
 # --- labels ----------------------------------------------------------------
 
-DEFAULT_PREFIXES = ("feat/", "fix/", "chore/", "feature/")
+# Mirrors labels.stripPrefixes in config/fleet.json; that is what actually
+# runs, this is the fallback when the key is absent. Keep the two in step.
+#
+# "worktree-" is not a convention, it is what fleet-spawn names every branch
+# it creates -- so it is shared by every worktree key on the deck and carries
+# no information. Unstripped it is the FIRST token, the one shorten protects,
+# so it survived while the distinguishing tokens were trimmed to fit around
+# it: five live worktrees rendered workt-title, workt-issue, worktr-blue,
+# worktr-note and worktree-4.
+DEFAULT_PREFIXES = ("feat/", "fix/", "chore/", "feature/", "worktree-")
 
 def shorten(text, max_chars=11, strip_prefixes=DEFAULT_PREFIXES):
     """Token-aware shortening.
@@ -779,10 +788,12 @@ def canonical_repo_name(cwd, timeout=2):
     rather than falling back to a path component: a wrong repository name
     on that key is worse than none.
 
-    timeout defaults to 2s, not git()'s 15: the one caller (bin/fleet-decide)
-    runs this before staging its pending record, in front of the
-    amber-immediately guarantee that is that hook's whole advantage over
-    the ~6s Notification debounce. A wedged git must not sit there.
+    timeout defaults to 2s, not git()'s 15, because both callers sit on a
+    latency path: bin/fleet-decide runs this before staging its pending
+    record, in front of the amber-immediately guarantee that is that hook's
+    whole advantage over the ~6s Notification debounce, and bin/fleet-emit
+    runs it on every hook firing of every session. A wedged git must not sit
+    on either.
     """
     if not cwd:
         return ""

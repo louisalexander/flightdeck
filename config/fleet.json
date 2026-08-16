@@ -1,7 +1,7 @@
 {
   "slots": { "count": 8 },
   "timings": { "armMs": 3000, "longPressMs": 800, "reaperSeconds": 15, "verbArmSecs": 10, "confirmQueueSecs": 300 },
-  "labels": { "maxChars": 11, "stripPrefixes": ["feat/", "fix/", "chore/", "feature/"] },
+  "labels": { "maxChars": 11, "stripPrefixes": ["feat/", "fix/", "chore/", "feature/", "worktree-"] },
   "renderers": [],
   "boot": { "enabled": true, "durationMs": 2000 },
   "states": {

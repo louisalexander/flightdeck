@@ -146,10 +146,22 @@ def run(event):
     iterm_uuid = iterm.split(":", 1)[1] if ":" in iterm else ""
     host = "iterm2" if iterm_uuid else "unknown"
 
-    repo = branch = ""
-    code, top = fleetlib.git(["rev-parse", "--show-toplevel"], cwd)
-    if code == 0 and top:
-        repo = Path(top).name
+    branch = ""
+    # The REPOSITORY, not this working tree. A linked worktree's
+    # --show-toplevel is the worktree itself, so the label used to read the
+    # worktree's directory name -- a FORK-spawned agent showed "issue-13"
+    # with nothing about which repo it belonged to.
+    #
+    # Shares fleetlib.canonical_repo_name with fleet-decide rather than
+    # repeating the derivation: that helper also handles a relative
+    # --git-common-dir, a git that fails outright, and a bare repo whose
+    # common dir is not named ".git" -- cases an inline `.parent.name`
+    # gets wrong.
+    repo = fleetlib.canonical_repo_name(cwd)
+    if repo:
+        # Branch stays per-worktree. Only the repo half moves -- taking the
+        # branch from the primary checkout would report one branch for
+        # every worktree of a repo, which is the opposite of useful.
         _, branch = fleetlib.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
 
     now = int(time.time())
