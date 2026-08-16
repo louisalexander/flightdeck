@@ -403,13 +403,21 @@ UUID_RE = re.compile(
 #
 # Walks windows -> tabs -> sessions because top-level `session id "..."`
 # addressing errors with -1728 (see fleet-focus:38).
+#
+# The separator is hoisted OUT of the tell block deliberately. Inside
+# `tell application "iTerm2"`, the bare word `tab` resolves to iTerm2's tab
+# class rather than AppleScript's tab character, and stringifies as the
+# literal word "tab" -- so every line fails the UUID<TAB>name parse below
+# and the whole map comes back empty. That failure is invisible (every key
+# just keeps its branch label), so it has to be prevented here.
 ITERM_TITLES_SCRIPT = '''
+set sep to (ASCII character 9)
 tell application "iTerm2"
   set out to ""
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
-        set out to out & (id of s) & tab & (name of s) & linefeed
+        set out to out & (id of s) & sep & (name of s) & linefeed
       end repeat
     end repeat
   end repeat

@@ -58,8 +58,14 @@ def pinned_slot(index, pin):
             "focused": False}
 
 
-def session_slot(index, session, max_chars, prefixes, focus_id=""):
-    title = (session.get("title") or "").strip()
+def session_slot(index, session, max_chars, prefixes, focus_id="", titles=None):
+    # Precedence: the live iTerm2 task title, then the session record's own
+    # title, then the branch. The middle rung looks dead -- fleet-emit
+    # hardcodes "title": "" -- but it is the documented shape of a session
+    # record and tests/reconcile.bats asserts it beats the branch, so it
+    # stays as the seam a non-iTerm host would write.
+    raw = (titles or {}).get(session.get("iterm_session", ""), "")
+    title = fleetlib.clean_title(raw) or (session.get("title") or "").strip()
     bottom = title if title else (session.get("branch") or "")
     return {"index": index,
             "state": session.get("state", "idle"),
@@ -161,6 +167,10 @@ def main():
             break
         held[index] = pending.pop(0)
 
+    # One osascript for the whole fleet, not one per session. Empty on any
+    # failure, which falls every key back to its branch label.
+    titles = fleetlib.iterm_session_titles()
+
     # Pass 3: render.
     slots = []
     for index in range(count):
@@ -168,7 +178,8 @@ def main():
         if pin:
             slots.append(pinned_slot(index, pin))
         elif index in held:
-            slots.append(session_slot(index, by_id[held[index]], max_chars, prefixes, focus_id))
+            slots.append(session_slot(index, by_id[held[index]], max_chars,
+                                      prefixes, focus_id, titles))
         else:
             slots.append(empty_slot(index))
 

@@ -197,6 +197,17 @@ class ItermSessionTitlesTests(unittest.TestCase):
         self._stub("true")
         self.assertEqual(fleetlib.iterm_session_titles(), {})
 
+    def test_the_separator_is_not_the_bare_applescript_tab_keyword(self):
+        # Every test above stubs osascript, so none of them can see what the
+        # real script emits. Inside `tell application "iTerm2"` the bare word
+        # `tab` resolves to iTerm2's tab class, not the tab character, and
+        # stringifies as the literal word "tab" -- so every line fails the
+        # UUID<TAB>name parse and the map comes back empty on a real Mac
+        # while the whole suite stays green. Caught once; guarded here.
+        script = fleetlib.ITERM_TITLES_SCRIPT
+        self.assertIn("ASCII character 9", script)
+        self.assertNotIn("& tab &", script)
+
 
 class DeepMergeTests(unittest.TestCase):
     """New direct coverage: config.bats exercises deep_merge only
