@@ -22,5 +22,14 @@ decide without re-deriving the work:
   explicit "not tested on real hardware" far more than silence.
 - Anything deliberately left out, so it does not read as an oversight.
 
+Open it and stop. Do not merge it, do not enable auto-merge, and do not go
+back to editing the branch it is built on — a reviewer looking at a moving
+PR cannot review it.
+
 If the repository has no GitHub remote, or `gh` is not authenticated, say so
 and print the PR body you would have filed rather than failing quietly.
+
+The body is the work; what you say here is a receipt. End with the PR's URL,
+one line, and do not paste the body back into the terminal — it is already
+on the page I am about to open. Done is a pull request a reviewer could act
+on without asking you a question first.

@@ -24,10 +24,14 @@ Look hardest at the things a fresh reviewer catches and an author does not:
 - **Tests that would pass if the feature were deleted.** If a test cannot
   fail, it is documentation with a runner attached.
 
-Report findings worst-first, each with the file and line, and say plainly
-which ones you think are worth fixing versus which you would leave.
+Report findings worst-first, at most five, each with the file and line and
+about two lines on what is wrong and why it matters here. Say plainly which
+ones you think are worth fixing and which you would leave. If you found more
+than five, the five you chose *are* the review — a sixth I never scroll far
+enough to reach is worth less than the five I read, and choosing them is
+part of what I am asking you to do.
 
-If the work is genuinely clean, say so in a sentence and stop. Do not pad the
-list to look thorough — an invented finding costs me more time than it saves.
+If the work is genuinely clean, say so in a sentence and stop.
 
-Do not fix anything. Report first; wait to be told.
+Do not fix anything. Report first; wait to be told. You are done when I could
+hand this tree to someone else knowing what they will find in it.

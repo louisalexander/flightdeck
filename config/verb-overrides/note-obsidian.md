@@ -32,13 +32,14 @@ vault id is `flightdeck`; dates and times are local.
   entries are not yours to rewrite.
 - Head each entry `## HH:MM — <repo> · <branch>`, so a day reads as a
   timeline across the whole fleet rather than a pile of prose.
-- Tell me the path you wrote to.
+
+Then tell me where it landed, in one line — the note path, nothing else.
+The summary is the note; repeating it here spends the one glance I have on
+something I already have somewhere better. You are done when the session is
+recoverable by someone who was not here.
 
 If the Obsidian MCP tools are not available in this session, do not
 improvise a path on disk and do not journal into whatever vault you can
 find. Say plainly that you cannot journal this, and print the summary
 here instead. A summary I still have to paste somewhere is recoverable; a
 note written where nobody will look for it is not.
-
-Do not do any of the work you are describing. Summarising it is the whole
-job.

@@ -8,6 +8,8 @@ Lead with the thing that changes what they do next.
   there is nothing to report, say so in a sentence and stop. Never
   manufacture a finding, an objection or a concern to look thorough — an
   invented one costs more time than it saves.
-- **Do not do the work you are describing.** Reporting, filing, summarising
-  and challenging are each a complete job. Unless what follows says
-  otherwise, stop when the answer is written and wait.
+- **The key is the whole job.** Each one does a single thing and stops at a
+  boundary it names: report without fixing, file without solving, commit
+  without pushing. Reaching that boundary is finishing, not stopping short.
+  Do not carry on into the work the key points at — I press a different key
+  for that, and I may not want it done at all.

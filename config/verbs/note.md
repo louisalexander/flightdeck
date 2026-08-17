@@ -25,5 +25,11 @@ there, and tell me where it landed. If it has none, say plainly that you
 cannot journal this, and print the summary here instead. Pressing this
 key must never silently lose the only copy.
 
-Do not do any of the work you are describing. Summarising it is the whole
-job.
+The note is the work; what you say here is a receipt. When it lands in a
+sink, one line naming where — the path, or the note's title — is the whole
+reply. The summary belongs in the note, not in the note and then again in
+the scrollback. Printing it here is what you do when there is nowhere to
+put it, not the default.
+
+Done when tomorrow's version of me can open that note and resume from it
+without reading a line of this scrollback.
