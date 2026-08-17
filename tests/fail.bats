@@ -42,6 +42,64 @@ state() { python3 -c "import json;print(json.load(open('$BATS_TEST_TMPDIR/sessio
   [ "$(state)" = "working" ]
 }
 
+@test "--explain exits 0 and prints a contract" {
+  run "$BIN/fleet-fail" --explain
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  [ "${#output}" -gt 200 ]
+  [[ "$output" == *"fleet-fail"* ]] || return 1
+  [[ "$output" == *"ITERM_SESSION_ID"* ]] || return 1
+  [[ "$output" == *"Exit status"* ]] || return 1
+  # --explain is a read: it must not mark anything.
+  [ "$(state)" = "working" ]
+}
+
+@test "no argument resolves the caller's own slot and marks it failed" {
+  export ITERM_SESSION_ID="w0t0p0:U"
+  run "$BIN/fleet-fail"
+  [ "$status" -eq 0 ]
+  [ "$(state)" = "failed" ]
+}
+
+@test "--clear with no argument resolves the caller's own slot and clears it" {
+  export ITERM_SESSION_ID="w0t0p0:U"
+  "$BIN/fleet-fail"
+  [ "$(state)" = "failed" ]
+  run "$BIN/fleet-fail" --clear
+  [ "$status" -eq 0 ]
+  [ "$(state)" = "idle" ]
+}
+
+@test "no argument with ITERM_SESSION_ID unset exits non-zero and marks nothing" {
+  unset ITERM_SESSION_ID
+  run "$BIN/fleet-fail"
+  [ "$status" -ne 0 ]
+  [ "$(state)" = "working" ]
+  [[ "$output" == *"fleet-fail"* ]] || return 1
+}
+
+@test "no argument with a malformed ITERM_SESSION_ID exits non-zero and marks nothing" {
+  export ITERM_SESSION_ID="no-colon-here"
+  run "$BIN/fleet-fail"
+  [ "$status" -ne 0 ]
+  [ "$(state)" = "working" ]
+}
+
+@test "no argument whose session matches no slot exits non-zero and marks nothing" {
+  export ITERM_SESSION_ID="w0t0p0:NOT-ON-THE-DECK"
+  run "$BIN/fleet-fail"
+  [ "$status" -ne 0 ]
+  [ "$(state)" = "working" ]
+  [[ "$output" == *"fleet-fail"* ]] || return 1
+}
+
+@test "an explicit slot ignores ITERM_SESSION_ID entirely" {
+  export ITERM_SESSION_ID="w0t0p0:NOT-ON-THE-DECK"
+  run "$BIN/fleet-fail" 0
+  [ "$status" -eq 0 ]
+  [ "$(state)" = "failed" ]
+}
+
 @test "a wedged fleet-reconcile subprocess does not hang fleet-fail; it returns promptly with exit 0" {
   # Disable FLEET_SKIP_RECONCILE so fleet-fail will invoke fleet-reconcile
   unset FLEET_SKIP_RECONCILE
