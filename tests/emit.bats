@@ -509,3 +509,96 @@ print([r.get('notification_type') for r in rows if r['event']=='Notification'][0
   emit Stop '{"session_id":"S1","cwd":"/tmp"}'
   [ "$(field permission_mode)" = "bypassPermissions" ]
 }
+
+# --- failed is sticky across Stop ------------------------------------------
+#
+# README:28 documents `failed` as "Observed failure, sticky until cleared".
+# It was not: Stop maps to `done` and the session write was unconditional, so
+# the Stop hook of the very turn that ran `bin/fleet-fail` painted the slot
+# green again a second later. That made the TEST verb useless -- the one mark
+# a Row 2 verb can leave on the deck was erased by the turn that left it.
+#
+# Only Stop preserves it. Every other transition still clears it, and each is
+# a case where something newer is more worth showing than the old failure:
+# UserPromptSubmit means the operator has given a fresh instruction and so
+# superseded it, Notification means the agent is stuck on a decision (more
+# actionable than a failure), SessionStart means a new session entirely.
+#
+# `failed` is written by bin/fleet-fail (and by the abnormal-SessionEnd path),
+# neither of which fleet-emit's Stop path can produce, so these fixtures set
+# the state the way fleet-fail does: take the record the last hook wrote and
+# rewrite its `state`.
+
+mark_failed() {
+  python3 -c "
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d['state'] = 'failed'
+json.dump(d, open(p, 'w'))" "$FLEET_HOME/sessions/S1.json"
+}
+
+@test "STICKY: a failed session stays failed across Stop" {
+  emit UserPromptSubmit
+  mark_failed
+  [ "$(field state)" = "failed" ]
+  emit Stop
+  [ "$(field state)" = "failed" ]
+}
+
+@test "STICKY: a failed session stays failed across a Stop with background work in flight" {
+  emit UserPromptSubmit
+  mark_failed
+  stop_bg '[{"id":"a91","type":"subagent","status":"running","description":"d"}]'
+  [ "$(field state)" = "failed" ]
+}
+
+# The drain path: a Stop that carries a queued verb normally writes
+# DRAIN_STATE (`working`) rather than the event's own state. A session that
+# failed its tests and is being handed another verb has not stopped having
+# failed, so the mark outlives that write too -- it clears when the operator
+# clears it, not when the deck hands the agent more work.
+@test "STICKY: a failed session stays failed across a Stop that drains a queued verb" {
+  emit UserPromptSubmit
+  mark_failed
+  mkdir -p "$FLEET_HOME/queue"
+  python3 -c "
+import json
+json.dump({'verb':'test','prompt':'run the suite','verb_path':'','queued_at':1},
+          open('$FLEET_HOME/queue/S1.json','w'))"
+  run bash -c "printf '%s' '$PAYLOAD' | '$BIN/fleet-emit' Stop"
+  [ "$status" -eq 0 ]
+  # The verb was still delivered -- stickiness must not swallow the drain.
+  [ "$(printf '%s' "$output" | python3 -c 'import json,sys;print(json.load(sys.stdin)["decision"])')" = "block" ]
+  [ "$(field state)" = "failed" ]
+}
+
+@test "STICKY: UserPromptSubmit clears a failed session to working" {
+  emit UserPromptSubmit
+  mark_failed
+  emit UserPromptSubmit
+  [ "$(field state)" = "working" ]
+}
+
+@test "STICKY: Notification clears a failed session to blocked" {
+  emit UserPromptSubmit
+  mark_failed
+  emit Notification
+  [ "$(field state)" = "blocked" ]
+}
+
+@test "STICKY: SessionStart clears a failed session to idle" {
+  emit UserPromptSubmit
+  mark_failed
+  emit SessionStart
+  [ "$(field state)" = "idle" ]
+}
+
+# The regression guard: preserving `failed` must not have made every prior
+# state survive a Stop. A working session still finishes green.
+@test "STICKY: a non-failed session still goes done on Stop" {
+  emit UserPromptSubmit
+  [ "$(field state)" = "working" ]
+  emit Stop
+  [ "$(field state)" = "done" ]
+}
