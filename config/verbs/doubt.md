@@ -20,9 +20,15 @@ at the shape of the work in general. "This might not scale" is not an
 argument; "this reads the whole file into memory and the inputs are
 gigabytes" is.
 
-If the approach survives the challenge, say so plainly in a sentence and
-carry on — do not manufacture objections to look rigorous. A real "this is
-sound, here is the one thing I would watch" is far more useful than five
-invented concerns.
+Strongest objection first, and stop at three. The fourth is by definition
+weaker than the three above it, and it costs a scroll I will not make. Each
+one is a couple of lines: what is wrong, and what it breaks.
+
+If the approach survives the challenge, say so plainly in one sentence and
+carry on. "This is sound, here is the one thing I would watch" is a better
+answer than three objections of descending quality.
 
 If it does not survive, say what you would do instead and what it costs.
+
+You are done when I can either defend this approach out loud or see the
+single thing that makes it indefensible.

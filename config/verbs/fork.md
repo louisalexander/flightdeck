@@ -3,6 +3,7 @@ id: fork
 label: FORK
 interrupt: false
 confirm: true
+common: git
 ---
 Something separate from the current task has come up in this conversation.
 Park it properly and hand it to a fresh agent, then carry on with what you
@@ -24,12 +25,11 @@ If there is, then:
    code, the constraints that apply, and what "done" looks like. This
    document is the entire handover — a thin plan produces a lost agent.
 
-2. Commit the plan to the branch you are on. If you are on the default
-   branch, create a branch first and say so — the plan file is a side
-   effect of parking work, not a commit that was asked for, and it must
-   not land on the default branch. It must be committed before step 4:
-   the new worktree is branched from this branch and will contain only
-   what is committed here.
+2. Commit the plan. It is a side effect of parking work, not a commit
+   anyone asked for, so it goes in on its own rather than swept up with
+   whatever else is in the tree. It must be committed before step 4: the
+   new worktree is branched from the branch you are on now, and will
+   contain only what is committed here.
 
 3. File the issue with `gh issue create`. The body must name the plan's
    path, the branch it was committed on, and the commit SHA. Keep the body
@@ -49,6 +49,8 @@ If there is, then:
    line what you forked and where it went. Do not start executing the plan
    you just wrote — another agent now has it.
 
-If any step fails, stop at that step and report it rather than working
-around it. A half-forked task, where the issue exists but no agent is
-working it, is worse than one that plainly did not happen.
+Done is three things that did not exist a minute ago: a plan committed on
+this branch, an issue pointing at it, and an agent running against that
+issue. If any step fails, stop at that step and report it rather than
+working around it. A half-forked task, where the issue exists but no agent
+is working it, is worse than one that plainly did not happen.

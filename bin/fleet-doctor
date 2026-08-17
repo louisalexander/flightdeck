@@ -138,6 +138,40 @@ def main():
     else:
         bad("{} not found".format(settings), "run claude once, then ./install.sh")
 
+    # Every prompt verb now depends on config/verbs/_common.md, and a local
+    # $FLEET_HOME/verbs/_common.md overrides it -- so one broken or empty
+    # fragment stops all twelve Row 2 prompt keys at once, where a broken
+    # verb file stops one. That is a deliberate trade (the alternative is
+    # degrading silently to a prompt missing the rules that make it safe),
+    # and this is the check that makes it diagnosable in one command rather
+    # than mysterious at the deck. Asking fleet-verbs itself, rather than
+    # re-implementing the lookup here, so the two cannot disagree.
+    verbs_dir = fleetlib.repo_root() / "config" / "verbs"
+    resolver = fleetlib.repo_root() / "bin" / "fleet-verbs"
+    # A `_`-prefixed file is a fragment, not a verb, and `show _common` is
+    # refused by design -- it is exercised by the verbs that include it.
+    verb_ids = sorted(p.stem for p in verbs_dir.glob("*.md")
+                      if not p.name.startswith("_"))
+    broken, reasons = [], []
+    for verb_id in verb_ids:
+        result = subprocess.run([sys.executable, str(resolver), "show", verb_id],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            broken.append(verb_id)
+            # One shared cause produces one message per verb, and printing
+            # twelve copies of it buries the thing the reader needs.
+            reason = result.stderr.decode("utf-8", "replace").strip() or "no output"
+            if reason not in reasons:
+                reasons.append(reason)
+    if not verb_ids:
+        bad("no verbs found in {}".format(verbs_dir))
+    elif broken:
+        bad("{} of {} verbs do not resolve: {}".format(
+                len(broken), len(verb_ids), " ".join(broken)),
+            "; ".join(reasons))
+    else:
+        ok("all {} shipped verbs resolve".format(len(verb_ids)))
+
     # A latched halt nobody remembers setting looks exactly like a broken
     # fleet: every session sits blocked or denied and there is no other
     # signal on the panel pointing at the cause.
