@@ -512,8 +512,10 @@ print([r.get('notification_type') for r in rows if r['event']=='Notification'][0
 
 # --- failed is sticky across Stop ------------------------------------------
 #
-# README:28 documents `failed` as "Observed failure, sticky until cleared".
-# It was not: Stop maps to `done` and the session write was unconditional, so
+# README:28 documents `failed` as surviving the turn ending, until the next
+# prompt, block, session start or `fleet-fail --clear`. Before this change it
+# survived none of them, that row read "sticky until cleared", and neither
+# was true: Stop maps to `done` and the session write was unconditional, so
 # the Stop hook of the very turn that ran `bin/fleet-fail` painted the slot
 # green again a second later. That made the TEST verb useless -- the one mark
 # a Row 2 verb can leave on the deck was erased by the turn that left it.
