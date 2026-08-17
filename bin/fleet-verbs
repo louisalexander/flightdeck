@@ -50,13 +50,17 @@ COMMON_FRAGMENTS = {"git": "_common-git.md"}
 
 
 class FragmentError(Exception):
-    """A fragment the composed prompt needs is missing or empty.
+    """A fragment the composed prompt needs is missing, empty, or misnamed.
 
     Its own exception rather than a None return so the failure can be
     reported naming the FRAGMENT. Every prompt verb depends on `_common.md`,
     so a broken one takes out all of Row 2 at once, and "no such verb: diff"
     would send whoever is holding the deck hunting through diff.md for a
     problem that is not there.
+
+    A `common:` value with no fragment behind it is the same failure reached
+    from the other end -- the verb file is present and parses, and only the
+    flag is wrong -- so it reports the same way rather than as a missing verb.
     """
 
 
@@ -147,7 +151,9 @@ def parse_verb(text):
         return None
     common = meta.get("common", "").strip().lower()
     if common and common not in COMMON_FRAGMENTS:
-        return None
+        raise FragmentError("unknown common: value {!r} in verb frontmatter "
+                            "(known: {})".format(
+                                common, ", ".join(sorted(COMMON_FRAGMENTS))))
     return {
         "key": key,
         "common": common,
@@ -194,6 +200,11 @@ def load_verb(verb_id):
         return None, None
     try:
         parsed = parse_verb(path.read_text(encoding="utf-8"))
+    except FragmentError:
+        # Not an unreadable file: the verb parsed and named a fragment that
+        # does not exist. Let it past the catch-all below so main() can say
+        # which flag was wrong instead of denying the verb exists.
+        raise
     except Exception:
         return None, None
     if parsed is None:

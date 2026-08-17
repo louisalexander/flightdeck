@@ -199,20 +199,46 @@ MD
   [[ "$output" == *"Return to what you were doing"* ]] || return 1
 }
 
-@test "FORK branches first when on the default branch" {
-  # The plan file is a side effect of parking work, not a commit the
-  # operator asked for -- so landing it on main is worse here than it
-  # would be for COMMIT, which at least says "commit" on the key.
+@test "FORK gets the branch-first rule from the fragment, and says it once" {
+  # It used to say it itself, in step 2. `_common-git.md` owns the rule now
+  # and FORK opts in with `common: git`, so a copy in the body is the same
+  # drift the staging rule had -- two statements of one rule, free to
+  # disagree. The claim is both halves: the rule arrives, and it arrives
+  # exactly once.
+  local rule
+  rule="$(grep -F 'Branch first' "$ROOT/config/verbs/_common-git.md")"
+  [ -n "$rule" ]
   run "$BIN/fleet-verbs" show fork
-  [[ "$output" == *"default branch"* ]] || return 1
-  [[ "$output" == *"branch first"* ]] || return 1
+  [ "$status" -eq 0 ]
+  # -e, because the rule is a markdown bullet and grep would read a leading
+  # dash as an option.
+  [ "$(printf '%s\n' "$output" | grep -cF -e "$rule")" -eq 1 ]
+  if grep -iq 'branch first' "$ROOT/config/verbs/fork.md"; then
+    echo "fork.md restates a rule _common-git.md owns"
+    false
+  fi
 }
 
-@test "FORK's branch-first rule sits with the commit step, not at the end" {
-  # A rule stated after step 4 is a rule the agent reads after it has
-  # already committed.
+@test "FORK reads the branch-first rule before the step that commits" {
+  # A rule stated after the commit step is a rule the agent reads once it
+  # has already committed. Composition puts it in front of the whole body,
+  # which is what makes it true now -- worth pinning, because "the preamble
+  # goes first" is the thing that would break silently if the order ever
+  # flipped.
   run "$BIN/fleet-verbs" show fork
-  before=$(printf '%s' "$output" | grep -n "branch first" | head -1 | cut -d: -f1)
+  before=$(printf '%s' "$output" | grep -n "Branch first" | head -1 | cut -d: -f1)
+  after=$(printf '%s' "$output" | grep -n "Commit the plan" | head -1 | cut -d: -f1)
+  [ -n "$before" ]
+  [ -n "$after" ]
+  [ "$before" -lt "$after" ]
+}
+
+@test "FORK requires the plan committed before the worktree is spawned" {
+  # The one thing about the old step 2 that was genuinely FORK's and not
+  # the shared rule's: fleet-spawn branches the new worktree from this
+  # branch, so an uncommitted plan is a plan the spawned agent cannot read.
+  run "$BIN/fleet-verbs" show fork
+  before=$(printf '%s' "$output" | grep -n "committed before" | head -1 | cut -d: -f1)
   after=$(printf '%s' "$output" | grep -n "fleet-spawn" | head -1 | cut -d: -f1)
   [ -n "$before" ]
   [ -n "$after" ]
@@ -454,6 +480,27 @@ body
 MD
   run "$BIN/fleet-verbs" show typo
   [ "$status" -eq 1 ]
+}
+
+@test "SPINE: a bad common: value names the flag, not 'no such verb'" {
+  # The file is right there and resolves fine; only the flag is wrong.
+  # Reporting it as a missing verb sends the reader hunting for a file that
+  # exists, which is the same wrong turn the fragment errors were shaped to
+  # avoid. Name the flag and the values that would have worked.
+  cat > "$FLEET_HOME/verbs/typo.md" <<'MD'
+---
+id: typo
+label: TYPO
+common: gti
+---
+body
+MD
+  run --separate-stderr "$BIN/fleet-verbs" show typo
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"common"* ]] || return 1
+  [[ "$stderr" == *"gti"* ]] || return 1
+  [[ "$stderr" != *"no such verb"* ]] || return 1
 }
 
 @test "SPINE: a fragment is not a verb and cannot be resolved as one" {
