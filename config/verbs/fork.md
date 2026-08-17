@@ -3,6 +3,7 @@ id: fork
 label: FORK
 interrupt: false
 confirm: true
+common: git
 ---
 Something separate from the current task has come up in this conversation.
 Park it properly and hand it to a fresh agent, then carry on with what you

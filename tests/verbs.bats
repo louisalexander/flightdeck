@@ -9,6 +9,36 @@ setup() {
   mkdir -p "$FLEET_HOME/verbs"
 }
 
+# True when any non-blank line of the fragment file $2 appears verbatim as a
+# line of the text $1. Line-wise and fixed-string, rather than grepping for a
+# phrase someone chose today: reword the fragment and these checks still test
+# the same claim, because the fragment file is the pattern.
+#
+# `awk NF` rather than a grep character class, only because a bracket
+# expression here would look like an assertion to run.sh's inert-assertion
+# lint, which greps this file for a doubled open bracket.
+carries_fragment() {
+  local lines="$BATS_TEST_TMPDIR/fragment-lines"
+  awk 'NF' "$2" > "$lines"
+  printf '%s\n' "$1" | grep -qxFf "$lines"
+}
+
+# The shipped verbs that receive a prompt: everything that is not a fragment
+# (`_`-prefixed), not a steer verb (its body is a deny message) and not a
+# keystroke verb (it sends a key and no prompt at all). Asked of fleet-verbs
+# rather than grepped out of the frontmatter, for the reason the REACHABLE
+# test gives below: the parser's own rule cannot drift from itself.
+prompt_verbs() {
+  local f id
+  for f in "$ROOT"/config/verbs/*.md; do
+    id="$(basename "$f" .md)"
+    case "$id" in _*) continue ;; esac
+    "$BIN/fleet-verbs" --steer "$id" >/dev/null 2>&1 && continue
+    [ "$("$BIN/fleet-verbs" keyinfo "$id")" = "key= requires=" ] || continue
+    printf '%s\n' "$id"
+  done
+}
+
 @test "a shipped verb resolves to its prompt body" {
   run "$BIN/fleet-verbs" show test
   [ "$status" -eq 0 ]
@@ -62,6 +92,11 @@ setup() {
 }
 
 @test "a local override wins over the shipped verb" {
+  # The body is the override's and none of the shipped one's. Asserted as
+  # "ends with" rather than "equals" since the shared preamble goes in front
+  # of every prompt verb -- an override inherits the spine, deliberately
+  # (see the SPINE tests below), and replacing a verb was never meant to
+  # mean opting out of the rules that hold for all of them.
   cat > "$FLEET_HOME/verbs/test.md" <<'MD'
 ---
 id: test
@@ -70,7 +105,9 @@ label: TEST
 overridden body
 MD
   run "$BIN/fleet-verbs" show test
-  [ "$output" = "overridden body" ]
+  [ "$status" -eq 0 ]
+  [ "${output: -15}" = "overridden body" ]
+  [[ "$output" != *"fleet-fail"* ]] || return 1
 }
 
 @test "path reports which file won" {
@@ -236,6 +273,10 @@ MD
   for f in "$ROOT"/config/verbs/*.md; do
     local id
     id="$(basename "$f" .md)"
+    # A `_`-prefixed file is a shared fragment, not a verb: it has no
+    # frontmatter, no id, and `fleet-verbs show _common` is refused by
+    # design. Nothing in the picker could name it, and nothing should.
+    case "$id" in _*) continue ;; esac
     # A steer verb is not a Row 2 command verb: it is never bound to a Row 2
     # key, so it has no property-inspector entry by design. It is reached
     # only via `fleet-verbs --steer <id>`, wired to Row 3 steer keys
@@ -293,4 +334,201 @@ MD
 
 @test "STEER: dryrun ships but is not bound to a key by default" {
   [ -f "$ROOT/config/verbs/dryrun.md" ]
+}
+
+# --- the prompt spine -----------------------------------------------------
+#
+# Each verb was written in its own session, so the rules that are true for all
+# of them ended up wherever their author happened to think of them: the
+# staging rule was written three times and missing from the fourth verb that
+# commits, and the fact that the operator is watching a panel -- the most
+# load-bearing thing an agent can know here -- appeared in one file out of
+# twelve. `_common.md` and `_common-git.md` now own those rules, and
+# `fleet-verbs` prepends them at resolve time.
+#
+# These tests assert the spine, never the prose. Nothing here can tell whether
+# a prompt is any good; they check that the shared rules reach exactly the
+# verbs they apply to and no others, and that no verb body restates one.
+
+@test "SPINE: every prompt verb's prompt begins with the shared preamble" {
+  # Compared against the file itself rather than a phrase grepped out of it,
+  # so rewording the preamble cannot break this test -- the claim is
+  # structural: the panel context frames everything the agent then reads.
+  local pre id offenders=""
+  pre="$(cat "$ROOT/config/verbs/_common.md")"
+  [ -n "$(prompt_verbs)" ]
+  for id in $(prompt_verbs); do
+    run "$BIN/fleet-verbs" show "$id"
+    [ "$status" -eq 0 ]
+    [ "${output:0:${#pre}}" = "$pre" ] || offenders="$offenders $id"
+  done
+  [ -z "$offenders" ] || { echo "does not begin with the preamble:$offenders"; false; }
+}
+
+@test "SPINE: a steer verb's deny message carries no preamble" {
+  # A deny message is read inside a refused tool call. A preamble addressed
+  # to an agent doing work would read as nonsense there.
+  local v
+  for v in justify otherway dryrun; do
+    run "$BIN/fleet-verbs" --steer "$v"
+    [ "$status" -eq 0 ]
+    if carries_fragment "$output" "$ROOT/config/verbs/_common.md"; then
+      echo "steer verb $v carries the preamble"
+      false
+    fi
+  done
+}
+
+@test "SPINE: a keystroke verb carries no preamble" {
+  # STOP and CONFIRM send a key. Their bodies are never delivered to anyone,
+  # and composing a prompt onto them would be a prompt with no reader.
+  local v
+  for v in stop confirm; do
+    run "$BIN/fleet-verbs" show "$v"
+    [ "$status" -eq 0 ]
+    if carries_fragment "$output" "$ROOT/config/verbs/_common.md"; then
+      echo "keystroke verb $v carries the preamble"
+      false
+    fi
+  done
+}
+
+@test "SPINE: the staging rule is written in exactly one file" {
+  # The anti-drift test, and the whole point of issue #21: `git add -A` was
+  # forbidden in three verb files and unmentioned in the fourth verb that
+  # commits. It iterates the directory rather than naming files, so a verb
+  # added later that restates the rule fails here rather than quietly
+  # starting the next round of drift.
+  local f name offenders=""
+  grep -q 'git add -A' "$ROOT/config/verbs/_common-git.md"
+  for f in "$ROOT"/config/verbs/*.md; do
+    name="$(basename "$f")"
+    if [ "$name" = "_common-git.md" ]; then continue; fi
+    if grep -q 'git add -A' "$f"; then offenders="$offenders $name"; fi
+  done
+  [ -z "$offenders" ] || { echo "restates a rule _common-git.md owns:$offenders"; false; }
+}
+
+@test "SPINE: exactly COMMIT, FORK, PR and PUSH declare common: git" {
+  local id got=""
+  for id in $(prompt_verbs); do
+    if grep -q '^common: *git *$' "$ROOT/config/verbs/$id.md"; then
+      got="$got $id"
+    fi
+  done
+  [ "$got" = " commit fork pr push" ]
+}
+
+@test "SPINE: the git rules reach the four verbs that ask for them and no others" {
+  # The eight verbs that never touch a repository must not be sent two
+  # staging rules: noise in the agent's context, and misleading to a human
+  # reading the composed prompt.
+  local id
+  for id in $(prompt_verbs); do
+    run "$BIN/fleet-verbs" show "$id"
+    [ "$status" -eq 0 ]
+    case " commit fork pr push " in
+      *" $id "*)
+        carries_fragment "$output" "$ROOT/config/verbs/_common-git.md" \
+          || { echo "$id declares common: git but did not receive it"; false; } ;;
+      *)
+        if carries_fragment "$output" "$ROOT/config/verbs/_common-git.md"; then
+          echo "$id received git rules it never asked for"
+          false
+        fi ;;
+    esac
+  done
+}
+
+@test "SPINE: an unrecognised common: value rejects the verb" {
+  # Same class as an unrecognised `key:`. A `common: gti` that silently
+  # dropped the staging rule its author believed they were getting would be
+  # precisely the bug this work exists to remove.
+  cat > "$FLEET_HOME/verbs/typo.md" <<'MD'
+---
+id: typo
+label: TYPO
+common: gti
+---
+body
+MD
+  run "$BIN/fleet-verbs" show typo
+  [ "$status" -eq 1 ]
+}
+
+@test "SPINE: a fragment is not a verb and cannot be resolved as one" {
+  run "$BIN/fleet-verbs" show _common
+  [ "$status" -eq 1 ]
+  run "$BIN/fleet-verbs" show _common-git
+  [ "$status" -eq 1 ]
+  # And not even when one is sitting in the local verbs directory, which is
+  # exactly where a local preamble override is meant to live.
+  printf 'a local preamble\n' > "$FLEET_HOME/verbs/_common.md"
+  run "$BIN/fleet-verbs" path _common
+  [ "$status" -eq 1 ]
+}
+
+@test "SPINE: a local preamble wins over the shipped one" {
+  # The same local-beats-shipped rule the verbs themselves follow -- one more
+  # file through the existing lookup, not a new concept.
+  printf 'LOCAL PREAMBLE, nothing else.\n' > "$FLEET_HOME/verbs/_common.md"
+  run "$BIN/fleet-verbs" show test
+  [ "$status" -eq 0 ]
+  [ "${output:0:29}" = "LOCAL PREAMBLE, nothing else." ]
+  if carries_fragment "$output" "$ROOT/config/verbs/_common.md"; then
+    echo "the shipped preamble was composed in as well"
+    false
+  fi
+}
+
+@test "SPINE: an empty preamble fails loudly rather than degrading to the body" {
+  : > "$FLEET_HOME/verbs/_common.md"
+  run --separate-stderr "$BIN/fleet-verbs" show test
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"_common.md"* ]] || return 1
+}
+
+@test "SPINE: a missing preamble names the fragment on stderr, not the verb" {
+  # Degrading silently to body-only would reintroduce the drift this work
+  # removes, and do it invisibly -- so it fails. The cost is that one broken
+  # fragment stops all twelve prompt keys, which is why the message has to
+  # name the fragment: "no such verb: test" would send whoever is holding
+  # the deck hunting for a problem in the wrong file.
+  local fake="$BATS_TEST_TMPDIR/fake"
+  mkdir -p "$fake/bin" "$fake/config/verbs"
+  cp "$BIN/fleet-verbs" "$BIN/fleetlib.py" "$fake/bin/"
+  cat > "$fake/config/verbs/solo.md" <<'MD'
+---
+id: solo
+label: SOLO
+---
+a body with no preamble to prepend
+MD
+  run --separate-stderr "$fake/bin/fleet-verbs" show solo
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"_common.md"* ]] || return 1
+  [[ "$stderr" != *"no such verb"* ]] || return 1
+}
+
+@test "SPINE: a local verb override receives the preamble exactly once" {
+  # The rejected alternative was to take an override file exactly as
+  # written, which would have silently downgraded the documented Obsidian
+  # NOTE override the moment it was installed.
+  cat > "$FLEET_HOME/verbs/note.md" <<'MD'
+---
+id: note
+label: NOTE
+---
+an overriding body
+MD
+  local pre first
+  pre="$(cat "$ROOT/config/verbs/_common.md")"
+  run "$BIN/fleet-verbs" show note
+  [ "$status" -eq 0 ]
+  [ "${output:0:${#pre}}" = "$pre" ]
+  [[ "$output" == *"an overriding body"* ]] || return 1
+  first="$(awk 'NF' "$ROOT/config/verbs/_common.md" | head -1)"
+  [ "$(printf '%s\n' "$output" | grep -cxF "$first")" -eq 1 ]
 }

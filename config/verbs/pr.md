@@ -3,13 +3,11 @@ id: pr
 label: PR
 interrupt: false
 confirm: true
+common: git
 ---
 Commit, push, and open a pull request.
 
-Everything PUSH does first — stage by name, never `git add -A` or
-`git commit -a`, branch first if you are on the default branch, and write a
-message that carries the reasoning rather than restating the diff. Then push,
-setting upstream.
+Everything PUSH does first: commit, then push, setting upstream.
 
 Then open the PR with `gh pr create`, against the default branch unless the
 work clearly belongs on top of another open branch.

@@ -5,6 +5,10 @@ A verb is a markdown file: frontmatter for the flags the dispatcher needs,
 body for the prompt the agent receives. Local files in $FLEET_HOME/verbs
 win over the shipped ones in config/verbs, per verb rather than wholesale,
 so overriding one verb does not mean maintaining copies of the rest.
+
+The rules that hold for every prompt verb do not live in the verb files.
+They live in `_`-prefixed fragments alongside them, and this resolver
+prepends them at `show` time -- see COMMON_FRAGMENTS below.
 """
 
 import sys
@@ -35,6 +39,55 @@ KEY_NAMES = ("escape", "enter")
 # lives, and never goes stale the way a baked-in path would after a move.
 REPO_TOKEN = "{{FLIGHTDECK_REPO}}"
 
+# The shared spine. `_common.md` goes in front of every prompt verb; the rest
+# are opted into by name in frontmatter (`common: git`), and the value must be
+# a key of this map. Allow-listed for the same reason KEY_NAMES is: a
+# `common: gti` that silently resolved to nothing would drop the staging rule
+# its author believed they were getting, which is exactly the drift the
+# fragments exist to remove. Unrecognised means the verb does not load.
+PREAMBLE = "_common.md"
+COMMON_FRAGMENTS = {"git": "_common-git.md"}
+
+
+class FragmentError(Exception):
+    """A fragment the composed prompt needs is missing or empty.
+
+    Its own exception rather than a None return so the failure can be
+    reported naming the FRAGMENT. Every prompt verb depends on `_common.md`,
+    so a broken one takes out all of Row 2 at once, and "no such verb: diff"
+    would send whoever is holding the deck hunting through diff.md for a
+    problem that is not there.
+    """
+
+
+def fragment_file(name):
+    """The fragment file that wins, or None. Local beats shipped, as verbs do."""
+    for base in (fleetlib.fleet_home() / "verbs",
+                 fleetlib.repo_root() / "config" / "verbs"):
+        candidate = base / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def load_fragment(name):
+    """The fragment's text, or FragmentError. Never a silent empty string.
+
+    Degrading to body-only when a fragment is missing would reintroduce the
+    drift this mechanism removes, and do it invisibly -- the prompts would
+    still be delivered, just quietly missing the rules that make them safe.
+    """
+    path = fragment_file(name)
+    if path is None:
+        raise FragmentError("missing fragment: {}".format(name))
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception as err:
+        raise FragmentError("unreadable fragment: {}: {}".format(name, err))
+    if not text:
+        raise FragmentError("empty fragment: {} ({})".format(name, path))
+    return text.replace(REPO_TOKEN, str(fleetlib.repo_root()))
+
 
 def verb_file(verb_id):
     """The file that wins for this id, or None. Local beats shipped.
@@ -45,8 +98,16 @@ def verb_file(verb_id):
     absolute id (e.g. one starting with `/`) and `..` climbs out of either
     verbs directory entirely. Ids are local, per-key config today, but
     reject the shape anyway rather than depend on that staying true.
+
+    A leading `_` is rejected on the same principle: those files are shared
+    fragments, not verbs. They carry no frontmatter deliberately, so
+    parse_verb() would refuse them anyway -- but `fleet-verbs show _common`
+    must fail because a fragment is not a thing a key can be bound to, not
+    as a side effect of how the fragment happens to be written.
     """
     if not verb_id or verb_id in (".", "..") or "/" in verb_id or "\\" in verb_id:
+        return None
+    if verb_id.startswith("_"):
         return None
     for base in (fleetlib.fleet_home() / "verbs",
                  fleetlib.repo_root() / "config" / "verbs"):
@@ -84,8 +145,12 @@ def parse_verb(text):
     key = meta.get("key", "").strip().lower()
     if key and key not in KEY_NAMES:
         return None
+    common = meta.get("common", "").strip().lower()
+    if common and common not in COMMON_FRAGMENTS:
+        return None
     return {
         "key": key,
+        "common": common,
         "requires": meta.get("requires", "").strip().lower(),
         "id": meta.get("id", ""),
         "label": meta.get("label", ""),
@@ -96,6 +161,33 @@ def parse_verb(text):
     }
 
 
+def compose(parsed):
+    """Puts the shared fragments in front of a prompt verb's body.
+
+    Composition happens here, after parsing and before any command reads
+    `prompt`, so everything that hands a prompt to an agent -- `show`, and
+    the resolved copy `resolved-path` materialises for the wake path -- gets
+    the same composed text, and nothing has to remember to ask for it.
+
+    Only prompt verbs compose. A keystroke verb (`key:`) sends a key and its
+    body is never delivered to anyone. A steer verb's body is a deny message
+    read inside a refused tool call, where a preamble addressed to an agent
+    doing work would read as nonsense. Those two conditions are already how
+    the dispatcher tells the three kinds apart.
+
+    Preamble first, verb body last: the panel context frames everything that
+    follows, and the specific ask is the last thing the agent reads.
+    """
+    if parsed["key"] or parsed["steer"]:
+        return parsed
+    pieces = [load_fragment(PREAMBLE)]
+    if parsed["common"]:
+        pieces.append(load_fragment(COMMON_FRAGMENTS[parsed["common"]]))
+    pieces.append(parsed["prompt"])
+    parsed["prompt"] = "\n\n".join(pieces)
+    return parsed
+
+
 def load_verb(verb_id):
     path = verb_file(verb_id)
     if path is None:
@@ -104,10 +196,26 @@ def load_verb(verb_id):
         parsed = parse_verb(path.read_text(encoding="utf-8"))
     except Exception:
         return None, None
-    return parsed, path
+    if parsed is None:
+        return None, None
+    # Deliberately outside the try above: that one turns an unreadable verb
+    # file into "no such verb", which is the right answer for a verb and the
+    # wrong one for a fragment. A FragmentError propagates to main(), which
+    # reports it naming the fragment.
+    return compose(parsed), path
 
 
 def main(argv):
+    # One place to turn a broken fragment into a named failure, rather than a
+    # traceback, whichever subcommand tripped over it.
+    try:
+        return run(argv)
+    except FragmentError as err:
+        sys.stderr.write("fleet-verbs: {}\n".format(err))
+        return 1
+
+
+def run(argv):
     # --steer <id>: print a steer verb's body for use as a deny message.
     # Refuses any verb not marked `steer: true`. A Row 2 verb body dropped
     # into a deny message reads as the reason a call was refused, which is a
