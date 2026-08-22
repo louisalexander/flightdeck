@@ -125,7 +125,13 @@ body {
 // primer's own `pre` rule and stripped the padding back off, leaving fenced
 // blocks as bare text with no recessed surface at all. The wrappers stay
 // transparent; the pre carries the surface and keeps its padding.
-.markdown-body pre {
+// Primer sets the light surface with a grouped selector,
+// `.markdown-body .highlight pre, .markdown-body pre`, so a fenced block is
+// claimed at (0,2,1). A lone `.markdown-body pre` here is (0,1,1) and loses
+// no matter how late it appears — which is how these blocks briefly came out
+// white on Night. Match the grouping, and keep the padding primer supplies.
+.markdown-body pre,
+.markdown-body .highlight pre {
   background-color: var(--interior);
   border: 1px solid var(--rule);
   border-radius: 6px;
