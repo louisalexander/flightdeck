@@ -205,3 +205,21 @@ body {
 // they have no visible edge. That is the intent — do not add one.
 
 .markdown-body img { background-color: transparent; }
+
+// ---- The theme's site title ----------------------------------------------
+// jekyll-theme-primer prepends an <h1> of site.title above the content, which
+// here lands directly on top of the lockup — the wordmark twice, once as text
+// and once as the mark. The mark wins. The heading stays in the document
+// rather than being display:none'd, so the page keeps a real h1 for screen
+// readers and crawlers; it is only taken off the screen.
+.markdown-body > h1:first-child {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
