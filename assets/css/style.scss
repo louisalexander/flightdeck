@@ -120,23 +120,33 @@ body {
   padding: 0.15em 0.4em;
 }
 
+// The card is the <pre> itself. Rouge nests it inside .highlighter-rouge >
+// .highlight, and an earlier draft styled `.highlight pre` — which out-ranks
+// primer's own `pre` rule and stripped the padding back off, leaving fenced
+// blocks as bare text with no recessed surface at all. The wrappers stay
+// transparent; the pre carries the surface and keeps its padding.
 .markdown-body pre {
   background-color: var(--interior);
   border: 1px solid var(--rule);
   border-radius: 6px;
   color: var(--airframe);
+  padding: 16px;
+  overflow: auto;
+}
+
+.markdown-body .highlight,
+.markdown-body .highlighter-rouge {
+  background-color: transparent;
 }
 
 .markdown-body pre > code,
 .markdown-body pre code,
-.markdown-body .highlight pre {
+.markdown-body pre tt {
   background-color: transparent;
   border: 0;
   padding: 0;
   color: inherit;
 }
-
-.markdown-body .highlight { background-color: transparent; }
 
 .markdown-body blockquote {
   color: var(--secondary);
