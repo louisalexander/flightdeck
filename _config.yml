@@ -1,0 +1,14 @@
+title: flightdeck
+description: An annunciator panel for a fleet of parallel Claude Code agents.
+theme: jekyll-theme-primer
+
+# The site is the README; everything below is source the README links into
+# or machinery that has no business being rendered as a web page.
+exclude:
+  - plugin/
+  - tests/
+  - tools/
+  - launchd/
+  - hooks/
+  - install.sh
+  - .gitignore
