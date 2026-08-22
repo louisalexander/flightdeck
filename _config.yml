@@ -2,6 +2,12 @@ title: flightdeck
 description: An annunciator panel for a fleet of parallel Claude Code agents.
 theme: jekyll-theme-primer
 
+# Brand palette and usage rules: assets/brand/README.md
+# The site's colours are overridden in assets/css/style.scss.
+image: /assets/brand/flightdeck-social-preview-1280x640.png
+twitter:
+  card: summary_large_image
+
 # The site is the README; everything below is source the README links into
 # or machinery that has no business being rendered as a web page.
 exclude:
