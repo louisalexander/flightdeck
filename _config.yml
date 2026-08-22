@@ -4,7 +4,14 @@ theme: jekyll-theme-primer
 
 # Brand palette and usage rules: assets/brand/README.md
 # The site's colours are overridden in assets/css/style.scss.
-image: /assets/brand/flightdeck-social-preview-1280x640.png
+
+# jekyll-seo-tag reads the card image from the *page*, not the site, and the
+# README has no front matter to put it in — so inject it as a default.
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/brand/flightdeck-social-preview-1280x640.png
 twitter:
   card: summary_large_image
 
