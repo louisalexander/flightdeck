@@ -1,4 +1,4 @@
-import { renderSvg } from "../../plugin/com.louisalexander.flightdeck.sdPlugin/bin/render.js";
+import { renderSvg } from "../../plugin/src/render";
 import type { Config, Slot } from "../../plugin/src/types";
 import { readFleetHome } from "./fleet-state.js";
 import { keyIndexToRowCol } from "./row-math.js";
