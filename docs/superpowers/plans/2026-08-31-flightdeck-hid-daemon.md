@@ -286,6 +286,7 @@ import sharp from "sharp";
 export async function renderSvgToRgba(svg: string, size: number): Promise<Buffer> {
   return sharp(Buffer.from(svg))
     .resize(size, size)
+    .ensureAlpha()
     .raw()
     .toColourspace("srgb")
     .toBuffer();
@@ -998,8 +999,7 @@ test("paints the idle face for the verb bound to this key's column", () => {
 });
 
 test("an unbound column paints the refused/idle-empty face, not a crash", () => {
-  const svg = paintCommandIdle(KEYMAP, 15); // row 1, col 7 -> no entry
-  assert.doesNotThrow(() => svg);
+  assert.doesNotThrow(() => paintCommandIdle(KEYMAP, 15)); // row 1, col 7 -> no entry
 });
 
 test("key-up runs fleet-send with the bound verb and returns a feedback face", async () => {
