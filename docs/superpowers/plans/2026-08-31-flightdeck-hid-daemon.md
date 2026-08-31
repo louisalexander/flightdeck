@@ -1074,10 +1074,23 @@ git commit -m "feat(daemon): Row 2 Command handler dispatching to fleet-send"
 - Test: `daemon/test/verdict-handler.test.mjs`
 
 **Interfaces:**
-- Consumes: `renderVerdictSvg`, `renderDetailSvg`, `renderDetailFeedback`, `verdictLabel` from
-  `../../plugin/src/verdict.ts` (unmodified), `runFleetVerdict` from `dispatch.ts` (Task 5),
-  `readFleetHome` from `fleet-state.ts` (Task 3), `Keymap`/`Row3Entry` from `keymap.ts`
-  (Task 6), `keyIndexToRowCol` from `row-math.ts` (Task 1).
+- Consumes: `renderVerdictSvg`, `renderDetailFeedback`, `verdictLabel` (and the `Feedback` type)
+  from `../../plugin/src/verdict.ts` (unmodified), `VerdictTarget`/`SlotsFile` types from
+  `../../plugin/src/types.ts`, `runFleetVerdict` from `dispatch.ts` (Task 5), `readFleetHome`
+  from `fleet-state.ts` (Task 3), `Keymap`/`Row3Entry` from `keymap.ts` (Task 6),
+  `keyIndexToRowCol` from `row-math.ts` (Task 1).
+- **Verified directly against `plugin/src/verdict.ts` and `plugin/src/plugin.ts`'s real `Verdict`
+  action** (not assumed): the real signature is
+  `renderVerdictSvg(label: string, tier: string, feedback: Feedback, active: boolean, armedScope?: ArmedScope | null): string`
+  — nothing like a `(verdict, target, outcome, verb)` shape. `plugin.ts`'s own `Verdict.render()`
+  method computes `active`/`tier`/`scope` from a `VerdictTarget | null` and calls
+  `renderVerdictSvg(verdictLabel(verdict, verb), tier, feedback, active, scope)`. `VerdictTarget`
+  (from `types.ts`) carries `tier: string`, `repo?: string`, `rule?: string` among other fields;
+  it comes from `SlotsFile.verdict` — i.e. the SAME `slots.json` Task 3's `readFleetHome` already
+  reads, under a `verdict` key, not from any separate file. `verdict === "detail"` is special: it
+  never calls `renderVerdictSvg` at all, only `renderDetailFeedback(target, feedback)`, for both
+  its idle and its feedback states. The implementation below mirrors `plugin.ts`'s `render()`
+  method exactly, ported from the SDK-driven code to a plain function.
 - Produces:
   ```typescript
   function paintVerdictIdle(fleetHome: string, keymap: Keymap, keyIndex: number): string;
@@ -1162,11 +1175,12 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Write `daemon/src/verdict-handler.ts`**
 
 ```typescript
-import { renderVerdictSvg } from "../../plugin/src/verdict.js";
-import { runFleetVerdict } from "./dispatch.js";
-import { readFleetHome } from "./fleet-state.js";
-import type { Keymap, Row3Entry } from "./keymap.js";
-import { keyIndexToRowCol } from "./row-math.js";
+import { renderVerdictSvg, renderDetailFeedback, verdictLabel, type Feedback } from "../../plugin/src/verdict";
+import type { VerdictTarget, SlotsFile } from "../../plugin/src/types";
+import { runFleetVerdict } from "./dispatch";
+import { readFleetHome } from "./fleet-state";
+import type { Keymap, Row3Entry } from "./keymap";
+import { keyIndexToRowCol } from "./row-math";
 
 function entryForKey(keymap: Keymap, keyIndex: number): Row3Entry | undefined {
   const { row, col } = keyIndexToRowCol(keyIndex);
@@ -1174,35 +1188,56 @@ function entryForKey(keymap: Keymap, keyIndex: number): Row3Entry | undefined {
   return keymap.row3[col];
 }
 
-function targetFrom(fleetHome: string) {
+function targetFrom(fleetHome: string): VerdictTarget | null {
   const { slots } = readFleetHome(fleetHome);
-  return (slots as { verdict?: unknown } | null)?.verdict ?? null;
+  return (slots as SlotsFile | null)?.verdict ?? null;
+}
+
+// Mirrors plugin.ts's Verdict.render() exactly: DETAIL never touches renderVerdictSvg at all,
+// every other verdict computes active/tier/scope from the target and calls it with the real
+// 5-argument shape.
+function render(entry: Row3Entry, target: VerdictTarget | null, feedback: Feedback): string {
+  if (entry.verdict === "detail") return renderDetailFeedback(target, feedback);
+  const active = target !== null;
+  const tier = target?.tier ?? "normal";
+  const scope = entry.verdict === "remember"
+    ? { repo: target?.repo ?? "", rule: target?.rule ?? "" }
+    : null;
+  return renderVerdictSvg(verdictLabel(entry.verdict, entry.verb ?? ""), tier, feedback, active, scope);
 }
 
 export function paintVerdictIdle(fleetHome: string, keymap: Keymap, keyIndex: number): string {
   const entry = entryForKey(keymap, keyIndex);
-  if (!entry) return renderVerdictSvg("", null, "", entry?.verb);
-  const target = targetFrom(fleetHome);
-  return renderVerdictSvg(entry.verdict, target, "", entry.verb);
+  if (!entry) return renderVerdictSvg("", "normal", "refused", false, null);
+  return render(entry, targetFrom(fleetHome), "");
 }
 
 export async function handleVerdictKeyUp(
   interpreter: string, repoRoot: string, fleetHome: string, keymap: Keymap, keyIndex: number
 ): Promise<string> {
   const entry = entryForKey(keymap, keyIndex);
-  if (!entry) return renderVerdictSvg("", null, "refused");
+  if (!entry) return renderVerdictSvg("", "normal", "refused", false, null);
 
   const exitCode = await runFleetVerdict(interpreter, repoRoot, entry.verdict, entry.verb);
-  const outcome = exitCode === 0 ? "delivered" : exitCode === 2 ? "armed" : "refused";
+  const outcome: Feedback = exitCode === 0 ? "delivered" : exitCode === 2 ? "armed" : "refused";
   const target = targetFrom(fleetHome);
-  return renderVerdictSvg(entry.verdict, target, outcome, entry.verb);
+
+  if (entry.verdict === "detail") {
+    return outcome !== "delivered"
+      ? renderDetailFeedback(target, "refused")
+      : renderDetailFeedback(target, "");
+  }
+  return render(entry, target, outcome);
 }
 ```
 
-If `renderVerdictSvg`'s actual parameter order or name differs from the four-argument shape
-assumed here (`verdict, target, outcome, verb`), check `plugin/src/verdict.ts`'s real export
-signature directly and adjust the two call sites above to match — this file is imported
-unmodified per the Global Constraints, so the call sites must conform to it, not the reverse.
+This corrects an earlier draft of this task that assumed a `renderVerdictSvg(verdict, target,
+outcome, verb)` shape — verified wrong by reading `plugin/src/verdict.ts` and
+`plugin/src/plugin.ts`'s real `Verdict` action directly before this task was dispatched. The
+`target()`/`render()` logic above is a direct, unmodified-in-meaning port of `plugin.ts`'s own
+`private target()` and `private render()` methods (lines ~533-552 as of this writing) from
+class-method form to plain exported functions — same computation, same special-casing of
+`detail` and `remember`, same `tier`/`active`/`scope` derivation.
 
 - [ ] **Step 4: Run test to verify it passes**
 
