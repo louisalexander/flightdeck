@@ -7,10 +7,13 @@ function bundle(name) {
     input: `src/${name}.ts`,
     output: { file: `${OUT}/${name}.js`, format: "es", sourcemap: true },
     plugins: [typescript()],
-    external: [
-      "node:fs", "node:path", "node:os", "node:child_process", "node:events",
-      "@elgato-stream-deck/node", "sharp"
-    ]
+    external: (id) => {
+      if (id.startsWith("../../plugin/src/") || id.startsWith("../plugin/src/")) return true;
+      return [
+        "node:fs", "node:path", "node:os", "node:child_process", "node:events",
+        "@elgato-stream-deck/node", "sharp"
+      ].includes(id);
+    }
   };
 }
 
