@@ -1266,23 +1266,39 @@ git commit -m "feat(daemon): Row 3 Verdict handler dispatching to fleet-verdict"
 - Produces: nothing further consumed by another task — this is the process entrypoint.
 
 This task has no automated test: it requires the physical Stream Deck XL plugged in. Verification
-is the manual hardware check in Step 5.
+is the manual hardware check in Step 4.
 
-- [ ] **Step 1: Confirm the installed HID library's exact image-push method**
+**This section was corrected before dispatch** by reading the installed `@elgato-stream-deck/node`
+and `@elgato-stream-deck/core` type definitions directly (`daemon/node_modules/@elgato-stream-deck/
+{node,core}/dist/*.d.ts`), rather than assuming the API shape. Two assumptions in an earlier draft
+were wrong:
 
-Run: `cat daemon/node_modules/@elgato-stream-deck/node/dist/*.d.ts | grep -A3 -i "fillKey"`
-Expected output: a method on the device instance such as `fillKeyBuffer(keyIndex: number, buffer: Buffer, options: {format: "rgb" | "rgba"}): Promise<void>`. Note the exact method name, its
-image-buffer channel order, and whether it wants the buffer at `device.ICON_SIZE` or something
-you must resize to yourself — Task 2's `renderSvgToRgba(svg, size)` already takes an arbitrary
-`size`, so pass whatever `device.ICON_SIZE` reports. Use the confirmed method name and channel
-order in Step 2 below instead of the placeholder shown; if the installed version instead exposes
-`fillKeyPNG`/`fillKeyJPEG` rather than a raw buffer, adjust Step 2's push logic to call `sharp`'s
-`.png()`/`.jpeg()` output instead of `.raw()` and skip `renderSvgToRgba` for that call site.
+1. **There is no `device.ICON_SIZE` or `device.NUM_KEYS` property.** The `StreamDeck` interface
+   (`core/dist/types.d.ts`) exposes `CONTROLS: Readonly<StreamDeckControlDefinition[]>` instead —
+   a list of per-control descriptors, each carrying `type: 'button' | 'encoder' | 'lcd-segment'`,
+   `row`, `column`, and (for buttons) `index`/`hidIndex`/`feedbackType`. Icon pixel size isn't
+   exposed on the control definition for RGB-feedback buttons (only LCD-segment/LCD-feedback
+   buttons carry an explicit `pixelSize`) — it's an internal detail of the model implementation.
+   96×96 is the correct fixed value for the Stream Deck XL regardless: `plugin/src/render.ts`'s
+   own doc comment already states this ("One key at @2x (144px) for a 96px Stream Deck XL key"),
+   so the daemon hardcodes `ICON_SIZE = 96` as a documented constant rather than reading a
+   nonexistent device property.
+2. **`down`/`up` events pass a control object, not a plain key-index number.** Per
+   `core/dist/types.d.ts`'s `StreamDeckEvents` type: `down: [control: StreamDeckButtonControlDefinition
+   | StreamDeckEncoderControlDefinition]` (same for `up`). The button variant's `.index` field is
+   the value to use as `keyIndex` everywhere else in this codebase.
 
-- [ ] **Step 2: Write `daemon/src/index.ts`**
+`fillKeyBuffer(keyIndex: KeyIndex, imageBuffer: Uint8Array | Uint8ClampedArray, options?: {format:
+'rgb'|'rgba'|'bgr'|'bgra'}): Promise<void>` (confirmed in `core/dist/types.d.ts`) and
+`listStreamDecks(): Promise<StreamDeckDeviceInfo[]>` / `openStreamDeck(devicePath, options?):
+Promise<StreamDeck>` (confirmed in `node/dist/index.d.ts`) match an earlier draft's assumptions
+exactly — no correction needed for those.
+
+- [ ] **Step 1: Write `daemon/src/index.ts`**
 
 ```typescript
 import { openStreamDeck, listStreamDecks } from "@elgato-stream-deck/node";
+import type { StreamDeckButtonControlDefinition } from "@elgato-stream-deck/node";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
@@ -1296,11 +1312,14 @@ import { paintBootTile } from "./boot-handler.js";
 import { paintCommandIdle, handleCommandKeyUp } from "./command-handler.js";
 import { paintVerdictIdle, handleVerdictKeyUp } from "./verdict-handler.js";
 import { keyIndexToRowCol } from "./row-math.js";
-import type { Config } from "../../plugin/src/types.js";
+import type { Config } from "../../plugin/src/types";
 
 const FLEET_HOME = join(homedir(), ".fleet");
 const REPO = process.env.FLIGHTDECK_REPO ?? join(homedir(), "repos", "flightdeck");
 const KEYMAP_PATH = process.env.FLIGHTDECK_KEYMAP ?? join(REPO, "daemon", "config", "keymap.json");
+// Documented fixed native key resolution for the Stream Deck XL (see plugin/src/render.ts's own
+// doc comment) -- not exposed as a queryable property on the StreamDeck interface.
+const ICON_SIZE = 96;
 
 function loadConfig(): Config {
   const path = join(REPO, "config", "fleet.json");
@@ -1308,6 +1327,12 @@ function loadConfig(): Config {
   const base = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { states: {} };
   const local = existsSync(localPath) ? JSON.parse(readFileSync(localPath, "utf8")) : {};
   return { states: { ...(base.states ?? {}), ...(local.states ?? {}) } };
+}
+
+function isButton(
+  control: { type: string },
+): control is StreamDeckButtonControlDefinition {
+  return control.type === "button";
 }
 
 async function main() {
@@ -1324,25 +1349,32 @@ async function main() {
   const keymap = loadKeymap(KEYMAP_PATH);
   const downAt = new Map<number, number>();
 
+  const buttonIndices = device.CONTROLS.filter(isButton).map((c) => c.index);
+
   async function paintKey(index: number): Promise<void> {
     const { row } = keyIndexToRowCol(index);
     const svg = row === 0 ? paintSlot(FLEET_HOME, config, index)
       : row === 1 ? paintCommandIdle(keymap, index)
       : row === 2 ? paintVerdictIdle(FLEET_HOME, keymap, index)
       : paintBootTile(index);
-    const buffer = await renderSvgToRgba(svg, device.ICON_SIZE);
+    const buffer = await renderSvgToRgba(svg, ICON_SIZE);
     await device.fillKeyBuffer(index, buffer, { format: "rgba" });
   }
 
   async function repaintAll(): Promise<void> {
-    for (let i = 0; i < device.NUM_KEYS; i++) await paintKey(i);
+    for (const index of buttonIndices) await paintKey(index);
   }
 
   watchFleetHome(FLEET_HOME, () => { repaintAll().catch(console.error); });
   setInterval(() => { repaintAll().catch(console.error); }, 1000);
 
-  device.on("down", (index: number) => downAt.set(index, Date.now()));
-  device.on("up", async (index: number) => {
+  device.on("down", (control) => {
+    if (!isButton(control)) return;
+    downAt.set(control.index, Date.now());
+  });
+  device.on("up", async (control) => {
+    if (!isButton(control)) return;
+    const index = control.index;
     const startedAt = downAt.get(index) ?? Date.now();
     downAt.delete(index);
     const { row } = keyIndexToRowCol(index);
@@ -1359,7 +1391,7 @@ async function main() {
     }
 
     if (feedbackSvg) {
-      const buffer = await renderSvgToRgba(feedbackSvg, device.ICON_SIZE);
+      const buffer = await renderSvgToRgba(feedbackSvg, ICON_SIZE);
       await device.fillKeyBuffer(index, buffer, { format: "rgba" });
       setTimeout(() => { paintKey(index).catch(console.error); }, 1200);
     } else {
@@ -1382,16 +1414,17 @@ main().catch((err) => {
 });
 ```
 
-- [ ] **Step 3: Build**
+- [ ] **Step 2: Build**
 
 Run: `cd daemon && npm run build`
-Expected: succeeds. Fix any compile error surfaced by Step 1's real method signature not
-matching the placeholder above before moving on — this is the one file in the whole plan whose
-correctness depends on an external package's actual shipped API rather than on this repo's own
-code, so a compile error here is expected to require a small adjustment, not a sign the plan is
-wrong.
+Expected: succeeds. If `StreamDeckButtonControlDefinition` isn't exported from
+`@elgato-stream-deck/node`'s top-level package (it's re-exported from `@elgato-stream-deck/core`
+per `node/dist/index.d.ts`'s own re-export list, so it should resolve, but package re-export
+surfaces can be incomplete), import it from `@elgato-stream-deck/core` directly instead — check
+`daemon/node_modules/@elgato-stream-deck/node/dist/index.d.ts`'s export list if the build
+disagrees with this brief.
 
-- [ ] **Step 4: Smoke-test against the real device**
+- [ ] **Step 3: Smoke-test against the real device**
 
 Run: `cd daemon && FLIGHTDECK_REPO=$(cd .. && pwd) node dist/index.js`
 Expected: logs `flightdeck daemon running against <path>`, and the physical Row 1 keys light up
@@ -1400,7 +1433,7 @@ yet — start `fleet-reconcile` or write a fixture `slots.json` by hand first if
 populated key). Row 2 shows the eight default verb labels. Row 3 shows DETAIL/APPROVE/REMEMBER/
 DENY/INTERRUPT/JUSTIFY/OTHERWAY/DRYRUN.
 
-- [ ] **Step 5: Manual hardware verification of press behavior**
+- [ ] **Step 4: Manual hardware verification of press behavior**
 
 Press and quickly release a Row 1 key with a live slot: the terminal for that session should
 focus (via `fleet-focus`), matching what `bin/fleet-press <index> short` does when run by hand.
@@ -1409,7 +1442,7 @@ it should show a feedback face (queued/refused) for about 1.2 seconds then rever
 same manual check `fleet-doctor` already documents for the Elgato-app plugin path — there is no
 new verification concept here, only a new transport to point it at.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd daemon
