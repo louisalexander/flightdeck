@@ -18,8 +18,13 @@ export function readFleetHome(fleetHome: string): { slots: unknown | null; armed
 }
 
 export function watchFleetHome(fleetHome: string, onChange: () => void): { stop: () => void } {
-  const watcher: FSWatcher = watch(fleetHome, (_type, filename) => {
-    if (filename === "slots.json" || filename === "armed.json") onChange();
-  });
-  return { stop: () => watcher.close() };
+  let watcher: FSWatcher | null = null;
+  try {
+    watcher = watch(fleetHome, (_type, filename) => {
+      if (filename === "slots.json" || filename === "armed.json") onChange();
+    });
+  } catch (err) {
+    console.error(`cannot watch ${fleetHome}: ${String(err)}`);
+  }
+  return { stop: () => watcher?.close() };
 }

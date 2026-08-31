@@ -38,3 +38,12 @@ test("watchFleetHome fires on a rename-replace of slots.json", (t, done) => {
   writeFileSync(tmpFile, "{}");
   renameSync(tmpFile, join(dir, "slots.json"));
 });
+
+test("watchFleetHome does not throw when directory does not exist", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fleet-"));
+  const nonexistent = join(dir, "does-not-exist");
+  assert.doesNotThrow(() => {
+    const watch = watchFleetHome(nonexistent, () => {});
+    watch.stop();
+  });
+});
