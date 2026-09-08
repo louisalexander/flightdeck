@@ -1,0 +1,13 @@
+{
+  "row2": ["test", "diff", "note", "push", "pr", "review", "stop", "confirm"],
+  "row3": [
+    { "verdict": "detail" },
+    { "verdict": "approve" },
+    { "verdict": "remember" },
+    { "verdict": "deny" },
+    { "verdict": "interrupt" },
+    { "verdict": "steer", "verb": "justify" },
+    { "verdict": "steer", "verb": "otherway" },
+    { "verdict": "steer", "verb": "dryrun" }
+  ]
+}

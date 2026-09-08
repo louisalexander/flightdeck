@@ -1,6 +1,8 @@
 config/fleet.local.json
 config/risk.local.json
 plugin/node_modules/
+daemon/node_modules/
+daemon/dist/
 plugin/*.sdPlugin/bin/
 bin/__pycache__/
 .DS_Store
