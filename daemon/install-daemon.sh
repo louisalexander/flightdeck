@@ -41,6 +41,7 @@ echo "==> building daemon"
 (cd "$DAEMON_DIR" && npm install --silent && npm run build --silent)
 
 echo "==> installing launchd job"
+mkdir -p "$HOME/.fleet"
 PLIST_SRC="$DAEMON_DIR/launchd/com.louisalexander.flightdeck.daemon.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.louisalexander.flightdeck.daemon.plist"
 sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__REPO__|$REPO_ROOT|g" -e "s|__HOME__|$HOME|g" \
