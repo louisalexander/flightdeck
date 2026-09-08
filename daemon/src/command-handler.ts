@@ -16,11 +16,11 @@ export function paintCommandIdle(keymap: Keymap, keyIndex: number): string {
 
 export async function handleCommandKeyUp(
   interpreter: string, repoRoot: string, keymap: Keymap, keyIndex: number
-): Promise<string> {
+): Promise<{ svg: string; outcome: "" | "queued" | "refused" | "armed" }> {
   const verb = verbForKey(keymap, keyIndex);
-  if (!verb) return renderCommandSvg("", "refused");
+  if (!verb) return { svg: renderCommandSvg("", "refused"), outcome: "refused" };
 
   const exitCode = await runFleetSend(interpreter, repoRoot, verb);
   const outcome = exitCode === 0 ? "queued" : exitCode === 2 ? "armed" : "refused";
-  return renderCommandSvg(verb.toUpperCase(), outcome);
+  return { svg: renderCommandSvg(verb.toUpperCase(), outcome), outcome };
 }

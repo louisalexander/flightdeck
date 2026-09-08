@@ -49,6 +49,7 @@ async function main() {
   const config = loadConfig();
   const keymap = loadKeymap(KEYMAP_PATH);
   const downAt = new Map<number, number>();
+  const pendingUntil = new Map<number, number>();
 
   const buttonIndices = device.CONTROLS.filter(isButton).map((c) => c.index);
 
@@ -63,7 +64,10 @@ async function main() {
   }
 
   async function repaintAll(): Promise<void> {
-    for (const index of buttonIndices) await paintKey(index);
+    for (const index of buttonIndices) {
+      if ((pendingUntil.get(index) ?? 0) > Date.now()) continue;
+      await paintKey(index);
+    }
   }
 
   watchFleetHome(FLEET_HOME, () => { repaintAll().catch(console.error); });
@@ -82,19 +86,28 @@ async function main() {
     const verb = pressVerb(startedAt, Date.now());
 
     let feedbackSvg: string | null = null;
+    let holdMs = 1200;
     if (row === 0) {
       const { col } = keyIndexToRowCol(index);
       await runFleetPress(interpreter, REPO, col, verb);
     } else if (row === 1) {
-      feedbackSvg = await handleCommandKeyUp(interpreter, REPO, keymap, index);
+      const result = await handleCommandKeyUp(interpreter, REPO, keymap, index);
+      feedbackSvg = result.svg;
+      holdMs = result.outcome === "armed" ? 9000 : 1200;
     } else if (row === 2) {
-      feedbackSvg = await handleVerdictKeyUp(interpreter, REPO, FLEET_HOME, keymap, index);
+      const result = await handleVerdictKeyUp(interpreter, REPO, FLEET_HOME, keymap, index);
+      feedbackSvg = result.svg;
+      holdMs = result.outcome === "armed" ? 9000 : 1200;
     }
 
     if (feedbackSvg) {
+      pendingUntil.set(index, Date.now() + holdMs);
       const buffer = await renderSvgToRgba(feedbackSvg, ICON_SIZE);
       await device.fillKeyBuffer(index, buffer, { format: "rgba" });
-      setTimeout(() => { paintKey(index).catch(console.error); }, 1200);
+      setTimeout(() => {
+        pendingUntil.delete(index);
+        paintKey(index).catch(console.error);
+      }, holdMs);
     } else {
       await paintKey(index);
     }

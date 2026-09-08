@@ -14,8 +14,10 @@ export function paintSlot(fleetHome: string, config: Config, keyIndex: number): 
   const { slots, armed } = readFleetHome(fleetHome);
   const slotsList = (slots as { slots?: Slot[]; halted?: boolean } | null)?.slots ?? [];
   const slot = slotsList.find((s) => s.index === col) ?? EMPTY(col);
-  const armedFile = armed as { index?: number } | null;
-  const isArmed = armedFile?.index === col;
+  const armedFile = armed as { index?: number; expires?: number } | null;
+  const isArmed = armedFile?.index === col
+    && typeof armedFile?.expires === "number"
+    && Date.now() / 1000 < armedFile.expires;
   const halted = Boolean((slots as { halted?: boolean } | null)?.halted);
   return renderSvg(slot, config, isArmed, slot.permission_mode, halted);
 }

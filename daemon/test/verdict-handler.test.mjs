@@ -41,9 +41,9 @@ test("key-up with no pending target runs fleet-verdict and reports refused", asy
   const dir = mkdtempSync(join(tmpdir(), "fleet-"));
   writeFileSync(join(dir, "slots.json"), JSON.stringify({ slots: [] }));
 
-  const svg = await handleVerdictKeyUp("/bin/sh", repo, dir, KEYMAP, 18); // remember
+  const result = await handleVerdictKeyUp("/bin/sh", repo, dir, KEYMAP, 18); // remember
   assert.strictEqual(readFileSync(logPath, "utf8").trim(), "remember");
-  assert.ok(svg.length > 0);
+  assert.ok(result.svg.length > 0);
 });
 
 test("a steer key passes its verb as the second argv to fleet-verdict", async () => {

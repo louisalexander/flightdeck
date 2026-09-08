@@ -34,7 +34,16 @@ test("armed.json for this index overrides to the armed face", () => {
   const dir = mkdtempSync(join(tmpdir(), "fleet-"));
   const slots = { slots: [{ index: 3, state: "working", label_top: "", label_bottom: "" }] };
   writeFileSync(join(dir, "slots.json"), JSON.stringify(slots));
-  writeFileSync(join(dir, "armed.json"), JSON.stringify({ index: 3 }));
+  writeFileSync(join(dir, "armed.json"), JSON.stringify({ index: 3, expires: Date.now() / 1000 + 60 }));
   const svg = paintSlot(dir, CONFIG, 3);
   assert.ok(svg.includes("CONFIRM"));
+});
+
+test("an expired armed.json for this index does not render the armed face", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fleet-"));
+  const slots = { slots: [{ index: 3, state: "working", label_top: "", label_bottom: "" }] };
+  writeFileSync(join(dir, "slots.json"), JSON.stringify(slots));
+  writeFileSync(join(dir, "armed.json"), JSON.stringify({ index: 3, expires: Date.now() / 1000 - 10 }));
+  const svg = paintSlot(dir, CONFIG, 3);
+  assert.ok(!svg.includes("CONFIRM"));
 });

@@ -37,9 +37,9 @@ export function paintVerdictIdle(fleetHome: string, keymap: Keymap, keyIndex: nu
 
 export async function handleVerdictKeyUp(
   interpreter: string, repoRoot: string, fleetHome: string, keymap: Keymap, keyIndex: number
-): Promise<string> {
+): Promise<{ svg: string; outcome: Feedback }> {
   const entry = entryForKey(keymap, keyIndex);
-  if (!entry) return renderVerdictSvg("", "normal", "refused", false, null);
+  if (!entry) return { svg: renderVerdictSvg("", "normal", "refused", false, null), outcome: "refused" };
 
   const exitCode = await runFleetVerdict(interpreter, repoRoot, entry.verdict, entry.verb);
   const outcome: Feedback = exitCode === 0 ? "delivered" : exitCode === 2 ? "armed" : "refused";
@@ -47,8 +47,8 @@ export async function handleVerdictKeyUp(
 
   if (entry.verdict === "detail") {
     return outcome !== "delivered"
-      ? renderDetailFeedback(target, "refused")
-      : renderDetailFeedback(target, "");
+      ? { svg: renderDetailFeedback(target, "refused"), outcome: "refused" }
+      : { svg: renderDetailFeedback(target, ""), outcome: "" };
   }
-  return render(entry, target, outcome);
+  return { svg: render(entry, target, outcome), outcome };
 }

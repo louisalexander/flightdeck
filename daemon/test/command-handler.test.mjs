@@ -24,7 +24,7 @@ test("key-up runs fleet-send with the bound verb and returns a feedback face", a
   writeFileSync(script, `#!/bin/sh\necho "$@" > "${logPath}"\nexit 0\n`);
   chmodSync(script, 0o755);
 
-  const svg = await handleCommandKeyUp("/bin/sh", repo, KEYMAP, 8);
+  const result = await handleCommandKeyUp("/bin/sh", repo, KEYMAP, 8);
   assert.strictEqual(readFileSync(logPath, "utf8").trim(), "test");
-  assert.ok(svg.includes("TEST"));
+  assert.ok(result.svg.includes("TEST"));
 });
