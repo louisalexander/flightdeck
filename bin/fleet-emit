@@ -287,14 +287,47 @@ def run(event):
         # guarded when we do not know would be the one wrong direction to err.
         raw_mode = payload.get("permission_mode")
         permission_mode = raw_mode if isinstance(raw_mode, str) else ""
-        if not permission_mode:
+
+        # ONE read, serving both carry-forwards below. This runs on the hook
+        # path of every live agent, so the prior record is fetched at most
+        # once per event and only when something actually needs it: an event
+        # that carries its own permission_mode and is not a Stop reads nothing
+        # at all, exactly as before.
+        previous = None
+        if event == "Stop" or not permission_mode:
             previous = fleetlib.read_json(target)
-            if isinstance(previous, dict) and isinstance(previous.get("permission_mode"), str):
-                permission_mode = previous["permission_mode"]
+            if not isinstance(previous, dict):
+                previous = None
+
+        if not permission_mode and previous is not None \
+                and isinstance(previous.get("permission_mode"), str):
+            permission_mode = previous["permission_mode"]
+
+        new_state = DRAIN_STATE if drained else state
+
+        # `failed` is documented as sticky until cleared (README:28), and it
+        # was not: Stop maps to done, so the Stop hook of the very turn that
+        # ran bin/fleet-fail repainted the slot green a second later. The one
+        # mark a Row 2 verb can leave on the deck was erased by the turn that
+        # left it, which is what made the TEST verb useless.
+        #
+        # Stop, and only Stop. Every other transition still clears it because
+        # each has something newer and more worth showing: UserPromptSubmit
+        # means the operator has given a fresh instruction and superseded the
+        # failure, Notification means the agent is stuck on a decision (more
+        # actionable than a failure), SessionStart means a new session. The
+        # abnormal-SessionEnd path that SETS failed is untouched.
+        #
+        # Deliberately after the drain state above rather than before: a
+        # session that failed its tests and is being handed another verb has
+        # not stopped having failed, so the mark outlives the drain write too.
+        # The verb is still delivered -- only the colour of the slot is held.
+        if event == "Stop" and previous is not None and previous.get("state") == "failed":
+            new_state = "failed"
 
         fleetlib.write_json_atomic(target, {
             "session_id": session_id,
-            "state": DRAIN_STATE if drained else state,
+            "state": new_state,
             "repo": repo, "branch": branch, "title": "", "cwd": cwd, "host": host,
             "iterm_session": iterm_uuid, "pid": find_agent_pid(), "ts": now,
             "permission_mode": permission_mode,

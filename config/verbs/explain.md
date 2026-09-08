@@ -24,4 +24,6 @@ finished the migration and I am waiting for you to tell me whether to run it"
 is a perfect answer.
 
 Then carry on with what you were doing. This is a glance, not an interruption
-— do not stop, and do not treat it as a request to change course.
+— do not stop, and do not treat it as a request to change course. You have
+answered well if I could sit down at your keyboard and take the next step
+myself.

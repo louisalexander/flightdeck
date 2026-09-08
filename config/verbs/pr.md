@@ -3,13 +3,11 @@ id: pr
 label: PR
 interrupt: false
 confirm: true
+common: git
 ---
 Commit, push, and open a pull request.
 
-Everything PUSH does first — stage by name, never `git add -A` or
-`git commit -a`, branch first if you are on the default branch, and write a
-message that carries the reasoning rather than restating the diff. Then push,
-setting upstream.
+Everything PUSH does first: commit, then push, setting upstream.
 
 Then open the PR with `gh pr create`, against the default branch unless the
 work clearly belongs on top of another open branch.
@@ -24,5 +22,14 @@ decide without re-deriving the work:
   explicit "not tested on real hardware" far more than silence.
 - Anything deliberately left out, so it does not read as an oversight.
 
+Open it and stop. Do not merge it, do not enable auto-merge, and do not go
+back to editing the branch it is built on — a reviewer looking at a moving
+PR cannot review it.
+
 If the repository has no GitHub remote, or `gh` is not authenticated, say so
 and print the PR body you would have filed rather than failing quietly.
+
+The body is the work; what you say here is a receipt. End with the PR's URL,
+one line, and do not paste the body back into the terminal — it is already
+on the page I am about to open. Done is a pull request a reviewer could act
+on without asking you a question first.

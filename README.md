@@ -25,7 +25,7 @@ annunciator, commands, and verdicts. Row 4 (GATE, SPEND, DISPATCH) is not; see
 | `working` | `#1256A3` dark blue | ▶ | Prompt submitted, tools or reasoning active | `UserPromptSubmit` hook, or `Stop` with background work still in flight |
 | `done` | `#238636` green | ✓ | Turn complete, awaiting next instruction | `Stop` hook, with nothing in flight |
 | `idle` | `#25282D` near-black grey | · | Session alive, nothing in flight | `SessionStart` hook |
-| `failed` | `#B42318` red | ✕ | Observed failure, sticky until cleared | abnormal `SessionEnd`, or `fleet-fail` |
+| `failed` | `#B42318` red | ✕ | Observed failure; survives the turn ending, until the next prompt, block, session start or `fleet-fail --clear` | abnormal `SessionEnd`, or `fleet-fail` |
 | `empty` | `#000000` black | *(none)* | No session in this slot | `fleet-reconcile` |
 
 Colours and glyph names live in [`config/fleet.json`](config/fleet.json).
@@ -47,6 +47,18 @@ a dev server, say — therefore holds a key blue while its agent sits idle. That
 is the deliberate direction to err: a false blue merely recedes, and amber
 still overrides it, whereas a false green hides a busy agent behind a colour
 that says *your turn*.
+
+**Red is reported, not inferred.** No hook decides a session has failed; it
+is marked, either by a teardown or by the agent itself. An agent that has
+watched a suite, a build or a check fail runs
+[`bin/fleet-fail`](bin/fleet-fail) with no
+arguments: it resolves the calling agent's own slot by matching
+`$ITERM_SESSION_ID` against `slots.json`, so no prompt has to teach an
+agent a slot number it can't know, and it exits non-zero rather than
+marking the wrong slot when it can't identify itself. `fleet-fail
+--explain` prints its own contract — what it does, how to call it, what
+each exit status means — which is what the TEST verb points an agent at.
+`fleet-fail --clear` puts the slot back to idle.
 
 Colour carries the message; the glyph is redundancy. Amber and red are
 adjacent hues, and red/green is the most common colourblind failure, so
@@ -337,6 +349,24 @@ the agent receives — resolved by [`bin/fleet-verbs`](bin/fleet-verbs).
 `$FLEET_HOME/verbs/<id>.md` wins over the shipped
 [`config/verbs/<id>.md`](config/verbs) **per verb**, so overriding one
 doesn't mean maintaining copies of the rest.
+
+The rules that hold for every prompt verb don't live in the verb files.
+They live in `_`-prefixed **fragments** alongside them, which the resolver
+prepends at `show` time: `_common.md` in front of every prompt verb, and
+`_common-git.md` in front of the four that write to a repository, opted
+into by `common: git` in frontmatter. Neither reaches a steer verb (a deny
+message is a different register) or a keystroke verb (it sends a key and
+carries no prompt). A `_`-prefixed file is a fragment, not a verb, and
+can't be bound to a key — `fleet-verbs show _common` fails like an unknown
+verb. `$FLEET_HOME/verbs/_common.md` overrides the shipped preamble by the
+same per-file rule that applies to verbs, so a locally overridden verb
+still receives the shipped one unless you replace that too. A missing or
+empty fragment refuses loudly and names itself rather than quietly
+delivering a prompt without its rules.
+
+What a verb file is required to state, and what the tests do and don't
+check, are in [`docs/verb-contract.md`](docs/verb-contract.md). Read it
+before writing a new verb.
 
 Getting it onto the deck is per-key, the same as Row 3: drag the `Command`
 action onto each Row 2 key and pick its verb in the property inspector —

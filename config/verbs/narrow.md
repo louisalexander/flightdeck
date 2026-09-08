@@ -17,6 +17,11 @@ them — and separate what you have done into two lists:
 
 Then say which is which, briefly, and stop working on the second list.
 
+Two lists and a line. One line per item, no paragraph underneath it, and
+then a single closing line saying which of the extras you would drop if it
+were your call. You are done when I can read down that second list saying
+"keep, lose, keep" without having to ask you anything.
+
 **Do not revert anything on your own.** Undoing is destructive and I may want
 some of it. Tell me what you would remove and roughly what it costs to keep,
 and let me choose. If some of it is now load-bearing — the asked-for work
@@ -28,6 +33,5 @@ reasonable judgment that simply outgrew its budget. And it is not permission
 to abandon the actual task half-finished — narrow the scope, then continue
 with what remains.
 
-If you genuinely have not gone beyond the request, say so and carry on. That
-is a perfectly good answer and I would rather hear it than have you invent
-something to trim.
+If you genuinely have not gone beyond the request, say so and carry on with
+it. An empty second list is a fine answer.

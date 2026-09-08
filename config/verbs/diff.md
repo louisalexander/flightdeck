@@ -24,3 +24,9 @@ is to see the whole state of the tree.
 
 Keep it short enough to read at a glance. If it does not fit in a screen,
 you are summarising too finely.
+
+Do not tidy anything on the way through. If a stray debug line or a
+half-finished edit turns up while you are reading, name it here — do not
+delete it, do not stage anything, do not commit. You are done when I could
+describe the state of this tree to someone else from your answer alone,
+including the parts of it that are not finished.

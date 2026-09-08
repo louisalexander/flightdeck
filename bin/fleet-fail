@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Marks a slot's session failed (sticky red), or clears it back to idle.
 
-  fleet-fail <slot>
+  fleet-fail                    the slot this process is running in
+  fleet-fail --clear
+  fleet-fail <slot>             an explicit slot index
   fleet-fail --clear <slot>
+  fleet-fail --explain
+
+Two callers, two contracts. The deck calls the explicit form and wants it
+quiet: a bad index exits 0 and changes nothing, as it always has. An agent
+calls the no-argument form and needs to be told whether the mark landed,
+so that form exits non-zero whenever it did not -- see EXPLAIN.
 """
 
 import os
@@ -15,41 +23,139 @@ import fleetlib  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
+EXPLAIN = """\
+fleet-fail -- turn this agent's slot red on the operator's deck, or clear it.
+
+Usage:  fleet-fail                  mark the slot you are running in failed
+        fleet-fail --clear          return that slot to idle
+        fleet-fail <slot>           mark a slot by index
+        fleet-fail --clear <slot>   clear a slot by index
+        fleet-fail --explain        print this
+
+You have just watched something fail -- a suite, a build, a check. Run
+`fleet-fail` with no arguments. It works out which slot is yours by
+matching $ITERM_SESSION_ID against the sessions recorded in slots.json,
+and sets that slot's state to failed, which the deck draws red. You do
+not need to know your slot number, and you should not guess one.
+
+Clear it with `fleet-fail --clear`, also with no arguments, once the
+thing that failed passes again.
+
+Mark only a failure you actually observed. Red is the deck's one signal
+for "this session saw something break", and a red slot the operator
+cannot find a cause for is worse than no mark at all. The mark is a flag,
+not a report: still say in your reply what failed and why.
+
+Exit status of the no-argument forms:
+
+  0  your slot was found, and marked or cleared.
+  1  nothing was marked. Either $ITERM_SESSION_ID is unset or malformed
+     -- you are not in an iTerm2 session this deck tracks -- or no slot
+     claims it, or the slot it names has no session to mark. The reason
+     goes to stderr. Marking the wrong slot would lie to the operator
+     about a session that is fine, so on any doubt this marks nothing and
+     says so.
+
+The explicit `fleet-fail <slot>` form always exits 0, whether or not that
+slot exists. It is the form the deck itself calls and is deliberately
+quiet; the no-argument form is the one to use by hand.
+"""
+
+
+def explain():
+    return EXPLAIN
+
+
+def own_iterm_uuid():
+    """The addressable half of $ITERM_SESSION_ID, or "" if there is none.
+
+    iTerm exports w<win>t<tab>p<pane>:<uuid>; only the uuid is addressable,
+    and it is the half bin/fleet-emit records as `iterm_session`. Repeated
+    from fleet-emit:145 rather than shared: fleetlib is outside this
+    change's remit, and hoisting it there is the right home for both.
+    """
+    iterm = os.environ.get("ITERM_SESSION_ID", "")
+    return iterm.split(":", 1)[1] if ":" in iterm else ""
+
+
+def resolve_own_slot(data):
+    """This process's slot index, or None with the reason on stderr."""
+    uuid = own_iterm_uuid()
+    if not uuid:
+        sys.stderr.write("fleet-fail: no usable $ITERM_SESSION_ID, so this "
+                         "process cannot tell which slot it is; marked "
+                         "nothing\n")
+        return None
+    for slot in data.get("slots", []):
+        if slot.get("iterm_session") == uuid:
+            index = slot.get("index")
+            if isinstance(index, int):
+                return index
+    sys.stderr.write("fleet-fail: no slot on the deck claims iTerm session "
+                     "{}; marked nothing\n".format(uuid))
+    return None
+
+
+def reconcile():
+    if os.environ.get("FLEET_SKIP_RECONCILE") == "1":
+        return
+    try:
+        subprocess.run([sys.executable, str(HERE / "fleet-reconcile")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10)
+    except subprocess.TimeoutExpired:
+        fleetlib.log("fleet-fail: fleet-reconcile timed out after 10s")
+    except OSError as err:
+        fleetlib.log("fleet-fail: fleet-reconcile failed: {!r}".format(err))
+
 
 def main(argv):
     args = argv[1:]
+    if args and args[0] == "--explain":
+        sys.stdout.write(explain())
+        return 0
+
     new_state = "failed"
     if args and args[0] == "--clear":
         new_state = "idle"
         args = args[1:]
-    if not args:
-        return 0
-    try:
-        index = int(args[0])
-    except ValueError:
-        return 0
 
     data = fleetlib.read_json(fleetlib.slots_path(), {}) or {}
+
+    # Self-resolution is the agent-facing path, and it is the only one that
+    # reports failure. An agent that has just watched a suite fail must not
+    # be left believing the deck now says so when it does not.
+    self_resolved = not args
+    if self_resolved:
+        index = resolve_own_slot(data)
+        if index is None:
+            return 1
+    else:
+        try:
+            index = int(args[0])
+        except ValueError:
+            return 0
+
     matches = [s for s in data.get("slots", []) if s.get("index") == index]
     if not matches or not matches[0].get("session_id"):
+        if self_resolved:
+            sys.stderr.write("fleet-fail: slot {} has no session to mark; "
+                             "marked nothing\n".format(index))
+            return 1
         return 0
 
     path = fleetlib.sessions_dir() / "{}.json".format(matches[0]["session_id"])
     session = fleetlib.read_json(path)
     if not isinstance(session, dict):
+        if self_resolved:
+            sys.stderr.write("fleet-fail: slot {}'s session record is missing "
+                             "or unreadable; marked nothing\n".format(index))
+            return 1
         return 0
     session["state"] = new_state
     fleetlib.write_json_atomic(path, session)
 
-    if os.environ.get("FLEET_SKIP_RECONCILE") != "1":
-        try:
-            subprocess.run([sys.executable, str(HERE / "fleet-reconcile")],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=10)
-        except subprocess.TimeoutExpired:
-            fleetlib.log("fleet-fail: fleet-reconcile timed out after 10s")
-        except OSError as err:
-            fleetlib.log("fleet-fail: fleet-reconcile failed: {!r}".format(err))
+    reconcile()
     return 0
 
 
